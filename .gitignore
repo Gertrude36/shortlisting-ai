@@ -1,0 +1,28 @@
+# Python virtual environment
+shortlisting/
+
+# Node modules
+node_modules/
+frontend/node_modules/
+
+# Environment files
+.env
+backend/.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Test files
+backend/testEmail.js
+backend/testOcr.js
+
+# Build
+frontend/dist/
+frontend/build/
+
+# Logs
+*.log
+
+backend/poppler-25.12.0/
