@@ -114,15 +114,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-# ✅ FIX: Removed trailing slashes from allow_origins — trailing slashes
-#         cause CORS to fail because the browser sends the origin without
-#         a trailing slash and it won't match "https://example.com/"
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX 1: CORS — allow both production Vercel URL and local dev ports.
+#    Read allowed origins from ALLOWED_ORIGINS env var on Render so you can
+#    add preview URLs without redeploying the backend.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DEFAULT_ORIGINS = ",".join([
+    "https://shortlisting-ai.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+])
+
+_raw_origins = os.getenv("ALLOWED_ORIGINS", _DEFAULT_ORIGINS)
+ALLOWED_ORIGINS: list[str] = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = [
-        "https://shortlisting-ai.vercel.app",
-        "https://shortlisting-ai.onrender.com",
-    ],
+    allow_origins     = ALLOWED_ORIGINS,
     allow_credentials = True,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
@@ -264,6 +275,13 @@ def root():
 def health():
     return {"status": "ok"}
 
+# ✅ FIX 2: Added /wake endpoint so the frontend can ping the backend
+#    on page load to wake it up from Render's free-tier sleep (cold start).
+@app.get("/wake", tags=["health"])
+def wake():
+    """Lightweight endpoint used by the frontend to wake the backend from sleep."""
+    return {"status": "awake"}
+
 @app.get("/hybridaction/{path:path}", tags=["health"])
 async def ignore_tracker(path: str):
     return {}
@@ -336,8 +354,6 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
     if user:
         reset_token  = create_reset_token(user.email)
-        # ✅ FIX: Uses FRONTEND_URL env var — must be set on Render to
-        #         https://shortlisting-ai.vercel.app (no trailing slash)
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
         reset_link   = f"{frontend_url}/reset-password?token={reset_token}"
 
