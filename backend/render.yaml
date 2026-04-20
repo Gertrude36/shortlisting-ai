@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: shortlisting-ai
+    env: python
+    # ✅ Install system dependencies (tesseract + poppler) before pip install
+    buildCommand: apt-get install -y tesseract-ocr poppler-utils && pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: TESSERACT_CMD
+        value: tesseract
+      - key: POPPLER_PATH
+        value: ""
+      - key: FRONTEND_URL
+        value: https://shortlisting-ai.vercel.app
+      - key: HF_HUB_DISABLE_IMPLICIT_TOKEN
+        value: "1"
+      - key: TRANSFORMERS_VERBOSITY
+        value: error
+      - key: HF_HUB_VERBOSITY
+        value: error
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"

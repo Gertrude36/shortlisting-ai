@@ -47,7 +47,7 @@ from auth import (
     create_reset_token, verify_reset_token,
     get_current_user, require_hr, require_applicant,
 )
-from email_utils         import send_reset_email          # ✅ REAL EMAIL
+from email_utils         import send_reset_email
 from shortlisting_engine import predict
 from document_verifier   import verify_documents, pre_submission_check
 from ocr_utils           import extract_document_text
@@ -114,9 +114,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+# ✅ FIX: Removed trailing slashes from allow_origins — trailing slashes
+#         cause CORS to fail because the browser sends the origin without
+#         a trailing slash and it won't match "https://example.com/"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["https://shortlisting-ai.vercel.app/", "https://shortlisting-ai.onrender.com/"],
+    allow_origins     = [
+        "https://shortlisting-ai.vercel.app",
+        "https://shortlisting-ai.onrender.com",
+    ],
     allow_credentials = True,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
@@ -330,17 +336,17 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
     if user:
         reset_token  = create_reset_token(user.email)
+        # ✅ FIX: Uses FRONTEND_URL env var — must be set on Render to
+        #         https://shortlisting-ai.vercel.app (no trailing slash)
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
         reset_link   = f"{frontend_url}/reset-password?token={reset_token}"
 
-        # ✅ Send real email — defined in email_utils.py
         sent = send_reset_email(
             to_name    = user.full_name,
             to_email   = user.email,
             reset_link = reset_link,
         )
 
-        # If email sending failed, fall back to terminal so dev is never blocked
         if not sent:
             print("\n" + "═" * 60)
             print("  PASSWORD RESET — EMAIL FAILED, dev fallback below")
@@ -359,7 +365,6 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
 @app.post("/auth/reset-password", tags=["auth"])
 def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
-    # 1. Verify token
     email = verify_reset_token(payload.token)
     if not email:
         raise HTTPException(
@@ -367,12 +372,10 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
             detail="This reset link is invalid or has expired. Please request a new one.",
         )
 
-    # 2. Find user
     user = db.query(User).filter(User.email == email).first()
     if not user:
         raise HTTPException(status_code=400, detail="No account found for this reset link.")
 
-    # 3. Validate new password strength
     unmet = _validate_password_strength(payload.new_password)
     if unmet:
         raise HTTPException(
@@ -380,7 +383,6 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
             detail="Password must contain: " + ", ".join(unmet),
         )
 
-    # 4. Update password
     user.hashed_password = hash_password(payload.new_password)
     db.add(user)
     db.commit()
