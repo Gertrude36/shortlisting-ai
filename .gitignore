@@ -25,4 +25,24 @@ frontend/build/
 # Logs
 *.log
 
+# Poppler binary
 backend/poppler-25.12.0/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqbpro
+
+# Uploads folder
+uploads/
+backend/uploads/
+
+# ML model images / analysis plots
+*.png
+
+# Jupyter notebooks (optional - remove if you want to keep them)
+*.ipynb
+
+# Package lock (optional)
+package-lock.json
