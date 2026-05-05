@@ -9,6 +9,10 @@
  * ✅ FIX 2 — Never set Content-Type manually on axios instance.
  *             For FormData, axios auto-sets multipart/form-data + boundary.
  *             Overriding it removes the boundary and breaks file uploads.
+ *
+ * ✅ FIX 3 — Wake-up ping: Render free tier sleeps after 15 min of inactivity.
+ *             On app load, we silently ping /wake so the backend is ready
+ *             before the user makes a real request.
  */
 
 import axios from 'axios'
@@ -22,6 +26,14 @@ const api = axios.create({
   //    - FormData     → Content-Type: multipart/form-data; boundary=----xyz
   withCredentials: false,
 })
+
+// ── Wake up Render backend on app load (prevents cold-start delays) ──────────
+// Only runs in production (when VITE_API_URL is set)
+if (import.meta.env.VITE_API_URL) {
+  axios.get(`${BACKEND}/wake`).catch(() => {
+    // Silently ignore — this is just a warm-up ping
+  })
+}
 
 // ── Request interceptor: attach JWT token ────────────────────────────────────
 api.interceptors.request.use(
