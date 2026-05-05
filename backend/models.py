@@ -2,19 +2,20 @@
 backend/models.py
 ────────────────────────────────────────────────────────────────
 FIXES APPLIED:
-  ✅ FIX 1 (CRITICAL) — Application.submitted_at now defaults to
-     None instead of datetime.now(). The old default meant every
-     draft was immediately stamped as "submitted", making it visible
-     to HR before the applicant clicked Submit. Now drafts have
-     submitted_at=NULL and are only stamped when /finalize is called.
+  ✅ FIX 1 (CRITICAL) — Application.submitted_at defaults to None.
+     Drafts have submitted_at=NULL and are only stamped when the
+     applicant calls POST /applications/{id}/finalize.
 
-  ✅ FIX 2 — All Column(DateTime, default=datetime.utcnow) replaced
-     with default=lambda: datetime.now(timezone.utc).
-     datetime.utcnow() is deprecated in Python 3.12+ and will be
-     removed in a future version.
+  ✅ FIX 2 — All DateTime defaults use lambda: datetime.now(timezone.utc).
+     datetime.utcnow() is deprecated in Python 3.12+.
 
   ✅ FIX 3 — cascade="all, delete-orphan" on Job.applications and
      Application.documents ensures DB integrity on deletion.
+
+  ✅ FIX 4 (NEW) — PostgreSQL compatibility:
+     - SAEnum now uses native_enum=False so enums work on both
+       SQLite and PostgreSQL without requiring CREATE TYPE migrations.
+     - Text columns used for long fields (no VARCHAR length limits).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
-# ── Enumerations ─────────────────────────────────────────────────────────────
+# ── Enumerations ──────────────────────────────────────────────────────────────
 
 class UserRole(str, enum.Enum):
     applicant = "applicant"
@@ -55,11 +56,15 @@ class User(Base):
     __tablename__ = "users"
 
     id              = Column(Integer, primary_key=True, index=True)
-    full_name       = Column(String,  nullable=False)
-    email           = Column(String,  unique=True, index=True, nullable=False)
-    hashed_password = Column(String,  nullable=False)
-    role            = Column(SAEnum(UserRole), nullable=False, default=UserRole.applicant)
-    created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    full_name       = Column(String(255), nullable=False)
+    email           = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+
+    # ✅ FIX 4: native_enum=False stores the value as a plain VARCHAR,
+    #    which works identically on SQLite and PostgreSQL without
+    #    requiring a separate CREATE TYPE statement.
+    role       = Column(SAEnum(UserRole, native_enum=False), nullable=False, default=UserRole.applicant)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     applications = relationship("Application", back_populates="applicant")
 
@@ -68,35 +73,34 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id                        = Column(Integer, primary_key=True, index=True)
-    title                     = Column(String, nullable=False, index=True)
-    description               = Column(Text,   nullable=True)
+    title                     = Column(String(255), nullable=False, index=True)
+    description               = Column(Text, nullable=True)
 
     # Rich description fields
-    location                  = Column(String, nullable=True)
-    employment_type           = Column(String, nullable=True)
-    salary_range              = Column(String, nullable=True)
-    responsibilities          = Column(Text,   nullable=True)
-    preferred_qualifications  = Column(Text,   nullable=True)
-    about_role                = Column(Text,   nullable=True)
+    location                  = Column(String(255), nullable=True)
+    employment_type           = Column(String(100), nullable=True)
+    salary_range              = Column(String(100), nullable=True)
+    responsibilities          = Column(Text, nullable=True)
+    preferred_qualifications  = Column(Text, nullable=True)
+    about_role                = Column(Text, nullable=True)
 
     # Shortlisting criteria
-    required_education_levels = Column(String, nullable=False, default="Bachelor's")
-    required_fields           = Column(String, nullable=False, default="")
+    required_education_levels = Column(String(255), nullable=False, default="Bachelor's")
+    required_fields           = Column(String(255), nullable=False, default="")
     required_min_experience   = Column(Integer, default=0)
     required_max_experience   = Column(Integer, default=20)
-    required_skills           = Column(Text,   nullable=False, default="")
-    required_certifications   = Column(Text,   nullable=True)
+    required_skills           = Column(Text, nullable=False, default="")
+    required_certifications   = Column(Text, nullable=True)
 
     # Additional fields
-    job_level       = Column(String,  nullable=True)
+    job_level       = Column(String(100), nullable=True)
     number_of_posts = Column(Integer, nullable=True)
-    deadline        = Column(DateTime, nullable=True)
+    deadline        = Column(DateTime(timezone=True), nullable=True)
 
     is_active  = Column(Boolean, default=True)
     created_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # cascade ensures Applications (and their Documents) are deleted with the Job
     applications = relationship(
         "Application", back_populates="job", cascade="all, delete-orphan"
     )
@@ -105,36 +109,33 @@ class Job(Base):
 class Application(Base):
     __tablename__ = "applications"
 
-    id               = Column(Integer, primary_key=True, index=True)
-    applicant_id     = Column(Integer, ForeignKey("users.id"), nullable=False)
-    job_id           = Column(Integer, ForeignKey("jobs.id"),  nullable=False)
+    id           = Column(Integer, primary_key=True, index=True)
+    applicant_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    job_id       = Column(Integer, ForeignKey("jobs.id"),  nullable=False)
 
-    address          = Column(String, nullable=True)
-    phone            = Column(String, nullable=True)
-    date_of_birth    = Column(String, nullable=True)
-    gender           = Column(String, nullable=False)
-    education_level  = Column(String, nullable=False)
-    field_of_study   = Column(String, nullable=False)
+    address          = Column(String(255), nullable=True)
+    phone            = Column(String(50),  nullable=True)
+    date_of_birth    = Column(String(20),  nullable=True)
+    gender           = Column(String(50),  nullable=False)
+    education_level  = Column(String(100), nullable=False)
+    field_of_study   = Column(String(255), nullable=False)
     graduation_year  = Column(Integer, nullable=False)
     experience_years = Column(Integer, default=0)
-    skills           = Column(Text,   nullable=False)
-    certifications   = Column(Text,   nullable=True)
+    skills           = Column(Text, nullable=False)
+    certifications   = Column(Text, nullable=True)
 
-    decision         = Column(SAEnum(DecisionStatus), default=DecisionStatus.pending)
-    ai_score         = Column(Float,   nullable=True)
-    ai_reason        = Column(Text,    nullable=True)
-    doc_verified     = Column(Boolean, default=False)
+    decision     = Column(SAEnum(DecisionStatus, native_enum=False), default=DecisionStatus.pending)
+    ai_score     = Column(Float,   nullable=True)
+    ai_reason    = Column(Text,    nullable=True)
+    doc_verified = Column(Boolean, default=False)
 
-    # ✅ FIX 1 (CRITICAL): default=None means new applications are DRAFTS.
-    # submitted_at is only set when the applicant calls POST /applications/{id}/finalize.
-    # Previously this defaulted to datetime.now(timezone.utc), which meant every draft
-    # was immediately stamped as "submitted" and appeared in the HR dashboard.
-    submitted_at   = Column(DateTime, nullable=True, default=None)
-    shortlisted_at = Column(DateTime, nullable=True)
+    # ✅ FIX 1 (CRITICAL): default=None — new applications are DRAFTS.
+    # submitted_at is only set when /finalize is called.
+    submitted_at   = Column(DateTime(timezone=True), nullable=True, default=None)
+    shortlisted_at = Column(DateTime(timezone=True), nullable=True)
 
     applicant = relationship("User",        back_populates="applications")
     job       = relationship("Job",         back_populates="applications")
-    # cascade ensures Documents are deleted with the Application
     documents = relationship(
         "Document", back_populates="application", cascade="all, delete-orphan"
     )
@@ -145,10 +146,10 @@ class Document(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     application_id = Column(Integer, ForeignKey("applications.id"), nullable=False)
-    doc_type       = Column(SAEnum(DocumentType), nullable=False)
-    filename       = Column(String, nullable=False)
-    original_name  = Column(String, nullable=True)
-    file_path      = Column(String, nullable=False)
-    uploaded_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    doc_type       = Column(SAEnum(DocumentType, native_enum=False), nullable=False)
+    filename       = Column(String(255), nullable=False)
+    original_name  = Column(String(255), nullable=True)
+    file_path      = Column(String(512), nullable=False)
+    uploaded_at    = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     application = relationship("Application", back_populates="documents")

@@ -1,23 +1,5 @@
 """
 backend/main.py
-
-⚠️  IMPORTANT — DATABASE ON RENDER FREE TIER:
-    Render's free tier uses ephemeral storage. This means your SQLite database
-    file (shortlisting.db) is DELETED every time Render restarts or redeploys.
-    
-    To keep your data permanently, you have two options:
-    
-    OPTION A (Recommended — Free):
-      Use Render's free PostgreSQL database add-on:
-      1. Go to Render Dashboard → New → PostgreSQL
-      2. Copy the "Internal Database URL"
-      3. Set it as DATABASE_URL in your Render environment variables
-      4. pip install psycopg2-binary (add to requirements.txt)
-      5. Update database.py to use DATABASE_URL (see bottom of this file)
-
-    OPTION B (Quick but limited):
-      Keep SQLite but accept that data resets on each deploy.
-      Fine for demos, not for real use.
 """
 
 from __future__ import annotations
@@ -133,14 +115,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS — allow both production Vercel URL and local dev ports.
+# ✅ FIX 1: CORS — allow both production Vercel URL and local dev ports.
 #    Read allowed origins from ALLOWED_ORIGINS env var on Render so you can
 #    add preview URLs without redeploying the backend.
-#
-#    ✅ ACTION REQUIRED on Render:
-#       Environment Variables → Add:
-#         Key:   ALLOWED_ORIGINS
-#         Value: https://shortlisting-ai.vercel.app,http://localhost:5173
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DEFAULT_ORIGINS = ",".join([
@@ -298,6 +275,8 @@ def root():
 def health():
     return {"status": "ok"}
 
+# ✅ FIX 2: Added /wake endpoint so the frontend can ping the backend
+#    on page load to wake it up from Render's free-tier sleep (cold start).
 @app.get("/wake", tags=["health"])
 def wake():
     """Lightweight endpoint used by the frontend to wake the backend from sleep."""
@@ -366,6 +345,11 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/auth/forgot-password", tags=["auth"])
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Always returns 200 whether or not the email exists (prevents user enumeration).
+    Sends a real password-reset email via SMTP when .env is configured.
+    Falls back to printing the link in the terminal if email is not configured.
+    """
     user = db.query(User).filter(User.email == payload.email).first()
 
     if user:
@@ -1176,43 +1160,3 @@ def reshortlist_all_for_job(
         "not_shortlisted": not_shortlisted,
         "results":         results,
     }
-
-
-# ═══════════════════════════════════════════════════════════════
-# DATABASE NOTE — Read this if data keeps disappearing!
-# ═══════════════════════════════════════════════════════════════
-#
-# If you're using SQLite (default), your data is stored in a local file
-# (e.g. shortlisting.db). On Render's free tier, this file is DELETED
-# every time your service restarts or redeploys.
-#
-# ✅ PERMANENT FIX — Use Render's free PostgreSQL:
-#
-# 1. Render Dashboard → New → PostgreSQL (free tier)
-# 2. Copy the "Internal Database URL"
-# 3. Add to Render env vars:
-#      DATABASE_URL = postgresql://user:pass@host/dbname
-# 4. Add to requirements.txt:
-#      psycopg2-binary
-# 5. Update database.py:
-#
-#   import os
-#   from sqlalchemy import create_engine
-#   from sqlalchemy.orm import sessionmaker, declarative_base
-#
-#   DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./shortlisting.db")
-#
-#   # Fix for Render's postgres:// vs postgresql:// prefix
-#   if DATABASE_URL.startswith("postgres://"):
-#       DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-#
-#   engine = create_engine(DATABASE_URL)
-#   SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-#   Base = declarative_base()
-#
-#   def get_db():
-#       db = SessionLocal()
-#       try:
-#           yield db
-#       finally:
-#           db.close()

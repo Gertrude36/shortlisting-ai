@@ -1,12 +1,17 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import {
+  createBrowserRouter,
+  RouterProvider,
+  Navigate,
+  Outlet,
+} from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { AuthProvider, useAuth } from './context/AuthContext'
 
 import HomePage           from './pages/HomePage'
 import Login              from './pages/Login'
 import Register           from './pages/Register'
-import ForgotPassword     from './pages/ForgotPassword'   // ✅ NEW
-import ResetPassword      from './pages/ResetPassword'    // ✅ NEW
+import ForgotPassword     from './pages/ForgotPassword'
+import ResetPassword      from './pages/ResetPassword'
 import ApplyPage          from './pages/ApplyPage'
 import ApplicantDashboard from './pages/ApplicantDashboard'
 import HRDashboard        from './pages/HRDashboard'
@@ -14,7 +19,7 @@ import HRJobCreate        from './pages/HRJobCreate'
 import HRReport           from './pages/HRReport'
 
 // ── Protected route wrapper ──────────────────────────────────
-function ProtectedRoute({ children, requiredRole }) {
+function ProtectedRoute({ requiredRole }) {
   const { user, loading } = useAuth()
 
   if (loading) {
@@ -28,7 +33,6 @@ function ProtectedRoute({ children, requiredRole }) {
         background: 'var(--c-surface)',
         gap: 16,
       }}>
-        {/* Branded logo mark while loading */}
         <div style={{
           width: 52,
           height: 52,
@@ -69,97 +73,98 @@ function ProtectedRoute({ children, requiredRole }) {
 
   if (!user) return <Navigate to="/login" replace />
   if (requiredRole && user.role !== requiredRole) return <Navigate to="/" replace />
-  return children
+  return <Outlet />
 }
 
-// ── Routes ───────────────────────────────────────────────────
-function AppRoutes() {
+// ── Root layout — provides Toaster to all routes ─────────────
+function RootLayout() {
   return (
-    <Routes>
-      {/* Public */}
-      <Route path="/"                element={<HomePage />} />
-      <Route path="/login"           element={<Login />} />
-      <Route path="/register"        element={<Register />} />
-      <Route path="/forgot-password" element={<ForgotPassword />} />  {/* ✅ NEW */}
-      <Route path="/reset-password"  element={<ResetPassword />} />   {/* ✅ NEW */}
-
-      {/* Applicant only */}
-      <Route path="/apply/:jobId" element={
-        <ProtectedRoute requiredRole="applicant">
-          <ApplyPage />
-        </ProtectedRoute>
-      } />
-      <Route path="/applicant" element={
-        <ProtectedRoute requiredRole="applicant">
-          <ApplicantDashboard />
-        </ProtectedRoute>
-      } />
-      {/* /dashboard alias so existing links still work */}
-      <Route path="/dashboard" element={
-        <ProtectedRoute requiredRole="applicant">
-          <ApplicantDashboard />
-        </ProtectedRoute>
-      } />
-
-      {/* HR only */}
-      <Route path="/hr" element={
-        <ProtectedRoute requiredRole="hr">
-          <HRDashboard />
-        </ProtectedRoute>
-      } />
-      <Route path="/hr/jobs/new" element={
-        <ProtectedRoute requiredRole="hr">
-          <HRJobCreate />
-        </ProtectedRoute>
-      } />
-      <Route path="/hr/report/:jobId" element={
-        <ProtectedRoute requiredRole="hr">
-          <HRReport />
-        </ProtectedRoute>
-      } />
-
-      {/* Catch-all */}
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          duration: 4000,
+          style: {
+            fontFamily: "'EB Garamond', 'Times New Roman', Georgia, serif",
+            fontSize:   '15px',
+            borderRadius: '3px',
+            border: '1.5px solid #cdd3e8',
+            boxShadow: '0 6px 22px rgba(10,15,40,.13), 0 2px 7px rgba(10,15,40,.07)',
+            background: '#ffffff',
+            color: '#0b0f1a',
+            padding: '12px 16px',
+            maxWidth: 380,
+          },
+          success: {
+            iconTheme: { primary: '#0a7c3e', secondary: '#ffffff' },
+            style:     { borderLeft: '4px solid #0a7c3e' },
+          },
+          error: {
+            iconTheme: { primary: '#c41a1a', secondary: '#ffffff' },
+            style:     { borderLeft: '4px solid #c41a1a' },
+          },
+          loading: {
+            iconTheme: { primary: '#1a56db', secondary: '#deeaff' },
+            style:     { borderLeft: '4px solid #1a56db' },
+          },
+        }}
+      />
+      <Outlet />
+    </>
   )
 }
+
+// ── Router with v7 future flags ───────────────────────────────
+const router = createBrowserRouter(
+  [
+    {
+      element: <RootLayout />,
+      children: [
+        // Public
+        { path: '/',                element: <HomePage /> },
+        { path: '/login',           element: <Login /> },
+        { path: '/register',        element: <Register /> },
+        { path: '/forgot-password', element: <ForgotPassword /> },
+        { path: '/reset-password',  element: <ResetPassword /> },
+
+        // Applicant-only
+        {
+          element: <ProtectedRoute requiredRole="applicant" />,
+          children: [
+            { path: '/apply/:jobId', element: <ApplyPage /> },
+            { path: '/applicant',    element: <ApplicantDashboard /> },
+            { path: '/dashboard',    element: <ApplicantDashboard /> },
+          ],
+        },
+
+        // HR-only
+        {
+          element: <ProtectedRoute requiredRole="hr" />,
+          children: [
+            { path: '/hr',               element: <HRDashboard /> },
+            { path: '/hr/jobs/new',      element: <HRJobCreate /> },
+            { path: '/hr/report/:jobId', element: <HRReport /> },
+          ],
+        },
+
+        // Catch-all
+        { path: '*', element: <Navigate to="/" replace /> },
+      ],
+    },
+  ],
+  {
+    future: {
+      v7_startTransition:   true,  // fixes: React.startTransition warning
+      v7_relativeSplatPath: true,  // fixes: relative splat path warning
+    },
+  }
+)
 
 // ── App root ─────────────────────────────────────────────────
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <Toaster
-          position="top-right"
-          toastOptions={{
-            duration: 4000,
-            style: {
-              fontFamily: "'EB Garamond', 'Times New Roman', Georgia, serif",
-              fontSize:   '15px',
-              borderRadius: '3px',
-              border: '1.5px solid #cdd3e8',
-              boxShadow: '0 6px 22px rgba(10,15,40,.13), 0 2px 7px rgba(10,15,40,.07)',
-              background: '#ffffff',
-              color: '#0b0f1a',
-              padding: '12px 16px',
-              maxWidth: 380,
-            },
-            success: {
-              iconTheme: { primary: '#0a7c3e', secondary: '#ffffff' },
-              style:     { borderLeft: '4px solid #0a7c3e' },
-            },
-            error: {
-              iconTheme: { primary: '#c41a1a', secondary: '#ffffff' },
-              style:     { borderLeft: '4px solid #c41a1a' },
-            },
-            loading: {
-              iconTheme: { primary: '#1a56db', secondary: '#deeaff' },
-              style:     { borderLeft: '4px solid #1a56db' },
-            },
-          }}
-        />
-        <AppRoutes />
-      </BrowserRouter>
+      <RouterProvider router={router} />
     </AuthProvider>
   )
 }

@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json.schemastore.org/package.json",
   "name": "shortlisting-frontend",
   "private": true,
   "version": "1.0.0",

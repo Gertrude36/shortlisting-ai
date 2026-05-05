@@ -1,3 +1,11 @@
+/**
+ * frontend/src/pages/Login.jsx
+ *
+ * FIX: Applicants were navigated to /jobs after login, but that route does
+ * not exist in App.jsx (catch-all redirects to /). Fixed to use /applicant
+ * which is the correct protected route for applicants.
+ */
+
 import { useState } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
@@ -35,8 +43,11 @@ export default function Login() {
       })
       login(data)
       toast.success(`Welcome back, ${data.full_name || 'there'}!`)
+
+      // FIX: /jobs does not exist. Route applicants to /applicant.
       if (data.role === 'hr') navigate('/hr', { replace: true })
-      else navigate('/jobs', { replace: true })
+      else navigate('/applicant', { replace: true })
+
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Invalid email or password.')
     } finally {
@@ -185,7 +196,6 @@ export default function Login() {
                 </div>
 
                 <div>
-                  {/* ✅ NEW — Label row with "Forgot password?" link on the right */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7 }}>
                     <label style={{ fontSize: '.9rem', fontWeight: 700, color: '#374151' }}>
                       Password

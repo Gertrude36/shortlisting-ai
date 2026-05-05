@@ -1,53 +1,70 @@
 /**
  * frontend/src/api/axios.js
  *
- * ✅ FIX 1 — VITE_API_URL must be set on Vercel as an environment variable.
- *             Value: https://shortlisting-ai.onrender.com
- *             Without it, every API call silently hits localhost and fails,
- *             causing the frontend to appear blank.
- *
- * ✅ FIX 2 — Never set Content-Type manually on axios instance.
- *             For FormData, axios auto-sets multipart/form-data + boundary.
- *             Overriding it removes the boundary and breaks file uploads.
- *
- * ✅ FIX 3 — Wake-up ping: Render free tier sleeps after 15 min of inactivity.
- *             On app load, we silently ping /wake so the backend is ready
- *             before the user makes a real request.
+ * FIXES:
+ * 1. In dev (no VITE_API_URL), baseURL is '' so all requests go through
+ *    the Vite proxy at /api/* → avoids CORS entirely in local development.
+ * 2. In production (VITE_API_URL is set on Vercel), requests go directly
+ *    to the backend — CORS must be allowed by the backend for that origin.
+ * 3. Request interceptor skips attaching Authorization header on PUBLIC_ROUTES
+ *    so stale tokens never cause a 401 on login/register.
+ * 4. Wake-up ping only fires in production where VITE_API_URL exists.
  */
 
 import axios from 'axios'
 
-export const BACKEND = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const IS_PROD   = Boolean(import.meta.env.VITE_API_URL)
+export const BACKEND = import.meta.env.VITE_API_URL || ''
 
+// In dev  → baseURL is '' so axios hits '/api/auth/login' → Vite proxy forwards it
+// In prod → baseURL is 'https://shortlisting-ai.onrender.com'
 const api = axios.create({
-  baseURL: BACKEND,
-  // ✅ DO NOT set Content-Type here — axios handles it automatically:
-  //    - JSON body    → Content-Type: application/json
-  //    - FormData     → Content-Type: multipart/form-data; boundary=----xyz
-  withCredentials: false,
+  baseURL:          BACKEND,
+  withCredentials:  false,
 })
 
-// ── Wake up Render backend on app load (prevents cold-start delays) ──────────
-// Only runs in production (when VITE_API_URL is set)
-if (import.meta.env.VITE_API_URL) {
+// ── Wake up Render backend on app load (production only) ─────────────────────
+if (IS_PROD) {
   axios.get(`${BACKEND}/wake`).catch(() => {
     // Silently ignore — this is just a warm-up ping
   })
 }
 
-// ── Request interceptor: attach JWT token ────────────────────────────────────
+// ── Auth keys to clear on logout / 401 ───────────────────────────────────────
+const AUTH_KEYS = ['token', 'role', 'userId', 'fullName', 'nationalId', 'location', 'phone', 'documents']
+
+export function clearAuthStorage() {
+  AUTH_KEYS.forEach(key => localStorage.removeItem(key))
+  AUTH_KEYS.forEach(key => sessionStorage.removeItem(key))
+}
+
+// ── Public routes — no Authorization header, no 401 redirect ─────────────────
+const PUBLIC_ROUTES = [
+  '/auth/login',
+  '/auth/register',
+  '/auth/forgot-password',
+  '/auth/reset-password',
+  '/wake',
+]
+
+const isPublic = (url = '') => PUBLIC_ROUTES.some(r => url.includes(r))
+
+// ── Request interceptor: attach JWT (skip public routes) ─────────────────────
 api.interceptors.request.use(
   (config) => {
-    const token =
-      localStorage.getItem('token') ||
-      sessionStorage.getItem('token')
+    // Don't attach a stale token to public routes — it causes 401s on login
+    if (!isPublic(config.url)) {
+      const token =
+        localStorage.getItem('token') ||
+        sessionStorage.getItem('token')
 
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
     }
 
-    // ✅ CRITICAL: Never set Content-Type for FormData requests.
-    // Axios detects FormData and sets the correct multipart header + boundary.
+    // CRITICAL: Never set Content-Type for FormData — axios sets it automatically
+    // with the correct multipart boundary.
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type']
     }
@@ -57,13 +74,12 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 )
 
-// ── Response interceptor: handle auth errors globally ────────────────────────
+// ── Response interceptor: handle 401s globally ───────────────────────────────
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      sessionStorage.removeItem('token')
+    if (error.response?.status === 401 && !isPublic(error.config?.url)) {
+      clearAuthStorage()
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'
       }
