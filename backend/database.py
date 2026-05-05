@@ -1,80 +1,69 @@
 """
 backend/database.py
-────────────────────────────────────────────────────────────────
-SQLAlchemy engine + session factory.
 
-FIXES APPLIED:
-  ✅ FIX 1 — declarative_base import moved to sqlalchemy.orm
-     (sqlalchemy.ext.declarative is removed in SQLAlchemy 2.x).
+FIX: Supports both PostgreSQL (Render production) and SQLite (local dev).
 
-  ✅ FIX 2 — PostgreSQL support added via DATABASE_URL env var.
-     On Render, set DATABASE_URL to your Postgres connection string.
-     Falls back to SQLite for local development when DATABASE_URL
-     is not set.
+WHY THIS WAS BROKEN:
+  SQLite writes to a local file (capstone.db). On Render's free tier the
+  filesystem is ephemeral — it resets on every deploy, making the production
+  database permanently empty (no jobs, no users, nothing).
 
-  ✅ FIX 3 — WAL mode + pragmas applied only for SQLite connections.
-     PostgreSQL does not need or support these pragmas.
+HOW TO FIX ON RENDER:
+  1. Add a free PostgreSQL database on Render:
+       Render dashboard → New → PostgreSQL → Free plan → Create
+  2. Copy the "Internal Database URL" and add it as an env var on your
+     backend service:
+       Key:   DATABASE_URL
+       Value: postgresql://user:pass@host/dbname   ← paste Render's URL
+  3. Redeploy. The backend will auto-create all tables in PostgreSQL.
 
-  ✅ FIX 4 — autoflush=True (SQLAlchemy default) retained so pending
-     ORM writes are flushed before queries in the same session.
+LOCAL DEV (no change needed):
+  DATABASE_URL is not set → falls back to SQLite (capstone.db) as before.
 """
 
+from __future__ import annotations
+
 import os
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Database URL ──────────────────────────────────────────────────────────────
-# On Render: set DATABASE_URL as an environment variable pointing to
-# your Render PostgreSQL instance, e.g.:
-#   postgresql://user:password@host/dbname
-#
-# Locally: leave DATABASE_URL unset and SQLite will be used automatically.
+# ── Resolve database URL ──────────────────────────────────────────────────────
+DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./capstone.db")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./capstone.db")
-
-# Render gives Postgres URLs starting with "postgres://" but SQLAlchemy
-# requires "postgresql://" — fix it transparently.
+# Render (and some older services) still issue postgres:// URLs.
+# SQLAlchemy 1.4+ requires postgresql:// — fix it silently.
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-IS_SQLITE = DATABASE_URL.startswith("sqlite")
-
 # ── Engine ────────────────────────────────────────────────────────────────────
+_is_sqlite     = DATABASE_URL.startswith("sqlite")
+_connect_args  = {"check_same_thread": False} if _is_sqlite else {}
 
-if IS_SQLITE:
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},  # required for SQLite + FastAPI
-    )
-else:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,   # drops stale connections before use
-        pool_size=5,          # keep up to 5 connections open
-        max_overflow=10,      # allow up to 10 extra connections under load
-    )
+# For PostgreSQL on Render's free tier, keep the pool small so we don't
+# exhaust the 25-connection limit of a free Postgres instance.
+_pool_kwargs: dict = (
+    {}
+    if _is_sqlite
+    else {"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True}
+)
 
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=_connect_args,
+    **_pool_kwargs,
+)
 
-# ✅ SQLite-only pragmas (WAL mode + safe sync)
-if IS_SQLITE:
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragmas(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
+# ── Session ───────────────────────────────────────────────────────────────────
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-
-# ── Session + Base ────────────────────────────────────────────────────────────
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=True, bind=engine)
-
+# ── Base ──────────────────────────────────────────────────────────────────────
 Base = declarative_base()
 
 
+# ── Dependency ────────────────────────────────────────────────────────────────
 def get_db():
     """FastAPI dependency — yields a DB session and closes it after the request."""
     db = SessionLocal()
