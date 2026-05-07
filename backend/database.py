@@ -1,24 +1,25 @@
 """
 backend/database.py
 
-FIX: Supports both PostgreSQL (Render production) and SQLite (local dev).
+Supports PostgreSQL (Render production) and SQLite (local dev).
 
-WHY THIS WAS BROKEN:
-  SQLite writes to a local file (capstone.db). On Render's free tier the
-  filesystem is ephemeral — it resets on every deploy, making the production
-  database permanently empty (no jobs, no users, nothing).
+WHY DATA WAS LOST ON DEPLOY:
+  SQLite stores data in a local file (capstone.db). Render's free tier
+  has an ephemeral filesystem — it resets on every deploy/restart,
+  wiping all users, jobs, and applications.
 
-HOW TO FIX ON RENDER:
-  1. Add a free PostgreSQL database on Render:
-       Render dashboard → New → PostgreSQL → Free plan → Create
-  2. Copy the "Internal Database URL" and add it as an env var on your
-     backend service:
-       Key:   DATABASE_URL
-       Value: postgresql://user:pass@host/dbname   ← paste Render's URL
-  3. Redeploy. The backend will auto-create all tables in PostgreSQL.
+SOLUTION:
+  Use PostgreSQL on Render. Data lives in a persistent managed database
+  that survives all deploys and restarts.
 
-LOCAL DEV (no change needed):
+SETUP (one-time, takes 2 minutes):
+  The render.yaml in this project already creates a free PostgreSQL
+  database and links it automatically via the DATABASE_URL env var.
+  Just push to GitHub and Render will do the rest.
+
+LOCAL DEV:
   DATABASE_URL is not set → falls back to SQLite (capstone.db) as before.
+  No changes needed locally.
 """
 
 from __future__ import annotations
@@ -33,17 +34,16 @@ load_dotenv()
 # ── Resolve database URL ──────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./capstone.db")
 
-# Render (and some older services) still issue postgres:// URLs.
+# Render still issues postgres:// URLs in some cases.
 # SQLAlchemy 1.4+ requires postgresql:// — fix it silently.
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # ── Engine ────────────────────────────────────────────────────────────────────
-_is_sqlite     = DATABASE_URL.startswith("sqlite")
-_connect_args  = {"check_same_thread": False} if _is_sqlite else {}
+_is_sqlite    = DATABASE_URL.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
 
-# For PostgreSQL on Render's free tier, keep the pool small so we don't
-# exhaust the 25-connection limit of a free Postgres instance.
+# Keep pool small on Render free tier (max 25 connections)
 _pool_kwargs: dict = (
     {}
     if _is_sqlite

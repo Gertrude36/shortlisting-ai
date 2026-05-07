@@ -1,22 +1,79 @@
 services:
   - type: web
-    name: shortlisting-ai
+    name: shortlisting-ai-backend
     env: python
-    # ✅ Install system dependencies (tesseract + poppler) before pip install
+    region: oregon
+    plan: free
     buildCommand: apt-get install -y tesseract-ocr poppler-utils && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
-      - key: TESSERACT_CMD
-        value: tesseract
-      - key: POPPLER_PATH
-        value: ""
-      - key: FRONTEND_URL
-        value: https://shortlisting-ai.vercel.app
+      # ✅ Auto-linked from the PostgreSQL database below (no manual copy needed)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shortlisting-ai-db
+          property: connectionString
+
+      # ✅ Set these manually in Render Dashboard → Environment tab
+      - key: SECRET_KEY
+        sync: false
+
+      # ── Mail (matches your .env exactly) ─────────────────────────────────
+      - key: MAIL_SERVER
+        sync: false
+
+      - key: MAIL_PORT
+        sync: false
+
+      - key: MAIL_USERNAME
+        sync: false
+
+      - key: MAIL_PASSWORD
+        sync: false
+
+      - key: MAIL_FROM
+        sync: false
+
+      - key: MAIL_FROM_NAME
+        sync: false
+
+      - key: EMAIL_USER
+        sync: false
+
+      - key: EMAIL_PASS
+        sync: false
+
+      # ── HuggingFace ───────────────────────────────────────────────────────
+      - key: HF_TOKEN
+        sync: false
+
       - key: HF_HUB_DISABLE_IMPLICIT_TOKEN
         value: "1"
+
       - key: TRANSFORMERS_VERBOSITY
         value: error
+
       - key: HF_HUB_VERBOSITY
         value: error
+
       - key: TOKENIZERS_PARALLELISM
         value: "false"
+
+      # ── OCR ───────────────────────────────────────────────────────────────
+      - key: TESSERACT_CMD
+        value: tesseract
+
+      - key: POPPLER_PATH
+        value: ""
+
+      # ── CORS ──────────────────────────────────────────────────────────────
+      - key: FRONTEND_URL
+        value: https://shortlisting-ai.vercel.app
+
+      - key: ALLOWED_ORIGINS
+        value: "https://shortlisting-ai.vercel.app,http://localhost:5173,http://localhost:3000"
+
+# ✅ Free PostgreSQL — data persists across ALL deploys forever!
+databases:
+  - name: shortlisting-ai-db
+    plan: free
+    region: oregon
