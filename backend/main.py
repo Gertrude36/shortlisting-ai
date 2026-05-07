@@ -56,23 +56,81 @@ Base.metadata.create_all(bind=engine)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# One-time database migration
+# ✅ FIX: One-time database migration — compatible with BOTH SQLite and PostgreSQL
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_sqlite_db() -> bool:
+    return str(engine.url).startswith("sqlite")
+
+
 def ensure_job_columns():
+    """
+    Safely adds missing columns to the jobs table.
+    Works on both SQLite (local dev) and PostgreSQL (Render production).
+
+    KEY FIXES vs original:
+      1. Wraps each ALTER TABLE in its own try/except so a
+         'column already exists' error on one column doesn't abort the rest.
+      2. Uses database-agnostic DEFAULT expressions:
+           - SQLite : date('now', '+30 days')
+           - PostgreSQL : NOW() + INTERVAL '30 days'
+      3. UPDATE statements use the same dialect-aware date math.
+    """
+    use_sqlite = _is_sqlite_db()
+
     inspector        = inspect(engine)
     existing_columns = [col["name"] for col in inspector.get_columns("jobs")]
+
     with engine.connect() as conn:
+        # ── job_level ────────────────────────────────────────────────────────
         if "job_level" not in existing_columns:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN job_level VARCHAR"))
+            try:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN job_level VARCHAR"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+        # ── number_of_posts ──────────────────────────────────────────────────
         if "number_of_posts" not in existing_columns:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN number_of_posts INTEGER"))
+            try:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN number_of_posts INTEGER"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+        # ── deadline ─────────────────────────────────────────────────────────
         if "deadline" not in existing_columns:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN deadline DATETIME"))
-        conn.execute(text("UPDATE jobs SET job_level = 'Mid-Level' WHERE job_level IS NULL"))
-        conn.execute(text("UPDATE jobs SET number_of_posts = 1 WHERE number_of_posts IS NULL"))
-        conn.execute(text("UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"))
-        conn.commit()
+            try:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN deadline DATETIME"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+        # ── Backfill NULLs — dialect-aware date expressions ──────────────────
+        try:
+            conn.execute(text(
+                "UPDATE jobs SET job_level = 'Mid-Level' WHERE job_level IS NULL"
+            ))
+            conn.execute(text(
+                "UPDATE jobs SET number_of_posts = 1 WHERE number_of_posts IS NULL"
+            ))
+
+            if use_sqlite:
+                # SQLite date math
+                conn.execute(text(
+                    "UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"
+                ))
+            else:
+                # PostgreSQL date math
+                conn.execute(text(
+                    "UPDATE jobs SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL"
+                ))
+
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            print(f"[ensure_job_columns] Backfill warning (non-fatal): {exc}")
+
 
 ensure_job_columns()
 
@@ -115,7 +173,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1: CORS — allow both production Vercel URL and local dev ports.
+# ✅ CORS — allow both production Vercel URL and local dev ports.
 #    Read allowed origins from ALLOWED_ORIGINS env var on Render so you can
 #    add preview URLs without redeploying the backend.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +197,17 @@ app.add_middleware(
     allow_headers     = ["*"],
 )
 
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX: Upload directory — use /tmp on Render (writable), local 'uploads/' in dev
+#
+#    WARNING: Render's free tier has an ephemeral filesystem.
+#    Files uploaded to /tmp WILL be lost on redeploy/restart.
+#    For permanent document storage, integrate Cloudinary or AWS S3.
+#    See render.yaml comments for how to add a Render Disk (paid, $1/mo).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", _default_upload_dir)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
@@ -275,8 +343,6 @@ def root():
 def health():
     return {"status": "ok"}
 
-# ✅ FIX 2: Added /wake endpoint so the frontend can ping the backend
-#    on page load to wake it up from Render's free-tier sleep (cold start).
 @app.get("/wake", tags=["health"])
 def wake():
     """Lightweight endpoint used by the frontend to wake the backend from sleep."""

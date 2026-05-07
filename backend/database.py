@@ -25,7 +25,7 @@ LOCAL DEV:
 from __future__ import annotations
 
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
@@ -47,7 +47,12 @@ _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 _pool_kwargs: dict = (
     {}
     if _is_sqlite
-    else {"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True}
+    else {
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,   # ✅ FIX: recycle connections every 5 min to avoid stale connections
+    }
 )
 
 engine = create_engine(
@@ -55,6 +60,14 @@ engine = create_engine(
     connect_args=_connect_args,
     **_pool_kwargs,
 )
+
+# ✅ FIX: Enable WAL mode for SQLite to prevent locking issues in local dev
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
 
 # ── Session ───────────────────────────────────────────────────────────────────
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
