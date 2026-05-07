@@ -32,7 +32,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Resolve database URL ──────────────────────────────────────────────────────
-DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./capstone.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL: str = os.getenv(
+    "DATABASE_URL",
+    f"sqlite:///{os.path.join(BASE_DIR, 'capstone.db')}"
+)
 
 # Render still issues postgres:// URLs in some cases.
 # SQLAlchemy 1.4+ requires postgresql:// — fix it silently.

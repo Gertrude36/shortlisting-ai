@@ -1,8 +1,8 @@
 """
 backend/main.py
 """
-
 from __future__ import annotations
+from flask_cors import CORS
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
 import os
@@ -178,23 +178,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 #    add preview URLs without redeploying the backend.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DEFAULT_ORIGINS = ",".join([
+# ─────────────────────────────────────────────────────────────────────────────
+# CORS FIXED (Production + Render + Vercel safe)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALLOWED_ORIGINS = [
     "https://shortlisting-ai.vercel.app",
+    "https://shortlisting-ai.vercel.app/",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
-])
-
-_raw_origins = os.getenv("ALLOWED_ORIGINS", _DEFAULT_ORIGINS)
-ALLOWED_ORIGINS: list[str] = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()]
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ALLOWED_ORIGINS,
-    allow_credentials = True,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
