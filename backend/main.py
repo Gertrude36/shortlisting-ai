@@ -2,7 +2,6 @@
 backend/main.py
 """
 from __future__ import annotations
-from flask_cors import CORS
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
 import os
@@ -184,13 +183,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 ALLOWED_ORIGINS = [
     "https://shortlisting-ai.vercel.app",
-    "https://shortlisting-ai.vercel.app/",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
