@@ -66,14 +66,6 @@ def ensure_job_columns():
     """
     Safely adds missing columns to the jobs table.
     Works on both SQLite (local dev) and PostgreSQL (Render production).
-
-    KEY FIXES vs original:
-      1. Wraps each ALTER TABLE in its own try/except so a
-         'column already exists' error on one column doesn't abort the rest.
-      2. Uses database-agnostic DEFAULT expressions:
-           - SQLite : date('now', '+30 days')
-           - PostgreSQL : NOW() + INTERVAL '30 days'
-      3. UPDATE statements use the same dialect-aware date math.
     """
     use_sqlite = _is_sqlite_db()
 
@@ -115,12 +107,10 @@ def ensure_job_columns():
             ))
 
             if use_sqlite:
-                # SQLite date math
                 conn.execute(text(
                     "UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"
                 ))
             else:
-                # PostgreSQL date math
                 conn.execute(text(
                     "UPDATE jobs SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL"
                 ))
@@ -172,30 +162,65 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS — allow both production Vercel URL and local dev ports.
-#    Read allowed origins from ALLOWED_ORIGINS env var on Render so you can
-#    add preview URLs without redeploying the backend.
+# ✅ CORS FIX — Never returns an empty origins list.
+#
+#  Priority order:
+#    1. ALLOWED_ORIGINS env var  (comma-separated, set this on Render)
+#    2. Hard-coded production origins  (always present as a safe fallback)
+#
+#  To add a new Vercel preview URL without redeploying the backend, just
+#  update the ALLOWED_ORIGINS env var on Render and redeploy — no code change.
+#
+#  IMPORTANT: Do NOT use allow_origins=["*"] with allow_credentials=True —
+#  browsers block that combination. You must list origins explicitly.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CORS FIXED (Production + Render + Vercel safe)
-# ─────────────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").split(",")
+_HARDCODED_ORIGINS = [
+    # ── Production ──────────────────────────────────────────────────────────
+    "https://shortlisting-ai.vercel.app",
+    # ── Local development ────────────────────────────────────────────────────
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+def _build_allowed_origins() -> list[str]:
+    """
+    Merge hard-coded origins with any extra ones from the ALLOWED_ORIGINS env var.
+    Always returns a non-empty list so CORS is never accidentally disabled.
+    """
+    env_origins = [
+        o.strip()
+        for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
+        if o.strip()                     # skip empty strings
+        and o.strip().startswith("http") # skip malformed values
+    ]
+    merged = list(dict.fromkeys(_HARDCODED_ORIGINS + env_origins))  # deduplicate, preserve order
+    print(f"[CORS] Allowed origins: {merged}")
+    return merged
+
+ALLOWED_ORIGINS = _build_allowed_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != [""] else [],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins     = ALLOWED_ORIGINS,
+    allow_credentials = True,
+    allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers     = ["*"],
+    expose_headers    = ["*"],
+    max_age           = 600,   # cache preflight for 10 minutes
 )
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX: Upload directory — use /tmp on Render (writable), local 'uploads/' in dev
+# ✅ UPLOAD DIRECTORY FIX
+#    - Production (Render): /tmp/uploads  — writable, survives deploys on the
+#      same instance but is EPHEMERAL (lost on redeploy/restart).
+#    - Local dev (SQLite):  uploads/
 #
-#    WARNING: Render's free tier has an ephemeral filesystem.
-#    Files uploaded to /tmp WILL be lost on redeploy/restart.
-#    For permanent document storage, integrate Cloudinary or AWS S3.
-#    See render.yaml comments for how to add a Render Disk (paid, $1/mo).
+#  WARNING: Render free tier has no persistent disk.
+#  Uploaded files WILL be lost on every redeploy.
+#  For permanent storage integrate Cloudinary or AWS S3.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
