@@ -125,12 +125,17 @@ ensure_job_columns()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lifespan
+# ✅ FIX 1: Lifespan — with error handling so a failed ai_matcher
+#    does NOT crash the whole server on startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import ai_matcher  # noqa: F401
+    try:
+        import ai_matcher  # noqa: F401
+        print("[lifespan] ✅ ai_matcher loaded successfully.")
+    except Exception as e:
+        print(f"[lifespan] ⚠ ai_matcher failed to load (non-fatal): {e}")
     yield
 
 
@@ -162,23 +167,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS FIX — Never returns an empty origins list.
-#
-#  Priority order:
-#    1. ALLOWED_ORIGINS env var  (comma-separated, set this on Render)
-#    2. Hard-coded production origins  (always present as a safe fallback)
-#
-#  To add a new Vercel preview URL without redeploying the backend, just
-#  update the ALLOWED_ORIGINS env var on Render and redeploy — no code change.
-#
-#  IMPORTANT: Do NOT use allow_origins=["*"] with allow_credentials=True —
-#  browsers block that combination. You must list origins explicitly.
+# CORS — Never returns an empty origins list.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
-    # ── Production ──────────────────────────────────────────────────────────
     "https://shortlisting-ai.vercel.app",
-    # ── Local development ────────────────────────────────────────────────────
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
@@ -186,17 +179,13 @@ _HARDCODED_ORIGINS = [
 ]
 
 def _build_allowed_origins() -> list[str]:
-    """
-    Merge hard-coded origins with any extra ones from the ALLOWED_ORIGINS env var.
-    Always returns a non-empty list so CORS is never accidentally disabled.
-    """
     env_origins = [
         o.strip()
         for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
-        if o.strip()                     # skip empty strings
-        and o.strip().startswith("http") # skip malformed values
+        if o.strip()
+        and o.strip().startswith("http")
     ]
-    merged = list(dict.fromkeys(_HARDCODED_ORIGINS + env_origins))  # deduplicate, preserve order
+    merged = list(dict.fromkeys(_HARDCODED_ORIGINS + env_origins))
     print(f"[CORS] Allowed origins: {merged}")
     return merged
 
@@ -209,18 +198,11 @@ app.add_middleware(
     allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers     = ["*"],
     expose_headers    = ["*"],
-    max_age           = 600,   # cache preflight for 10 minutes
+    max_age           = 600,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ UPLOAD DIRECTORY FIX
-#    - Production (Render): /tmp/uploads  — writable, survives deploys on the
-#      same instance but is EPHEMERAL (lost on redeploy/restart).
-#    - Local dev (SQLite):  uploads/
-#
-#  WARNING: Render free tier has no persistent disk.
-#  Uploaded files WILL be lost on every redeploy.
-#  For permanent storage integrate Cloudinary or AWS S3.
+# ✅ FIX 2: Upload directory — writable on Render (/tmp/uploads)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
@@ -428,11 +410,6 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/auth/forgot-password", tags=["auth"])
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """
-    Always returns 200 whether or not the email exists (prevents user enumeration).
-    Sends a real password-reset email via SMTP when .env is configured.
-    Falls back to printing the link in the terminal if email is not configured.
-    """
     user = db.query(User).filter(User.email == payload.email).first()
 
     if user:
@@ -1243,3 +1220,14 @@ def reshortlist_all_for_job(
         "not_shortlisted": not_shortlisted,
         "results":         results,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX 3: PORT binding — required for Render to detect the open port.
+#    Without this, Render logs "No open ports detected" and kills the service.
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
