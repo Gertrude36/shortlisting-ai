@@ -8,6 +8,22 @@ FIXES APPLIED:
   - datetime.utcnow() replaced with datetime.now(timezone.utc)
     (utcnow() is deprecated in Python 3.12+ and will be removed).
 
+  ✅ FIX — bcrypt >= 4.1 incompatibility with passlib
+  ────────────────────────────────────────────────────────────────
+  passlib 1.7.4 (last release, unmaintained) breaks with bcrypt >= 4.1:
+    - AttributeError: module 'bcrypt' has no attribute '__about__'
+    - ValueError: password cannot be longer than 72 bytes
+
+  Two-part fix applied here:
+    1. Suppress the harmless __about__ warning at import time.
+    2. hash_password() and verify_password() now explicitly encode
+       and truncate the password to 72 UTF-8 bytes before passing
+       to passlib — matching bcrypt's hard limit.
+
+  The pinned bcrypt==4.0.1 in requirements.txt is the primary fix;
+  the truncation guard here is a belt-and-suspenders safety measure
+  that makes the code correct on ANY bcrypt version.
+
   ✅ NEW — Password Reset Token Support
   ────────────────────────────────────────────────────────────────
   Added two functions for the forgot-password / reset-password flow:
@@ -25,8 +41,18 @@ FIXES APPLIED:
 """
 
 import os
+import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+# ── Suppress the harmless passlib/bcrypt __about__ warning ───────────────────
+# passlib tries to read bcrypt.__about__.__version__ which no longer exists in
+# bcrypt >= 4.x.  The warning is printed to stderr and is harmless, but noisy.
+warnings.filterwarnings(
+    "ignore",
+    message=".*error reading bcrypt version.*",
+    category=UserWarning,
+)
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -51,12 +77,26 @@ pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
+def _safe_encode(plain: str) -> str:
+    """
+    Truncate password to 72 UTF-8 bytes — bcrypt's hard limit.
+
+    Why: bcrypt (all versions) silently ignores bytes beyond position 72.
+    passlib >= 4.1 raises ValueError instead of truncating silently,
+    which causes a 500 on registration/login for long passwords.
+
+    Truncating here makes behaviour consistent across all bcrypt/passlib
+    versions and is the approach recommended in the bcrypt docs.
+    """
+    return plain.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+
+
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return pwd_context.hash(_safe_encode(plain))
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return pwd_context.verify(_safe_encode(plain), hashed)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -66,7 +106,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# ── ✅ NEW: Password Reset Tokens ─────────────────────────────────────────────
+# ── ✅ Password Reset Tokens ──────────────────────────────────────────────────
 
 def create_reset_token(email: str) -> str:
     """
