@@ -3,15 +3,26 @@
  *
  * FIXES APPLIED:
  *
- * ✅ FIX 1 — 401 RETRY LOOP STOPPED (debounce guard)
- * ✅ FIX 2 — PUBLIC ROUTE MATCHING FIXED (exact prefix, not substring)
- * ✅ FIX 3 — WAKE PING USES API INSTANCE (not bare axios global)
- * ✅ FIX 4 — 401 ON PUBLIC ROUTES CLEARS STORAGE TOO
- * ✅ FIX 5 — _skipRedirect SUPPORT FOR AuthContext BOOT CHECK
- *            AuthContext calls /auth/me on startup with _skipRedirect:true
- *            so the interceptor clears storage but does NOT redirect —
- *            AuthContext handles the redirect via ProtectedRoute naturally.
- *            Without this, you get a double-redirect flash on cold load.
+ * ✅ FIX — isPublic NOW CHECKS HTTP METHOD
+ * ─────────────────────────────────────────────────────────────────
+ * ROOT CAUSE OF "Not authenticated" on HR Job Create:
+ *
+ *   HRJobCreate.jsx calls api.post('/jobs', ...)
+ *   The request interceptor called isPublic('/jobs') → true
+ *   So it SKIPPED attaching the Authorization header
+ *   Backend received POST /jobs with no token → 401 "Not authenticated"
+ *
+ * The old isPublic() only checked the URL path, not the HTTP method.
+ * '/jobs' was in PUBLIC_ROUTES because GET /jobs (job listing) is public.
+ * But POST /jobs (create job) requires HR authentication.
+ * Same problem exists for DELETE /jobs/:id.
+ *
+ * Fix: PUBLIC_ROUTES is now a list of { method, path } objects.
+ *   GET  /jobs   → public  (anyone can browse job listings)
+ *   GET  /jobs/5 → public  (anyone can view a job detail)
+ *   POST /jobs   → private (HR only — token required)
+ *
+ * All other existing behaviour is unchanged.
  */
 
 import axios from 'axios'
@@ -52,27 +63,57 @@ export function clearAuthStorage() {
 }
 
 // ── Public routes — skip Authorization header & 401 redirect ─────────────────
+//
+// ✅ FIX: Each entry specifies BOTH the HTTP method and the path pattern.
+//
+//   method: 'ANY'  → public for all HTTP methods (e.g. auth endpoints)
+//   method: 'GET'  → public only for GET requests (e.g. job listing)
+//
+// This prevents POST /jobs from being treated as public just because
+// GET /jobs is public — which was the root cause of "Not authenticated"
+// on the HR Job Create page.
+//
 const PUBLIC_ROUTES = [
-  '/auth/login',
-  '/auth/register',
-  '/auth/forgot-password',
-  '/auth/reset-password',
-  '/wake',
-  '/jobs',
+  { method: 'ANY', path: '/auth/login' },
+  { method: 'ANY', path: '/auth/register' },
+  { method: 'ANY', path: '/auth/forgot-password' },
+  { method: 'ANY', path: '/auth/reset-password' },
+  { method: 'ANY', path: '/wake' },
+  { method: 'GET', path: '/jobs' },    // GET /jobs and GET /jobs/:id are public
+                                        // POST /jobs (create) requires HR token
+                                        // DELETE /jobs/:id requires HR token
 ]
 
-// ✅ FIX 2: exact match — '/jobs' must NOT match '/jobs/5'
-const isPublic = (url = '') => {
-  const path = url.split('?')[0]
-  return PUBLIC_ROUTES.some(
-    (route) => path === route || path.startsWith(route + '/')
-  )
+/**
+ * Returns true if this request should skip the Authorization header.
+ *
+ * @param {string} url    - The request URL path (e.g. '/jobs/5')
+ * @param {string} method - The HTTP method in UPPERCASE (e.g. 'GET', 'POST')
+ */
+const isPublic = (url = '', method = '') => {
+  const path       = url.split('?')[0]          // strip query string
+  const upperMethod = method.toUpperCase()
+
+  return PUBLIC_ROUTES.some(({ method: routeMethod, path: routePath }) => {
+    // Check path: exact match OR sub-path (e.g. /jobs matches /jobs/5)
+    const pathMatches =
+      path === routePath ||
+      path.startsWith(routePath + '/')
+
+    // Check method: 'ANY' means all methods; otherwise must match exactly
+    const methodMatches =
+      routeMethod === 'ANY' ||
+      routeMethod === upperMethod
+
+    return pathMatches && methodMatches
+  })
 }
 
 // ── Request interceptor ───────────────────────────────────────────────────────
 api.interceptors.request.use(
   (config) => {
-    if (!isPublic(config.url)) {
+    // ✅ FIX: pass both URL and METHOD to isPublic
+    if (!isPublic(config.url, config.method)) {
       const token =
         localStorage.getItem('token') ||
         sessionStorage.getItem('token')
@@ -90,20 +131,24 @@ api.interceptors.request.use(
 )
 
 // ── Response interceptor ──────────────────────────────────────────────────────
-let _redirecting = false   // ✅ FIX 1: debounce guard
+let _redirecting = false   // debounce guard — stops multiple simultaneous redirects
 
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // ✅ FIX 4: always clear storage on 401 — stale token must never linger
+      // Always clear storage on 401 — stale token must never linger
       clearAuthStorage()
 
-      // ✅ FIX 5: if caller set _skipRedirect:true, skip the redirect.
-      //           AuthContext uses this for the startup /auth/me boot check.
+      // If caller set _skipRedirect:true, skip the redirect.
+      // AuthContext uses this for the startup /auth/me boot check.
       const skipRedirect = error.config?._skipRedirect === true
 
-      if (!isPublic(error.config?.url) && !skipRedirect && !_redirecting) {
+      if (
+        !isPublic(error.config?.url, error.config?.method) &&
+        !skipRedirect &&
+        !_redirecting
+      ) {
         _redirecting = true
         if (window.location.pathname !== '/login') {
           window.location.href = '/login'
