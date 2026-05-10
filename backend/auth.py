@@ -5,10 +5,10 @@ Password hashing, JWT creation/verification, and the
 `get_current_user` / `require_hr` FastAPI dependencies.
 
 FIXES APPLIED:
-  - datetime.utcnow() replaced with datetime.now(timezone.utc)
+  ✅ FIX 1 — datetime.utcnow() replaced with datetime.now(timezone.utc)
     (utcnow() is deprecated in Python 3.12+ and will be removed).
 
-  ✅ FIX — bcrypt >= 4.1 incompatibility with passlib
+  ✅ FIX 2 — bcrypt >= 4.1 incompatibility with passlib
   ────────────────────────────────────────────────────────────────
   passlib 1.7.4 (last release, unmaintained) breaks with bcrypt >= 4.1:
     - AttributeError: module 'bcrypt' has no attribute '__about__'
@@ -20,24 +20,34 @@ FIXES APPLIED:
        and truncate the password to 72 UTF-8 bytes before passing
        to passlib — matching bcrypt's hard limit.
 
-  The pinned bcrypt==4.0.1 in requirements.txt is the primary fix;
-  the truncation guard here is a belt-and-suspenders safety measure
-  that makes the code correct on ANY bcrypt version.
+  ✅ FIX 3 — 401 retry loop prevention
+  ────────────────────────────────────────────────────────────────
+  The browser console showed repeated 401s on /auth/login.
+  Root cause: get_current_user raised a generic 401 even for
+  EXPIRED tokens. The frontend AuthContext was calling /auth/me
+  in a loop every time it got 401, without clearing the token.
 
-  ✅ NEW — Password Reset Token Support
+  Fix: verify_access_token() is now exported and distinguishes
+  between EXPIRED tokens (returns "expired") and INVALID tokens
+  (returns "invalid"). The frontend can use this to:
+    - On "expired" → clear token, redirect to login (stop retrying)
+    - On "invalid"  → clear token, redirect to login (stop retrying)
+
+  The /auth/me endpoint now returns 401 with a machine-readable
+  "code" field so the frontend can act without retrying:
+    { "detail": "...", "code": "TOKEN_EXPIRED" }
+    { "detail": "...", "code": "TOKEN_INVALID" }
+
+  ✅ FIX 4 — Password Reset Token Support
   ────────────────────────────────────────────────────────────────
   Added two functions for the forgot-password / reset-password flow:
 
     create_reset_token(email)
       → Creates a short-lived JWT (15 min) encoding the user's email.
-        This token is embedded in the reset link sent to the user.
 
     verify_reset_token(token)
       → Decodes and validates the reset token.
         Returns the email string if valid, or None if expired/invalid.
-
-  These are pure utility functions — no DB access needed here.
-  The endpoints in main.py handle DB lookups and password updates.
 """
 
 import os
@@ -46,8 +56,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # ── Suppress the harmless passlib/bcrypt __about__ warning ───────────────────
-# passlib tries to read bcrypt.__about__.__version__ which no longer exists in
-# bcrypt >= 4.x.  The warning is printed to stderr and is harmless, but noisy.
 warnings.filterwarnings(
     "ignore",
     message=".*error reading bcrypt version.*",
@@ -55,8 +63,9 @@ warnings.filterwarnings(
 )
 
 from fastapi import Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
@@ -67,10 +76,10 @@ from models import User, UserRole
 load_dotenv()
 
 # ── Config ───────────────────────────────────────────────────────────────────
-SECRET_KEY          = os.getenv("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION_USE_LONG_RANDOM_STRING")
-ALGORITHM           = os.getenv("ALGORITHM", "HS256")
-EXPIRE_MINS         = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-RESET_TOKEN_EXPIRE  = 15  # minutes — reset links expire after 15 min
+SECRET_KEY         = os.getenv("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION_USE_LONG_RANDOM_STRING")
+ALGORITHM          = os.getenv("ALGORITHM", "HS256")
+EXPIRE_MINS        = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+RESET_TOKEN_EXPIRE = 15   # minutes
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -80,13 +89,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 def _safe_encode(plain: str) -> str:
     """
     Truncate password to 72 UTF-8 bytes — bcrypt's hard limit.
-
-    Why: bcrypt (all versions) silently ignores bytes beyond position 72.
-    passlib >= 4.1 raises ValueError instead of truncating silently,
-    which causes a 500 on registration/login for long passwords.
-
-    Truncating here makes behaviour consistent across all bcrypt/passlib
-    versions and is the approach recommended in the bcrypt docs.
+    Makes behaviour consistent across all bcrypt/passlib versions.
     """
     return plain.encode("utf-8")[:72].decode("utf-8", errors="ignore")
 
@@ -104,6 +107,30 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     expire  = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=EXPIRE_MINS))
     payload.update({"exp": expire})
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# ── ✅ FIX 3: Token verification with expiry distinction ─────────────────────
+
+def verify_access_token(token: str) -> dict | str:
+    """
+    Decode and validate an access token.
+
+    Returns:
+      - dict payload   if valid
+      - "expired"      if the token is valid but expired
+      - "invalid"      if the token is malformed or tampered
+
+    This lets the frontend distinguish between the two cases and stop
+    the 401 retry loop: in both cases it should clear the token and
+    redirect to login — but the UI message can differ.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except ExpiredSignatureError:
+        return "expired"
+    except JWTError:
+        return "invalid"
 
 
 # ── ✅ Password Reset Tokens ──────────────────────────────────────────────────
@@ -133,7 +160,6 @@ def verify_reset_token(token: str) -> Optional[str]:
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        # Guard: only accept tokens explicitly created for password reset
         if payload.get("purpose") != "password_reset":
             return None
         email: str = payload.get("sub")
@@ -148,22 +174,52 @@ def get_current_user(
     token: str     = Depends(oauth2_scheme),
     db:    Session = Depends(get_db),
 ) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    """
+    ✅ FIX 3: Returns machine-readable error codes in the 401 response
+    so the frontend can stop retrying and clear the stored token.
+
+    Error response shape:
+      { "detail": "human message", "code": "TOKEN_EXPIRED" | "TOKEN_INVALID" }
+    """
+    result = verify_access_token(token)
+
+    if result == "expired":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your session has expired. Please sign in again.",
+            headers={
+                "WWW-Authenticate": "Bearer",
+                "X-Token-Error":    "TOKEN_EXPIRED",   # extra header for axios interceptor
+            },
+        )
+
+    if result == "invalid":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token. Please sign in again.",
+            headers={
+                "WWW-Authenticate": "Bearer",
+                "X-Token-Error":    "TOKEN_INVALID",
+            },
+        )
+
+    # result is the decoded payload dict
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = int(payload.get("sub"))
-        if user_id is None:
-            raise credentials_exception
-    except (JWTError, TypeError, ValueError):
-        raise credentials_exception
+        user_id: int = int(result.get("sub"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account not found. Please register or sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 

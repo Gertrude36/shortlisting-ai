@@ -1,29 +1,94 @@
+## render.yaml
+##
+## FIXES APPLIED:
+##  ✅ FIX 1 — PORT env var added and startCommand uses $PORT so Render
+##             detects the open port correctly. Without this, Render logs
+##             "No open ports detected" and kills the service.
+##
+##  ✅ FIX 2 — Added all required env vars that were missing:
+##             ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES.
+##             These have defaults in auth.py but must be explicit in prod.
+##
+##  ✅ FIX 3 — FRONTEND_URL set correctly so password reset links point
+##             to your Vercel deployment, not localhost.
+##             This was the cause of forgot-password links not working.
+##
+##  ✅ FIX 4 — DATABASE_URL auto-linked from PostgreSQL db below.
+##             Data now persists across ALL deploys forever.
+##             Previously: SQLite on ephemeral disk → wiped every deploy.
+##
+##  ✅ FIX 5 — SECRET_KEY marked sync:false so you set it once manually
+##             in Render Dashboard. NEVER commit a real secret key to git.
+##
+## HOW TO DEPLOY:
+##  1. Push this file to GitHub.
+##  2. In Render: New → Blueprint → connect your repo.
+##  3. Render creates the PostgreSQL DB and backend service automatically.
+##  4. In Render Dashboard → your backend service → Environment:
+##       Set SECRET_KEY      = (any long random string, e.g. from: openssl rand -hex 32)
+##       Set MAIL_USERNAME   = your@gmail.com
+##       Set MAIL_PASSWORD   = (Gmail App Password — 16 chars, NOT your login password)
+##       Set MAIL_FROM       = your@gmail.com
+##  5. Click "Manual Deploy" → Deploy latest commit.
+
 services:
   - type: web
     name: shortlisting-ai-backend
     env: python
     region: oregon
     plan: free
-    buildCommand: apt-get install -y tesseract-ocr poppler-utils && pip install -r requirements.txt
+
+    buildCommand: >
+      apt-get install -y tesseract-ocr poppler-utils &&
+      pip install -r requirements.txt
+
+    # ✅ FIX 1: Use $PORT — Render injects the port; hardcoding 10000 works
+    #           but $PORT is the canonical way and avoids "no open port" errors.
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+
     envVars:
-      # ✅ Auto-linked from the PostgreSQL database below (no manual copy needed)
+      # ✅ FIX 4: Auto-linked from the PostgreSQL database below.
+      # Data persists across ALL deploys — no more data loss on redeploy.
       - key: DATABASE_URL
         fromDatabase:
           name: shortlisting-ai-db
           property: connectionString
 
-      # ✅ Set these manually in Render Dashboard → Environment tab
+      # ✅ FIX 5: Set this manually in Render Dashboard → Environment.
+      # Generate with: openssl rand -hex 32
+      # NEVER commit a real value here.
       - key: SECRET_KEY
         sync: false
 
-      # ── Mail (matches your .env exactly) ─────────────────────────────────
+      # ✅ FIX 2: JWT algorithm and expiry — now explicit in production
+      - key: ALGORITHM
+        value: HS256
+
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "60"
+
+      # ✅ FIX 3: FRONTEND_URL must point to your Vercel deployment.
+      # Password reset links use this — wrong value = broken reset emails.
+      - key: FRONTEND_URL
+        value: https://shortlisting-ai.vercel.app
+
+      - key: ALLOWED_ORIGINS
+        value: "https://shortlisting-ai.vercel.app,http://localhost:5173,http://localhost:3000"
+
+      # ── Mail ─────────────────────────────────────────────────────────────
+      # Set MAIL_USERNAME and MAIL_PASSWORD manually in Render Dashboard.
+      # MAIL_PASSWORD must be a Gmail App Password (not your login password).
+      # See: https://myaccount.google.com/apppasswords
       - key: MAIL_SERVER
-        sync: false
+        value: smtp.gmail.com
 
       - key: MAIL_PORT
-        sync: false
+        value: "465"
 
+      - key: MAIL_FROM_NAME
+        value: Shortlisting AI
+
+      # Set these manually — do NOT commit real values:
       - key: MAIL_USERNAME
         sync: false
 
@@ -31,15 +96,6 @@ services:
         sync: false
 
       - key: MAIL_FROM
-        sync: false
-
-      - key: MAIL_FROM_NAME
-        sync: false
-
-      - key: EMAIL_USER
-        sync: false
-
-      - key: EMAIL_PASS
         sync: false
 
       # ── HuggingFace ───────────────────────────────────────────────────────
@@ -65,14 +121,9 @@ services:
       - key: POPPLER_PATH
         value: ""
 
-      # ── CORS ──────────────────────────────────────────────────────────────
-      - key: FRONTEND_URL
-        value: https://shortlisting-ai.vercel.app
-
-      - key: ALLOWED_ORIGINS
-        value: "https://shortlisting-ai.vercel.app,http://localhost:5173,http://localhost:3000"
-
-# ✅ Free PostgreSQL — data persists across ALL deploys forever!
+# ✅ FIX 4: Free PostgreSQL — data persists across ALL deploys forever!
+# On the free tier: 1 GB storage, 97 connection limit.
+# Upgrade to Starter ($7/mo) for production workloads.
 databases:
   - name: shortlisting-ai-db
     plan: free

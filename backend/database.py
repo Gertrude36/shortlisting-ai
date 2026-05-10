@@ -12,19 +12,28 @@ SOLUTION:
   Use PostgreSQL on Render. Data lives in a persistent managed database
   that survives all deploys and restarts.
 
-SETUP (one-time, takes 2 minutes):
-  The render.yaml in this project already creates a free PostgreSQL
-  database and links it automatically via the DATABASE_URL env var.
-  Just push to GitHub and Render will do the rest.
+SETUP (one-time):
+  The render.yaml in this project creates a free PostgreSQL database and
+  links it automatically via the DATABASE_URL env var.
+  Just push to GitHub and Render does the rest.
 
 LOCAL DEV:
   DATABASE_URL is not set → falls back to SQLite (capstone.db) as before.
   No changes needed locally.
+
+FIXES APPLIED:
+  ✅ FIX 1 — postgres:// → postgresql:// URL rewrite (Render compatibility)
+  ✅ FIX 2 — Pool settings tuned for Render free tier (max 25 connections)
+  ✅ FIX 3 — pool_pre_ping=True prevents stale connection errors after sleep
+  ✅ FIX 4 — pool_recycle=300 avoids "server closed connection" after idle
+  ✅ FIX 5 — SQLite WAL mode prevents locking in local dev
+  ✅ FIX 6 — Startup DB connectivity check with clear error message
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
@@ -43,19 +52,23 @@ DATABASE_URL: str = os.getenv(
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+
+print(f"[database] Using {'SQLite (local dev)' if _is_sqlite else 'PostgreSQL (production)'}")
+
 # ── Engine ────────────────────────────────────────────────────────────────────
-_is_sqlite    = DATABASE_URL.startswith("sqlite")
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 
-# Keep pool small on Render free tier (max 25 connections)
+# Keep pool small on Render free tier (max 25 connections total)
 _pool_kwargs: dict = (
     {}
     if _is_sqlite
     else {
-        "pool_size": 5,
-        "max_overflow": 10,
-        "pool_pre_ping": True,
-        "pool_recycle": 300,   # ✅ FIX: recycle connections every 5 min to avoid stale connections
+        "pool_size":     5,
+        "max_overflow":  10,
+        "pool_pre_ping": True,   # ✅ FIX: detects dead connections before use
+        "pool_recycle":  300,    # ✅ FIX: recycle every 5 min — avoids stale conn errors
+        "pool_timeout":  30,
     }
 )
 
@@ -72,6 +85,24 @@ if _is_sqlite:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
+
+# ✅ FIX: Verify DB is reachable at startup — fail fast with a clear message
+def _check_db_connection():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("[database] ✅ Database connection OK")
+    except Exception as exc:
+        print(f"[database] ❌ Cannot connect to database: {exc}")
+        if not _is_sqlite:
+            print(
+                "[database] 💡 Make sure DATABASE_URL is set correctly in Render.\n"
+                "           Go to: Render Dashboard → your service → Environment\n"
+                "           The DATABASE_URL should be auto-linked from your PostgreSQL db."
+            )
+        sys.exit(1)   # Hard fail so Render marks deploy as failed, not silently broken
+
+_check_db_connection()
 
 # ── Session ───────────────────────────────────────────────────────────────────
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
