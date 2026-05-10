@@ -3,37 +3,15 @@
  *
  * FIXES APPLIED:
  *
- * ✅ FIX 1 — 401 RETRY LOOP STOPPED (debounce guard added)
- * ─────────────────────────────────────────────────────────────────
- * The browser showed 10-15 repeated 401s on /auth/login and /auth/me.
- * Root cause: multiple components mounting at the same time each
- * triggered a request with an expired token → each got 401 → each
- * called clearAuthStorage + redirect simultaneously.
- *
- * Fix: `_redirecting` flag prevents multiple concurrent 401 handlers
- * from all firing the redirect at once.
- *
- * ✅ FIX 2 — PUBLIC ROUTE MATCHING FIXED
- * ─────────────────────────────────────────────────────────────────
- * Previously `isPublic('/jobs/5')` returned true because '/jobs' is a
- * substring of '/jobs/5'. A job-detail page with an expired token
- * would silently skip the Authorization header instead of sending it.
- *
- * Fix: exact prefix matching with trailing-slash check so '/jobs'
- * only matches '/jobs' and '/jobs?...' — not '/jobs/5'.
- *
- * ✅ FIX 3 — WAKE PING USES API INSTANCE (not bare axios)
- * ─────────────────────────────────────────────────────────────────
- * Previously the wake ping used the bare `axios` global which has a
- * different baseURL and timeout. Now it uses the configured `api`
- * instance for consistency.
- *
+ * ✅ FIX 1 — 401 RETRY LOOP STOPPED (debounce guard)
+ * ✅ FIX 2 — PUBLIC ROUTE MATCHING FIXED (exact prefix, not substring)
+ * ✅ FIX 3 — WAKE PING USES API INSTANCE (not bare axios global)
  * ✅ FIX 4 — 401 ON PUBLIC ROUTES CLEARS STORAGE TOO
- * ─────────────────────────────────────────────────────────────────
- * If /auth/login returns 401 (wrong credentials), the old code skipped
- * clearAuthStorage — leaving a stale token that broke subsequent requests.
- * Now storage is always cleared on 401, but the redirect only fires for
- * protected routes.
+ * ✅ FIX 5 — _skipRedirect SUPPORT FOR AuthContext BOOT CHECK
+ *            AuthContext calls /auth/me on startup with _skipRedirect:true
+ *            so the interceptor clears storage but does NOT redirect —
+ *            AuthContext handles the redirect via ProtectedRoute naturally.
+ *            Without this, you get a double-redirect flash on cold load.
  */
 
 import axios from 'axios'
@@ -41,7 +19,7 @@ import axios from 'axios'
 // ── True only when built with `vite build` (i.e. deployed on Vercel) ─────────
 const IS_PROD = import.meta.env.PROD
 
-// VITE_API_URL is:
+// VITE_API_URL:
 //   • local dev  → http://localhost:8000   (set in .env.local)
 //   • production → https://shortlisting-ai.onrender.com  (set in Vercel env vars)
 export const BACKEND = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -50,18 +28,14 @@ export const BACKEND = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const api = axios.create({
   baseURL:         BACKEND,
   withCredentials: false,
-  timeout:         30_000,   // 30 s — generous for Render cold starts
+  timeout:         30_000,
 })
 
 // ── Wake-up ping (production only) ───────────────────────────────────────────
-// Render free tier spins down after 15 min of inactivity.
-// ✅ FIX 3: use the configured `api` instance (not bare axios global)
 if (IS_PROD) {
   api
     .get('/wake', { timeout: 60_000 })
-    .catch(() => {
-      // Silently ignore — this is just a warm-up ping
-    })
+    .catch(() => {})   // silently ignore — just a warm-up ping
 }
 
 // ── Auth storage keys ─────────────────────────────────────────────────────────
@@ -87,32 +61,25 @@ const PUBLIC_ROUTES = [
   '/jobs',
 ]
 
-// ✅ FIX 2: Exact prefix matching — '/jobs' must NOT match '/jobs/5'
+// ✅ FIX 2: exact match — '/jobs' must NOT match '/jobs/5'
 const isPublic = (url = '') => {
-  const path = url.split('?')[0]   // strip query string before matching
-  return PUBLIC_ROUTES.some((route) => {
-    return (
-      path === route ||
-      path.startsWith(route + '/')
-    )
-  })
+  const path = url.split('?')[0]
+  return PUBLIC_ROUTES.some(
+    (route) => path === route || path.startsWith(route + '/')
+  )
 }
 
-// ── Request interceptor: attach JWT (skip public routes) ─────────────────────
+// ── Request interceptor ───────────────────────────────────────────────────────
 api.interceptors.request.use(
   (config) => {
     if (!isPublic(config.url)) {
       const token =
         localStorage.getItem('token') ||
         sessionStorage.getItem('token')
-
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`
-      }
+      if (token) config.headers.Authorization = `Bearer ${token}`
     }
 
-    // NEVER manually set Content-Type for FormData — axios sets the correct
-    // multipart boundary automatically.
+    // Let axios set Content-Type automatically for FormData (boundary header)
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type']
     }
@@ -122,26 +89,25 @@ api.interceptors.request.use(
   (error) => Promise.reject(error),
 )
 
-// ── Response interceptor: handle 401s globally ───────────────────────────────
-// ✅ FIX 1: Guard flag — prevents multiple simultaneous 401 responses
-//           from all triggering clearAuthStorage + redirect at once.
-let _redirecting = false
+// ── Response interceptor ──────────────────────────────────────────────────────
+let _redirecting = false   // ✅ FIX 1: debounce guard
 
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // ✅ FIX 4: Always clear storage on any 401 — even on public routes —
-      //           so a stale token never lingers after a failed login attempt.
+      // ✅ FIX 4: always clear storage on 401 — stale token must never linger
       clearAuthStorage()
 
-      // Only redirect to /login for protected routes, and only once
-      if (!isPublic(error.config?.url) && !_redirecting) {
+      // ✅ FIX 5: if caller set _skipRedirect:true, skip the redirect.
+      //           AuthContext uses this for the startup /auth/me boot check.
+      const skipRedirect = error.config?._skipRedirect === true
+
+      if (!isPublic(error.config?.url) && !skipRedirect && !_redirecting) {
         _redirecting = true
         if (window.location.pathname !== '/login') {
           window.location.href = '/login'
         }
-        // Reset after navigation completes
         setTimeout(() => { _redirecting = false }, 3000)
       }
     }

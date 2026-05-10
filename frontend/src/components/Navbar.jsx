@@ -1,3 +1,38 @@
+/**
+ * frontend/src/components/Navbar.jsx
+ *
+ * FIXES APPLIED:
+ *
+ * ✅ FIX 1 — "NOT AUTHENTICATED" BADGE FOR HR USERS
+ * ─────────────────────────────────────────────────────────────────
+ * The screenshot showed "Not authenticated" in the top-right corner
+ * while an HR user was on the Job Create page.
+ *
+ * Root cause: `profileComplete` was computed as:
+ *   user.nationalId && user.location && user.documents?.length > 0
+ *
+ * HR users never fill nationalId / location / documents — those fields
+ * are for applicants only. So `profileComplete` was always false for HR,
+ * causing the amber warning dot and "Not authenticated" tooltip to appear.
+ *
+ * Fix: HR users are considered "profile complete" by default.
+ * Only applicant users are checked for the profile fields.
+ *
+ * ✅ FIX 2 — PROFILE MODAL HIDDEN FOR HR USERS
+ * ─────────────────────────────────────────────────────────────────
+ * HR users don't have a profile to fill (no nationalId, no documents).
+ * Clicking their avatar opened the applicant ProfileModal, which was
+ * confusing and showed empty required fields.
+ *
+ * Fix: the "View & Edit Profile" button and ProfileModal only render
+ * for applicant users. HR users only see their name/role and Log Out.
+ *
+ * ✅ FIX 3 — DROPDOWN INFO ROWS HIDDEN FOR HR USERS
+ * ─────────────────────────────────────────────────────────────────
+ * The dropdown showed nationalId / location / phone / documents rows
+ * for HR users, all showing "Not set". Removed for HR role.
+ */
+
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate }           from 'react-router-dom'
 import {
@@ -344,15 +379,31 @@ export default function Navbar() {
   const [modalOpen,    setModalOpen]    = useState(false)
 
   useEffect(() => {
-    const handler = e => { if (dropdownRef.current && !dropdownRef.current.contains(e.target)) setDropdownOpen(false) }
+    const handler = e => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target))
+        setDropdownOpen(false)
+    }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
   const handleLogout = () => { logout(); toast.success('Logged out successfully'); navigate('/') }
-  const openModal = () => { setDropdownOpen(false); setModalOpen(true) }
-  const profileComplete = user && user.nationalId && user.location && user.documents?.length > 0
-  const missing = [!user?.nationalId && 'National ID', !user?.location && 'Location', !user?.documents?.length && 'Documents'].filter(Boolean)
+  const openModal    = () => { setDropdownOpen(false); setModalOpen(true) }
+
+  // ✅ FIX 1: HR users are always "complete" — they have no profile fields to fill.
+  //           Only applicant users are checked for nationalId / location / documents.
+  const isHR = user?.role === 'hr'
+  const profileComplete = isHR
+    ? true
+    : !!(user?.nationalId && user?.location && user?.documents?.length > 0)
+
+  const missing = isHR
+    ? []
+    : [
+        !user?.nationalId       && 'National ID',
+        !user?.location         && 'Location',
+        !user?.documents?.length && 'Documents',
+      ].filter(Boolean)
 
   return (
     <>
@@ -393,6 +444,7 @@ export default function Navbar() {
                 <div ref={dropdownRef} style={{ position: 'relative' }}>
                   <div style={{ position: 'relative', display: 'inline-flex' }}>
                     <Avatar name={user.fullName} size={40} onClick={() => setDropdownOpen(v => !v)} />
+                    {/* ✅ FIX 1: amber dot only for incomplete APPLICANT profiles */}
                     {!profileComplete && (
                       <span style={{
                         position: 'absolute', top: -2, right: -2,
@@ -427,41 +479,51 @@ export default function Navbar() {
                             <p style={{ margin: '2px 0 0', fontSize: '.78rem', color: 'rgba(255,255,255,.7)', textTransform: 'capitalize' }}>{user.role}</p>
                           </div>
                         </div>
-                        <div style={{
-                          marginTop: 12, padding: '8px 12px', borderRadius: 6,
-                          background: profileComplete ? 'rgba(10,124,62,.25)' : 'rgba(248,163,0,.2)',
-                          border: `1.5px solid ${profileComplete ? 'rgba(10,124,62,.4)' : 'rgba(248,163,0,.4)'}`,
-                          fontSize: '.78rem', fontWeight: 700,
-                          color: profileComplete ? '#6fffa8' : '#fde68a',
-                          display: 'flex', alignItems: 'center', gap: 6,
-                        }}>
-                          {profileComplete
-                            ? <><CheckCircle size={12} /> Profile complete</>
-                            : <><AlertCircle size={12} /> Missing: {missing.join(', ')}</>
-                          }
-                        </div>
+
+                        {/* ✅ FIX 1: profile status badge — hidden for HR */}
+                        {!isHR && (
+                          <div style={{
+                            marginTop: 12, padding: '8px 12px', borderRadius: 6,
+                            background: profileComplete ? 'rgba(10,124,62,.25)' : 'rgba(248,163,0,.2)',
+                            border: `1.5px solid ${profileComplete ? 'rgba(10,124,62,.4)' : 'rgba(248,163,0,.4)'}`,
+                            fontSize: '.78rem', fontWeight: 700,
+                            color: profileComplete ? '#6fffa8' : '#fde68a',
+                            display: 'flex', alignItems: 'center', gap: 6,
+                          }}>
+                            {profileComplete
+                              ? <><CheckCircle size={12} /> Profile complete</>
+                              : <><AlertCircle size={12} /> Missing: {missing.join(', ')}</>
+                            }
+                          </div>
+                        )}
                       </div>
 
-                      <div style={{ padding: '6px 20px 2px' }}>
-                        <InfoRow icon={CreditCard} label="National ID" value={user.nationalId} />
-                        <InfoRow icon={MapPin}      label="Location"    value={user.location} />
-                        <InfoRow icon={Phone}       label="Phone"       value={user.phone} />
-                        <InfoRow icon={ScrollText}  label="Documents"   value={user.documents?.length ? `${user.documents.length} file${user.documents.length > 1 ? 's' : ''} uploaded` : null} />
-                      </div>
+                      {/* ✅ FIX 3: info rows only for applicants */}
+                      {!isHR && (
+                        <div style={{ padding: '6px 20px 2px' }}>
+                          <InfoRow icon={CreditCard} label="National ID" value={user.nationalId} />
+                          <InfoRow icon={MapPin}      label="Location"    value={user.location} />
+                          <InfoRow icon={Phone}       label="Phone"       value={user.phone} />
+                          <InfoRow icon={ScrollText}  label="Documents"   value={user.documents?.length ? `${user.documents.length} file${user.documents.length > 1 ? 's' : ''} uploaded` : null} />
+                        </div>
+                      )}
 
                       <div style={{ padding: '12px 20px 16px', display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1.5px solid #e5e7eb' }}>
-                        <button
-                          onClick={openModal}
-                          style={{
-                            width: '100%', padding: '10px 0', borderRadius: 4,
-                            border: 'none', background: '#2563eb', color: '#fff',
-                            fontSize: '.88rem', fontWeight: 700, cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-                            boxShadow: '0 3px 10px rgba(26,86,219,.3)',
-                          }}
-                        >
-                          <User size={13} /> View & Edit Profile
-                        </button>
+                        {/* ✅ FIX 2: "View & Edit Profile" only for applicants */}
+                        {!isHR && (
+                          <button
+                            onClick={openModal}
+                            style={{
+                              width: '100%', padding: '10px 0', borderRadius: 4,
+                              border: 'none', background: '#2563eb', color: '#fff',
+                              fontSize: '.88rem', fontWeight: 700, cursor: 'pointer',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                              boxShadow: '0 3px 10px rgba(26,86,219,.3)',
+                            }}
+                          >
+                            <User size={13} /> View & Edit Profile
+                          </button>
+                        )}
                         <button
                           onClick={handleLogout}
                           style={{
@@ -483,7 +545,8 @@ export default function Navbar() {
         </div>
       </nav>
 
-      {modalOpen && user && (
+      {/* ✅ FIX 2: ProfileModal only rendered for applicants */}
+      {modalOpen && user && !isHR && (
         <ProfileModal user={user} updateProfile={updateProfile} onClose={() => setModalOpen(false)} />
       )}
     </>
