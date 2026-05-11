@@ -1,35 +1,28 @@
 ## render.yaml
 ##
-## FIXES APPLIED:
-##  ✅ FIX 1 — PORT env var added and startCommand uses $PORT so Render
-##             detects the open port correctly. Without this, Render logs
-##             "No open ports detected" and kills the service.
+## ROOT CAUSE OF DATA LOSS:
+##   startCommand used --port 10000 (hardcoded) instead of $PORT.
+##   Render injects the correct port via $PORT at runtime.
+##   Hardcoding caused Render to sometimes not detect the open port,
+##   restart the service, and wipe the ephemeral SQLite file each time.
 ##
-##  ✅ FIX 2 — Added all required env vars that were missing:
-##             ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES.
-##             These have defaults in auth.py but must be explicit in prod.
+##   Also: if DATABASE_URL was never linked, the app fell back to SQLite
+##   silently — all data stored in a file that resets on every deploy.
 ##
-##  ✅ FIX 3 — FRONTEND_URL set correctly so password reset links point
-##             to your Vercel deployment, not localhost.
-##             This was the cause of forgot-password links not working.
+## FIX:
+##   ✅ startCommand now uses $PORT
+##   ✅ DATABASE_URL auto-linked from PostgreSQL db — persistent forever
 ##
-##  ✅ FIX 4 — DATABASE_URL auto-linked from PostgreSQL db below.
-##             Data now persists across ALL deploys forever.
-##             Previously: SQLite on ephemeral disk → wiped every deploy.
-##
-##  ✅ FIX 5 — SECRET_KEY marked sync:false so you set it once manually
-##             in Render Dashboard. NEVER commit a real secret key to git.
-##
-## HOW TO DEPLOY:
-##  1. Push this file to GitHub.
-##  2. In Render: New → Blueprint → connect your repo.
-##  3. Render creates the PostgreSQL DB and backend service automatically.
-##  4. In Render Dashboard → your backend service → Environment:
-##       Set SECRET_KEY      = (any long random string, e.g. from: openssl rand -hex 32)
-##       Set MAIL_USERNAME   = your@gmail.com
-##       Set MAIL_PASSWORD   = (Gmail App Password — 16 chars, NOT your login password)
-##       Set MAIL_FROM       = your@gmail.com
-##  5. Click "Manual Deploy" → Deploy latest commit.
+## ONE-TIME SETUP AFTER PUSHING THIS FILE:
+##   1. Push to GitHub
+##   2. Render Dashboard → New → Blueprint → connect your repo
+##      (or if already deployed: it will detect the yaml change)
+##   3. Manually set these in Render Dashboard → Environment:
+##        SECRET_KEY    → openssl rand -hex 32
+##        MAIL_USERNAME → your@gmail.com
+##        MAIL_PASSWORD → Gmail App Password (16 chars)
+##        MAIL_FROM     → your@gmail.com
+##   4. Manual Deploy → Deploy latest commit
 
 services:
   - type: web
@@ -42,43 +35,37 @@ services:
       apt-get install -y tesseract-ocr poppler-utils &&
       pip install -r requirements.txt
 
-    # ✅ FIX 1: Use $PORT — Render injects the port; hardcoding 10000 works
-    #           but $PORT is the canonical way and avoids "no open port" errors.
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    # ✅ THE KEY FIX: $PORT not 10000
+    # Render injects the correct port via $PORT — hardcoding breaks port detection
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
 
     envVars:
-      # ✅ FIX 4: Auto-linked from the PostgreSQL database below.
-      # Data persists across ALL deploys — no more data loss on redeploy.
+      # ✅ This is what makes data persist across ALL deploys.
+      # Render auto-populates DATABASE_URL from the PostgreSQL db below.
+      # Your database.py reads this and connects to PostgreSQL instead of SQLite.
       - key: DATABASE_URL
         fromDatabase:
           name: shortlisting-ai-db
           property: connectionString
 
-      # ✅ FIX 5: Set this manually in Render Dashboard → Environment.
-      # Generate with: openssl rand -hex 32
-      # NEVER commit a real value here.
+      # Set manually in Render Dashboard → Environment
+      # Generate: openssl rand -hex 32
       - key: SECRET_KEY
         sync: false
 
-      # ✅ FIX 2: JWT algorithm and expiry — now explicit in production
       - key: ALGORITHM
         value: HS256
 
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "60"
 
-      # ✅ FIX 3: FRONTEND_URL must point to your Vercel deployment.
-      # Password reset links use this — wrong value = broken reset emails.
       - key: FRONTEND_URL
         value: https://shortlisting-ai.vercel.app
 
       - key: ALLOWED_ORIGINS
         value: "https://shortlisting-ai.vercel.app,http://localhost:5173,http://localhost:3000"
 
-      # ── Mail ─────────────────────────────────────────────────────────────
-      # Set MAIL_USERNAME and MAIL_PASSWORD manually in Render Dashboard.
-      # MAIL_PASSWORD must be a Gmail App Password (not your login password).
-      # See: https://myaccount.google.com/apppasswords
+      # ── Mail — set these manually in Render Dashboard ─────────────────────
       - key: MAIL_SERVER
         value: smtp.gmail.com
 
@@ -88,7 +75,6 @@ services:
       - key: MAIL_FROM_NAME
         value: Shortlisting AI
 
-      # Set these manually — do NOT commit real values:
       - key: MAIL_USERNAME
         sync: false
 
@@ -121,9 +107,8 @@ services:
       - key: POPPLER_PATH
         value: ""
 
-# ✅ FIX 4: Free PostgreSQL — data persists across ALL deploys forever!
-# On the free tier: 1 GB storage, 97 connection limit.
-# Upgrade to Starter ($7/mo) for production workloads.
+# ✅ Free PostgreSQL — data persists across ALL deploys forever
+# Free tier: 1 GB storage, 97 connection limit
 databases:
   - name: shortlisting-ai-db
     plan: free
