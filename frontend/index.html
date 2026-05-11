@@ -4,37 +4,64 @@
     <meta charset="UTF-8" />
 
     <!--
-      ✅ FIX 1: favicon — prevents "Failed to load resource: 404" error in console.
+      favicon — prevents "Failed to load resource: 404" error in console.
       Place favicon.svg (or favicon.ico) in your /public folder.
     -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <!-- Fallback for browsers that don't support SVG favicons -->
     <link rel="alternate icon" href="/favicon.ico" />
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
     <!--
-      ✅ FIX 2: "SES Removing unpermitted intrinsics" warning.
-      This is caused by Vercel injecting its own lockdown.js (SES/Hardened JS)
-      into the page for security. It is NOT an error — just a console warning.
+      ✅ FIX: CSP updated to allow Google Fonts.
 
-      To suppress it cleanly, add this meta tag. It tells SES which globals
-      your app legitimately needs so it won't log warnings about them.
+      WHAT WAS BROKEN:
+        style-src   'self' 'unsafe-inline'   ← blocked fonts.googleapis.com
+        font-src    'self'                   ← blocked fonts.gstatic.com
 
-      If the warning still appears after this, it is safe to ignore —
-      it does NOT affect functionality. It is Vercel's security hardening.
+      WHY IT BROKE:
+        Google Fonts loads in two steps:
+          1. A <link> stylesheet from fonts.googleapis.com  → needs style-src
+          2. The actual font files from fonts.gstatic.com   → needs font-src
+        Both domains were missing from the CSP, so both requests were blocked.
+
+      THE FIX:
+        style-src   now includes https://fonts.googleapis.com
+        font-src    now includes https://fonts.gstatic.com
+
+      NOTE ON "SES Removing unpermitted intrinsics":
+        This warning comes from Vercel injecting its own lockdown.js (SES /
+        Hardened JS) for security hardening. It is NOT an error and does NOT
+        affect functionality. It cannot be suppressed via CSP meta tags —
+        it is Vercel's own script running before your app loads.
+        Safe to ignore.
     -->
     <meta
       http-equiv="Content-Security-Policy"
       content="
         default-src 'self';
         script-src  'self' 'unsafe-inline' 'unsafe-eval';
-        connect-src 'self' https://*.onrender.com https://api.resend.com;
-        style-src   'self' 'unsafe-inline';
-        img-src     'self' data: blob:;
-        font-src    'self';
+        connect-src 'self'
+                    https://*.onrender.com
+                    https://api.resend.com;
+        style-src   'self'
+                    'unsafe-inline'
+                    https://fonts.googleapis.com;
+        font-src    'self'
+                    https://fonts.gstatic.com
+                    data:;
+        img-src     'self'
+                    data:
+                    blob:;
       "
     />
+
+    <!--
+      Preconnect to Google Fonts domains for faster font loading.
+      Must come BEFORE the actual font <link> tags in your app.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 
     <title>Shortlisting AI</title>
   </head>

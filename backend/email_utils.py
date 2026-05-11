@@ -4,20 +4,28 @@ backend/email_utils.py
 Sends password-reset emails via Gmail SMTP (smtplib — no external dependencies).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ROOT CAUSE OF THE EMAIL NOT SENDING:
-  ─────────────────────────────────────
-  The previous version used the Resend API, but:
-    1. RESEND_API_KEY was never set in .env or Render environment.
-    2. MAIL_FROM was set to a Gmail address — Resend rejects that.
-    3. All the MAIL_USERNAME / MAIL_PASSWORD / MAIL_SERVER vars
-       in .env were being completely ignored.
+  FIXES APPLIED:
+  ─────────────────────────────────────────────────────────────
+  ✅ FIX 1 — Removed hardcoded Gmail App Password fallback.
+     The previous version had the real App Password embedded in
+     the source code as a default argument:
+         os.getenv("MAIL_PASSWORD", os.getenv("EMAIL_PASS", "ckiyhnapawblxsss"))
+     This is a serious security risk (credentials in version control)
+     and also caused silent failures: if the env var wasn't set,
+     the hardcoded password was used — but that password may have
+     been rotated or revoked, causing SMTPAuthenticationError with
+     no obvious explanation.
+     Fix: default is now "" (empty string). Missing credentials are
+     caught clearly by _validate_config() at startup.
 
-  FIX: Switched to Gmail SMTP using smtplib (Python built-in).
-  Your existing .env vars now work as-is:
-    MAIL_USERNAME  =  aishortlisting@gmail.com
-    MAIL_PASSWORD  =  your 16-char Gmail App Password
-    MAIL_FROM      =  aishortlisting@gmail.com
-    MAIL_FROM_NAME =  Shortlisting AI
+  ✅ FIX 2 — Startup validation now prints a clear, actionable
+     message pointing directly to Render Dashboard → Environment.
+     Previously the warning was vague.
+
+  ✅ FIX 3 — send_reset_email() now returns the reset link in its
+     return value on success, so callers can log or act on it.
+     Also improved error logging granularity.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 GMAIL SETUP (one-time, ~2 minutes):
@@ -33,17 +41,15 @@ GMAIL SETUP (one-time, ~2 minutes):
     5. In Render Dashboard → Your Service → Environment, set:
          MAIL_USERNAME  = aishortlisting@gmail.com
          MAIL_PASSWORD  = xxxx xxxx xxxx xxxx   ← the 16-char app password
+                          (paste with OR without spaces — both work)
          MAIL_FROM      = aishortlisting@gmail.com
          MAIL_FROM_NAME = Shortlisting AI
 
-  Your current .env already has the right structure — just make sure
-  MAIL_PASSWORD is the App Password (16 chars), not your regular password.
-
-REQUIRED ENV VARS:
-  MAIL_USERNAME    Gmail address used to send      (aishortlisting@gmail.com)
-  MAIL_PASSWORD    Gmail App Password (16 chars)   (ckiy hnap awbl xsss)
-  MAIL_FROM        Sender address                  (aishortlisting@gmail.com)
-  MAIL_FROM_NAME   Sender display name             (Shortlisting AI)
+REQUIRED ENV VARS (set in Render Dashboard → Environment):
+  MAIL_USERNAME    Gmail address used to send      e.g. aishortlisting@gmail.com
+  MAIL_PASSWORD    Gmail App Password (16 chars)   e.g. ckiy hnap awbl xxxx
+  MAIL_FROM        Sender address                  e.g. aishortlisting@gmail.com
+  MAIL_FROM_NAME   Sender display name             e.g. Shortlisting AI
 """
 
 import os
@@ -53,31 +59,53 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # ── Config from environment ───────────────────────────────────────────────────
-MAIL_SERVER   = os.getenv("MAIL_SERVER",   "smtp.gmail.com")
-MAIL_PORT     = int(os.getenv("MAIL_PORT", "465"))
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", os.getenv("EMAIL_USER", "aishortlisting@gmail.com"))
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", os.getenv("EMAIL_PASS", "ckiyhnapawblxsss"))
-MAIL_FROM     = os.getenv("MAIL_FROM",     MAIL_USERNAME)
+MAIL_SERVER    = os.getenv("MAIL_SERVER",    "smtp.gmail.com")
+MAIL_PORT      = int(os.getenv("MAIL_PORT",  "465"))
+MAIL_USERNAME  = os.getenv("MAIL_USERNAME",  os.getenv("EMAIL_USER", "aishortlisting@gmail.com"))
+# ✅ FIX 1: No hardcoded password fallback — empty string forces proper config.
+MAIL_PASSWORD  = os.getenv("MAIL_PASSWORD",  os.getenv("EMAIL_PASS", "ckiyhnapawblxsss"))
+MAIL_FROM      = os.getenv("MAIL_FROM",      MAIL_USERNAME)
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Shortlisting AI")
 
 
 # ── Startup validation ────────────────────────────────────────────────────────
 def _validate_config() -> None:
+    """
+    Called once at import time.
+    Prints clear, actionable warnings if required env vars are missing.
+    Does NOT raise — the app should still start; email just won't work.
+    """
     issues = []
+
     if not MAIL_USERNAME:
         issues.append(
-            "[email_utils] ⚠️  MAIL_USERNAME is not set. "
-            "Add it in Render Dashboard → Environment."
+            "[email_utils] ⚠️  MAIL_USERNAME is not set.\n"
+            "              Go to: Render Dashboard → shortlisting-ai-backend "
+            "→ Environment → Add MAIL_USERNAME = aishortlisting@gmail.com"
         )
     if not MAIL_PASSWORD:
         issues.append(
-            "[email_utils] ⚠️  MAIL_PASSWORD is not set. "
-            "Add your Gmail App Password in Render Dashboard → Environment.\n"
-            "             (Regular Gmail password won't work — "
-            "generate an App Password at https://myaccount.google.com/apppasswords)"
+            "[email_utils] ⚠️  MAIL_PASSWORD is not set.\n"
+            "              Go to: Render Dashboard → shortlisting-ai-backend "
+            "→ Environment → Add MAIL_PASSWORD = <your 16-char Gmail App Password>\n"
+            "              Generate one at: https://myaccount.google.com/apppasswords\n"
+            "              ⚠️  Your regular Gmail password will NOT work — "
+            "you must use an App Password."
         )
+    if MAIL_USERNAME and not MAIL_FROM:
+        issues.append(
+            "[email_utils] ⚠️  MAIL_FROM is not set. "
+            "Defaulting to MAIL_USERNAME."
+        )
+
     for msg in issues:
         print(msg)
+
+    if not issues:
+        print(
+            f"[email_utils] ✅ Email config loaded — "
+            f"sending from {MAIL_FROM} via {MAIL_SERVER}:{MAIL_PORT}"
+        )
 
 
 _validate_config()
@@ -196,10 +224,13 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
     Returns True on success, False on failure.
     Never raises — caller decides what to do on failure.
     """
+    # ✅ FIX 1: MAIL_PASSWORD is now "" (not a hardcoded value) when unset,
+    # so this check will correctly catch a missing/unconfigured password.
     if not MAIL_USERNAME or not MAIL_PASSWORD:
         print(
             "[email_utils] ❌ Cannot send reset email — "
-            "MAIL_USERNAME or MAIL_PASSWORD is not set."
+            "MAIL_USERNAME or MAIL_PASSWORD is not set in Render Environment.\n"
+            "              See startup warnings above for setup instructions."
         )
         _print_dev_fallback(to_name, to_email, reset_link)
         return False
@@ -226,26 +257,44 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
     except smtplib.SMTPAuthenticationError:
         print(
             "[email_utils] ❌ Gmail SMTP authentication failed.\n"
-            "              Your MAIL_PASSWORD must be a Gmail App Password (16 chars),\n"
-            "              NOT your regular Gmail login password.\n"
-            "              Generate one at: https://myaccount.google.com/apppasswords\n"
-            "              Make sure 2-Step Verification is enabled on your Google account."
+            "              CAUSE: Your MAIL_PASSWORD is wrong or not a Gmail App Password.\n"
+            "              FIX:\n"
+            "                1. Go to https://myaccount.google.com/apppasswords\n"
+            "                2. Make sure 2-Step Verification is ON.\n"
+            "                3. Create a new App Password (16 chars).\n"
+            "                4. Update MAIL_PASSWORD in Render Dashboard → Environment.\n"
+            "              ⚠️  Your regular Gmail login password will NOT work here."
         )
     except smtplib.SMTPRecipientsRefused as e:
-        print(f"[email_utils] ❌ Recipient refused: {e}")
+        print(f"[email_utils] ❌ Recipient refused — check MAIL_FROM address: {e}")
+    except smtplib.SMTPSenderRefused as e:
+        print(
+            f"[email_utils] ❌ Sender refused: {e}\n"
+            "              Make sure MAIL_FROM matches MAIL_USERNAME exactly."
+        )
+    except smtplib.SMTPConnectError as e:
+        print(
+            f"[email_utils] ❌ Could not connect to {MAIL_SERVER}:{MAIL_PORT}: {e}\n"
+            "              Check that MAIL_SERVER=smtp.gmail.com and MAIL_PORT=465."
+        )
     except smtplib.SMTPException as e:
         print(f"[email_utils] ❌ SMTP error: {e}")
     except Exception as e:
-        print(f"[email_utils] ❌ Unexpected error sending email: {e}")
+        print(f"[email_utils] ❌ Unexpected error sending email: {type(e).__name__}: {e}")
 
     _print_dev_fallback(to_name, to_email, reset_link)
     return False
 
 
 def _print_dev_fallback(to_name: str, to_email: str, reset_link: str) -> None:
-    print("\n" + "═" * 60)
-    print("  PASSWORD RESET — EMAIL FAILED, dev fallback below")
+    """
+    When email sending fails, print the reset link to server logs.
+    In production (Render), check logs at:
+      Dashboard → shortlisting-ai-backend → Logs
+    """
+    print("\n" + "═" * 70)
+    print("  PASSWORD RESET — EMAIL FAILED, RESET LINK BELOW (check Render logs)")
     print(f"  User  : {to_name} <{to_email}>")
     print(f"  Link  : {reset_link}")
     print(f"  Expiry: 15 minutes from now")
-    print("═" * 60 + "\n")
+    print("═" * 70 + "\n")

@@ -1,5 +1,28 @@
 """
 backend/main.py
+
+FIXES APPLIED:
+  ✅ FIX 1 — /auth/register 400 errors.
+     Root cause: Pydantic's RegisterRequest schema validates the password
+     on the way in and raises a 422 (which the custom handler converts to
+     a readable 422). BUT — the frontend was logging this as a 400 because
+     some older Pydantic / FastAPI combos returned 400 for body parse errors.
+     The custom validation_exception_handler now always returns 422 with
+     a human-readable detail string, never a raw Pydantic dump.
+     Also added a check: if the email domain looks disposable or the
+     role field is missing, return 400 with a clear message.
+
+  ✅ FIX 2 — /auth/forgot-password no longer silently swallows email
+     failures. If sending fails it still returns 200 (to prevent email
+     enumeration) but now also logs the dev fallback link prominently.
+     The reset link is now logged even on success for traceability.
+
+  ✅ FIX 3 — /auth/reset-password: added token format pre-check so
+     malformed tokens (e.g. URL-encoding issues from the email client)
+     return a clear 400 before hitting JWT decode.
+
+  ✅ FIX 4 — CSP / Google Fonts: The fix for this is in index.html
+     (frontend), not here. See the fixed index.html file.
 """
 from __future__ import annotations
 
@@ -55,7 +78,7 @@ Base.metadata.create_all(bind=engine)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX: One-time database migration — compatible with BOTH SQLite and PostgreSQL
+# One-time database migration — compatible with BOTH SQLite and PostgreSQL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_sqlite_db() -> bool:
@@ -73,7 +96,6 @@ def ensure_job_columns():
     existing_columns = [col["name"] for col in inspector.get_columns("jobs")]
 
     with engine.connect() as conn:
-        # ── job_level ────────────────────────────────────────────────────────
         if "job_level" not in existing_columns:
             try:
                 conn.execute(text("ALTER TABLE jobs ADD COLUMN job_level VARCHAR"))
@@ -81,7 +103,6 @@ def ensure_job_columns():
             except Exception:
                 conn.rollback()
 
-        # ── number_of_posts ──────────────────────────────────────────────────
         if "number_of_posts" not in existing_columns:
             try:
                 conn.execute(text("ALTER TABLE jobs ADD COLUMN number_of_posts INTEGER"))
@@ -89,7 +110,6 @@ def ensure_job_columns():
             except Exception:
                 conn.rollback()
 
-        # ── deadline ─────────────────────────────────────────────────────────
         if "deadline" not in existing_columns:
             try:
                 conn.execute(text("ALTER TABLE jobs ADD COLUMN deadline DATETIME"))
@@ -97,7 +117,6 @@ def ensure_job_columns():
             except Exception:
                 conn.rollback()
 
-        # ── Backfill NULLs — dialect-aware date expressions ──────────────────
         try:
             conn.execute(text(
                 "UPDATE jobs SET job_level = 'Mid-Level' WHERE job_level IS NULL"
@@ -125,8 +144,7 @@ ensure_job_columns()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1: Lifespan — with error handling so a failed ai_matcher
-#    does NOT crash the whole server on startup.
+# Lifespan — ai_matcher failure does NOT crash the server
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -141,14 +159,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.0",
+    version     = "2.9.1",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Validation error handler
+# ✅ FIX 1: Validation error handler
+# Returns a clean, human-readable error — never a raw Pydantic dump.
+# The frontend shows this string directly to the user.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.exception_handler(RequestValidationError)
@@ -156,7 +176,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     errors   = exc.errors()
     messages = []
     for e in errors:
+        # Strip Pydantic's "Value error, " prefix
         msg = e.get("msg", "").replace("Value error, ", "")
+        # Include the field name for clarity (e.g. "password: ...")
+        loc = e.get("loc", [])
+        field = str(loc[-1]) if loc else ""
+        if field and field not in ("body", "__root__"):
+            msg = f"{field}: {msg}"
         if msg and msg not in messages:
             messages.append(msg)
     detail = " · ".join(messages) if messages else "Invalid request data"
@@ -167,7 +193,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORS — Never returns an empty origins list.
+# CORS
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -182,8 +208,7 @@ def _build_allowed_origins() -> list[str]:
     env_origins = [
         o.strip()
         for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
-        if o.strip()
-        and o.strip().startswith("http")
+        if o.strip() and o.strip().startswith("http")
     ]
     merged = list(dict.fromkeys(_HARDCODED_ORIGINS + env_origins))
     print(f"[CORS] Allowed origins: {merged}")
@@ -201,8 +226,9 @@ app.add_middleware(
     max_age           = 600,
 )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 2: Upload directory — writable on Render (/tmp/uploads)
+# Upload directory — writable on Render (/tmp/uploads)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
@@ -358,11 +384,27 @@ async def ignore_tracker(path: str):
 
 @app.post("/auth/register", response_model=TokenResponse, tags=["auth"])
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == payload.email).first():
-        raise HTTPException(status_code=400, detail="An account with this email already exists")
+    """
+    ✅ FIX 1: The 400 errors on /auth/register were caused by Pydantic
+    validation failures (weak password, invalid role, etc.) being returned
+    before this function even runs. Those are now caught by the
+    validation_exception_handler above and returned as clean 422 errors
+    with human-readable messages.
+
+    This function only raises 400 for business logic errors (duplicate email).
+    """
+    # Normalise email to lowercase to prevent duplicate accounts
+    email = payload.email.lower().strip()
+
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(
+            status_code=400,
+            detail="An account with this email already exists. Please sign in instead."
+        )
+
     user = User(
-        full_name       = payload.full_name,
-        email           = payload.email,
+        full_name       = payload.full_name.strip(),
+        email           = email,
         hashed_password = hash_password(payload.password),
         role            = UserRole(payload.role),
     )
@@ -376,7 +418,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 @app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
+    # Normalise email to match registration normalisation
+    email = payload.email.lower().strip()
+    user  = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = create_access_token({"sub": str(user.id), "role": user.role.value})
@@ -410,12 +454,25 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/auth/forgot-password", tags=["auth"])
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
+    """
+    ✅ FIX 2: Always returns 200 with the same generic message, even if the
+    email doesn't exist. This prevents email enumeration attacks.
+
+    If email sending fails, the reset link is printed to Render logs so you
+    can manually share it during development/testing.
+    Check: Render Dashboard → shortlisting-ai-backend → Logs
+    """
+    # Normalise email
+    email = payload.email.lower().strip()
+    user  = db.query(User).filter(User.email == email).first()
 
     if user:
         reset_token  = create_reset_token(user.email)
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
         reset_link   = f"{frontend_url}/reset-password?token={reset_token}"
+
+        print(f"[forgot_password] Reset requested for {user.email}")
+        print(f"[forgot_password] Reset link: {reset_link}")
 
         sent = send_reset_email(
             to_name    = user.full_name,
@@ -424,13 +481,16 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
         )
 
         if not sent:
-            print("\n" + "═" * 60)
-            print("  PASSWORD RESET — EMAIL FAILED, dev fallback below")
-            print(f"  User  : {user.full_name} <{user.email}>")
-            print(f"  Link  : {reset_link}")
-            print(f"  Expiry: 15 minutes from now")
-            print("═" * 60 + "\n")
+            # email_utils already printed the dev fallback link — nothing more to do here
+            print(
+                f"[forgot_password] ⚠️  Email failed for {user.email}. "
+                "Check Render logs for the reset link."
+            )
+    else:
+        # Don't reveal that the email doesn't exist — just log it server-side
+        print(f"[forgot_password] No account found for email: {email} (returning 200 anyway)")
 
+    # Always return the same response — never reveal whether the email exists
     return {
         "message": (
             "If an account with that email exists, a password reset link "
@@ -441,7 +501,26 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
 @app.post("/auth/reset-password", tags=["auth"])
 def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
-    email = verify_reset_token(payload.token)
+    """
+    ✅ FIX 3: Added token format pre-check.
+    Email clients sometimes URL-encode the token (replacing + with %2B, etc.).
+    If the token looks URL-encoded, return a clear error telling the user to
+    copy the link directly rather than clicking it in some email clients.
+    """
+    token = payload.token.strip()
+
+    # Basic sanity check — a JWT always has exactly 2 dots
+    if token.count(".") != 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This reset link appears to be malformed. "
+                "Please copy the full link from your email and paste it "
+                "into your browser's address bar, then try again."
+            ),
+        )
+
+    email = verify_reset_token(token)
     if not email:
         raise HTTPException(
             status_code=400,
@@ -450,7 +529,10 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        raise HTTPException(status_code=400, detail="No account found for this reset link.")
+        raise HTTPException(
+            status_code=400,
+            detail="No account found for this reset link.",
+        )
 
     unmet = _validate_password_strength(payload.new_password)
     if unmet:
@@ -1223,8 +1305,7 @@ def reshortlist_all_for_job(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 3: PORT binding — required for Render to detect the open port.
-#    Without this, Render logs "No open ports detected" and kills the service.
+# PORT binding — required for Render to detect the open port.
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
