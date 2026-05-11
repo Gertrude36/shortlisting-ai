@@ -1,110 +1,67 @@
 """
 backend/email_utils.py
 
-Sends password-reset emails via Gmail SMTP (smtplib — no external dependencies).
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  FIXES APPLIED:
-  ─────────────────────────────────────────────────────────────
-  ✅ FIX 1 — Removed hardcoded Gmail App Password fallback.
-     The previous version had the real App Password embedded in
-     the source code as a default argument:
-         os.getenv("MAIL_PASSWORD", os.getenv("EMAIL_PASS", "ckiyhnapawblxsss"))
-     This is a serious security risk (credentials in version control)
-     and also caused silent failures: if the env var wasn't set,
-     the hardcoded password was used — but that password may have
-     been rotated or revoked, causing SMTPAuthenticationError with
-     no obvious explanation.
-     Fix: default is now "" (empty string). Missing credentials are
-     caught clearly by _validate_config() at startup.
+  ROOT CAUSE OF EMAIL FAILURE ON RENDER FREE TIER:
+  ─────────────────────────────────────────────────
+  Render's free tier BLOCKS all outbound SMTP connections.
+  This means Gmail SMTP (port 465 or 587) will ALWAYS fail
+  with: OSError: [Errno 101] Network is unreachable
 
-  ✅ FIX 2 — Startup validation now prints a clear, actionable
-     message pointing directly to Render Dashboard → Environment.
-     Previously the warning was vague.
+  FIX: Switched to Resend (https://resend.com) which uses
+  HTTPS (port 443) — never blocked by Render free tier.
 
-  ✅ FIX 3 — send_reset_email() now returns the reset link in its
-     return value on success, so callers can log or act on it.
-     Also improved error logging granularity.
+  Resend free tier: 3,000 emails/month, 100/day. No credit card.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-GMAIL SETUP (one-time, ~2 minutes):
-  ⚠️  Gmail requires an App Password — your regular Gmail password
-      will NOT work if 2FA is enabled (and it should be enabled).
+SETUP (5 minutes):
 
-  Steps:
-    1. Go to https://myaccount.google.com/security
-    2. Make sure 2-Step Verification is ON.
-    3. Search "App passwords" in your Google Account settings.
-    4. Create a new App Password → select "Mail" + "Other (custom name)"
-       → name it "Shortlisting AI" → Google gives you a 16-char password.
-    5. In Render Dashboard → Your Service → Environment, set:
-         MAIL_USERNAME  = aishortlisting@gmail.com
-         MAIL_PASSWORD  = xxxx xxxx xxxx xxxx   ← the 16-char app password
-                          (paste with OR without spaces — both work)
-         MAIL_FROM      = aishortlisting@gmail.com
-         MAIL_FROM_NAME = Shortlisting AI
+  1. Go to https://resend.com → Sign Up (free, no credit card)
 
-REQUIRED ENV VARS (set in Render Dashboard → Environment):
-  MAIL_USERNAME    Gmail address used to send      e.g. aishortlisting@gmail.com
-  MAIL_PASSWORD    Gmail App Password (16 chars)   e.g. ckiy hnap awbl xxxx
-  MAIL_FROM        Sender address                  e.g. aishortlisting@gmail.com
-  MAIL_FROM_NAME   Sender display name             e.g. Shortlisting AI
+  2. Get your API key:
+     Resend Dashboard → API Keys → Create API Key → copy it
+
+  3. Sender address:
+     On Resend free tier you can send FROM:
+       onboarding@resend.dev   ← works immediately, no setup needed
+     OR your own domain (requires DNS verification in Resend).
+     Use onboarding@resend.dev for now — it works instantly.
+
+  4. Add to Render Dashboard → shortlisting-ai-backend → Environment:
+       RESEND_API_KEY  = re_xxxxxxxxxxxxxxxxxxxx
+       MAIL_FROM       = onboarding@resend.dev
+       MAIL_FROM_NAME  = Shortlisting AI
+
+  No SMTP. No App Password. No port issues. Just works.
 """
 
 import os
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import json
+import urllib.request
+import urllib.error
 
-# ── Config from environment ───────────────────────────────────────────────────
-MAIL_SERVER    = os.getenv("MAIL_SERVER",    "smtp.gmail.com")
-MAIL_PORT      = int(os.getenv("MAIL_PORT",  "465"))
-MAIL_USERNAME  = os.getenv("MAIL_USERNAME",  os.getenv("EMAIL_USER", "aishortlisting@gmail.com"))
-# ✅ FIX 1: No hardcoded password fallback — empty string forces proper config.
-MAIL_PASSWORD  = os.getenv("MAIL_PASSWORD",  os.getenv("EMAIL_PASS", "ckiyhnapawblxsss"))
-MAIL_FROM      = os.getenv("MAIL_FROM",      MAIL_USERNAME)
+# ── Config ────────────────────────────────────────────────────────────────────
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_CHKq5B2L_MR36mR1HHW19taEB1j6SirpV")
+MAIL_FROM      = os.getenv("MAIL_FROM",      "onboarding@resend.dev")
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Shortlisting AI")
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 # ── Startup validation ────────────────────────────────────────────────────────
 def _validate_config() -> None:
-    """
-    Called once at import time.
-    Prints clear, actionable warnings if required env vars are missing.
-    Does NOT raise — the app should still start; email just won't work.
-    """
-    issues = []
-
-    if not MAIL_USERNAME:
-        issues.append(
-            "[email_utils] ⚠️  MAIL_USERNAME is not set.\n"
-            "              Go to: Render Dashboard → shortlisting-ai-backend "
-            "→ Environment → Add MAIL_USERNAME = aishortlisting@gmail.com"
-        )
-    if not MAIL_PASSWORD:
-        issues.append(
-            "[email_utils] ⚠️  MAIL_PASSWORD is not set.\n"
-            "              Go to: Render Dashboard → shortlisting-ai-backend "
-            "→ Environment → Add MAIL_PASSWORD = <your 16-char Gmail App Password>\n"
-            "              Generate one at: https://myaccount.google.com/apppasswords\n"
-            "              ⚠️  Your regular Gmail password will NOT work — "
-            "you must use an App Password."
-        )
-    if MAIL_USERNAME and not MAIL_FROM:
-        issues.append(
-            "[email_utils] ⚠️  MAIL_FROM is not set. "
-            "Defaulting to MAIL_USERNAME."
-        )
-
-    for msg in issues:
-        print(msg)
-
-    if not issues:
+    if not RESEND_API_KEY:
         print(
-            f"[email_utils] ✅ Email config loaded — "
-            f"sending from {MAIL_FROM} via {MAIL_SERVER}:{MAIL_PORT}"
+            "[email_utils] ⚠️  RESEND_API_KEY is not set.\n"
+            "              1. Sign up free at https://resend.com\n"
+            "              2. Dashboard → API Keys → Create API Key\n"
+            "              3. Render Dashboard → shortlisting-ai-backend "
+            "→ Environment → Add RESEND_API_KEY"
+        )
+    else:
+        print(
+            f"[email_utils] ✅ Resend config loaded — "
+            f"sending from '{MAIL_FROM_NAME} <{MAIL_FROM}>'"
         )
 
 
@@ -219,79 +176,80 @@ If you did not request this, you can safely ignore this email.
 
 def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
     """
-    Send a password-reset email via Gmail SMTP (SSL on port 465).
+    Send a password-reset email via Resend HTTP API (port 443 — works on Render free tier).
+    Uses only Python stdlib (urllib) — no extra pip installs needed.
 
-    Returns True on success, False on failure.
-    Never raises — caller decides what to do on failure.
+    Returns True on success, False on failure. Never raises.
     """
-    # ✅ FIX 1: MAIL_PASSWORD is now "" (not a hardcoded value) when unset,
-    # so this check will correctly catch a missing/unconfigured password.
-    if not MAIL_USERNAME or not MAIL_PASSWORD:
+    if not RESEND_API_KEY:
         print(
-            "[email_utils] ❌ Cannot send reset email — "
-            "MAIL_USERNAME or MAIL_PASSWORD is not set in Render Environment.\n"
-            "              See startup warnings above for setup instructions."
+            "[email_utils] ❌ Cannot send email — RESEND_API_KEY is not set.\n"
+            "              Sign up free at https://resend.com and add the key to Render."
         )
         _print_dev_fallback(to_name, to_email, reset_link)
         return False
 
-    # ── Build the MIME message ────────────────────────────────────────────────
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Reset your Shortlisting AI password"
-    msg["From"]    = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
-    msg["To"]      = to_email
+    payload = json.dumps({
+        "from":    f"{MAIL_FROM_NAME} <{MAIL_FROM}>",
+        "to":      [to_email],
+        "subject": "Reset your Shortlisting AI password",
+        "html":    _build_html(to_name, reset_link),
+        "text":    _build_plain(to_name, reset_link),
+    }).encode("utf-8")
 
-    msg.attach(MIMEText(_build_plain(to_name, reset_link), "plain"))
-    msg.attach(MIMEText(_build_html(to_name, reset_link),  "html"))
+    req = urllib.request.Request(
+        RESEND_API_URL,
+        data    = payload,
+        headers = {
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type":  "application/json",
+        },
+        method = "POST",
+    )
 
-    # ── Send via Gmail SMTP with SSL (port 465) ───────────────────────────────
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(MAIL_SERVER, MAIL_PORT, context=context) as server:
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.sendmail(MAIL_FROM, to_email, msg.as_string())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body     = resp.read().decode("utf-8")
+            data     = json.loads(body)
+            email_id = data.get("id", "unknown")
+            print(f"[email_utils] ✅ Reset email sent to {to_email} via Resend (id={email_id}).")
+            return True
 
-        print(f"[email_utils] ✅ Reset email sent to {to_email} via Gmail SMTP.")
-        return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        try:
+            err = json.loads(body)
+            msg = err.get("message") or err.get("name") or body
+        except Exception:
+            msg = body
 
-    except smtplib.SMTPAuthenticationError:
-        print(
-            "[email_utils] ❌ Gmail SMTP authentication failed.\n"
-            "              CAUSE: Your MAIL_PASSWORD is wrong or not a Gmail App Password.\n"
-            "              FIX:\n"
-            "                1. Go to https://myaccount.google.com/apppasswords\n"
-            "                2. Make sure 2-Step Verification is ON.\n"
-            "                3. Create a new App Password (16 chars).\n"
-            "                4. Update MAIL_PASSWORD in Render Dashboard → Environment.\n"
-            "              ⚠️  Your regular Gmail login password will NOT work here."
-        )
-    except smtplib.SMTPRecipientsRefused as e:
-        print(f"[email_utils] ❌ Recipient refused — check MAIL_FROM address: {e}")
-    except smtplib.SMTPSenderRefused as e:
-        print(
-            f"[email_utils] ❌ Sender refused: {e}\n"
-            "              Make sure MAIL_FROM matches MAIL_USERNAME exactly."
-        )
-    except smtplib.SMTPConnectError as e:
-        print(
-            f"[email_utils] ❌ Could not connect to {MAIL_SERVER}:{MAIL_PORT}: {e}\n"
-            "              Check that MAIL_SERVER=smtp.gmail.com and MAIL_PORT=465."
-        )
-    except smtplib.SMTPException as e:
-        print(f"[email_utils] ❌ SMTP error: {e}")
+        if e.code == 401:
+            print(
+                "[email_utils] ❌ Resend 401 — API key is invalid or expired.\n"
+                "              Generate a new one at: https://resend.com/api-keys\n"
+                "              Then update RESEND_API_KEY in Render Environment.\n"
+                f"              Detail: {msg}"
+            )
+        elif e.code == 422:
+            print(
+                f"[email_utils] ❌ Resend 422 — request rejected: {msg}\n"
+                "              Fix: set MAIL_FROM=onboarding@resend.dev in Render Environment\n"
+                "              (or verify your own domain at https://resend.com/domains)"
+            )
+        else:
+            print(f"[email_utils] ❌ Resend HTTP {e.code}: {msg}")
+
+    except urllib.error.URLError as e:
+        print(f"[email_utils] ❌ Could not reach Resend API: {e.reason}")
     except Exception as e:
-        print(f"[email_utils] ❌ Unexpected error sending email: {type(e).__name__}: {e}")
+        print(f"[email_utils] ❌ Unexpected error: {type(e).__name__}: {e}")
 
     _print_dev_fallback(to_name, to_email, reset_link)
     return False
 
 
 def _print_dev_fallback(to_name: str, to_email: str, reset_link: str) -> None:
-    """
-    When email sending fails, print the reset link to server logs.
-    In production (Render), check logs at:
-      Dashboard → shortlisting-ai-backend → Logs
-    """
+    """Prints the reset link to Render logs when email fails."""
     print("\n" + "═" * 70)
     print("  PASSWORD RESET — EMAIL FAILED, RESET LINK BELOW (check Render logs)")
     print(f"  User  : {to_name} <{to_email}>")
