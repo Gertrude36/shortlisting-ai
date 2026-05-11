@@ -216,15 +216,41 @@ def _build_allowed_origins() -> list[str]:
 
 ALLOWED_ORIGINS = _build_allowed_origins()
 
+# ✅ CORS FIX: Middleware must be added BEFORE any routes are defined.
+# allow_origin_regex covers any Vercel preview deployments too
+# (e.g. shortlisting-ai-abc123-gertrude36.vercel.app).
 app.add_middleware(
     CORSMiddleware,
     allow_origins     = ALLOWED_ORIGINS,
+    allow_origin_regex= r"https://shortlisting-ai.*\.vercel\.app",
     allow_credentials = True,
     allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers     = ["*"],
     expose_headers    = ["*"],
     max_age           = 600,
 )
+
+
+# ✅ CORS FIX: Explicit OPTIONS preflight handler.
+# When the browser sends a preflight OPTIONS request, FastAPI must respond
+# with the correct headers BEFORE the actual request is sent.
+# Without this, some FastAPI + Render combinations drop the CORS headers
+# on preflight responses, causing the browser to block the real request.
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str, request: Request):
+    origin = request.headers.get("origin", "")
+    is_allowed = (
+        origin in ALLOWED_ORIGINS
+        or re.match(r"https://shortlisting-ai.*\.vercel\.app", origin)
+    )
+    headers = {
+        "Access-Control-Allow-Origin":      origin if is_allowed else "",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers":     "*",
+        "Access-Control-Max-Age":           "600",
+    }
+    return JSONResponse(content={}, headers=headers, status_code=200)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
