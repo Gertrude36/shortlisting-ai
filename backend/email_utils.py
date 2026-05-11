@@ -42,7 +42,7 @@ import urllib.request
 import urllib.error
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_CHKq5B2L_MR36mR1HHW19taEB1j6SirpV")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 MAIL_FROM      = os.getenv("MAIL_FROM",      "onboarding@resend.dev")
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Shortlisting AI")
 RESEND_API_URL = "https://api.resend.com/emails"
