@@ -3,7 +3,6 @@
  *
  * Step 1 of the password-reset flow.
  * Calls  POST /auth/forgot-password  with { email }.
- * The backend prints the reset link to the uvicorn terminal (dev mode).
  *
  * WIRE-UP in your router (App.jsx / main.jsx):
  *   import ForgotPassword from "./pages/ForgotPassword";
@@ -13,13 +12,15 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API      = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// ✅ FIX: Only show dev hint in local development, never in production
+const IS_DEV   = import.meta.env.DEV === true;
 
 export default function ForgotPassword() {
-  const [email, setEmail]       = useState("");
-  const [loading, setLoading]   = useState(false);
-  const [success, setSuccess]   = useState(false);
-  const [error, setError]       = useState("");
+  const [email,   setEmail]   = useState("");
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [error,   setError]   = useState("");
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -41,7 +42,6 @@ export default function ForgotPassword() {
       const data = await res.json();
 
       if (!res.ok) {
-        // Backend always returns 200 for this endpoint, but guard just in case
         setError(data.detail || "Something went wrong. Please try again.");
         return;
       }
@@ -72,11 +72,15 @@ export default function ForgotPassword() {
           <p style={{ ...styles.body, marginTop: 8 }}>
             Don't see it? Check your <strong>spam / junk folder</strong>.
           </p>
-          {/* DEV HINT — remove in production */}
-          <div style={styles.devHint}>
-            🛠 <strong>Dev mode:</strong> The reset link has been printed to
-            your <code>uvicorn</code> terminal. Copy it from there.
-          </div>
+
+          {/* ✅ FIX: Dev hint only shows in local dev (npm run dev), hidden in production build */}
+          {IS_DEV && (
+            <div style={styles.devHint}>
+              🛠 <strong>Dev mode:</strong> The reset link has been printed to
+              your <code>uvicorn</code> terminal. Copy it from there.
+            </div>
+          )}
+
           <Link to="/login" style={styles.backLink}>← Back to Sign In</Link>
         </div>
       </div>
@@ -156,16 +160,16 @@ const styles = {
     fontSize: 40,
   },
   title: {
-    fontSize:     22,
-    fontWeight:   700,
-    color:        "#1a2340",
-    margin:       "0 0 8px",
+    fontSize:   22,
+    fontWeight: 700,
+    color:      "#1a2340",
+    margin:     "0 0 8px",
   },
   subtitle: {
-    fontSize:     14,
-    color:        "#5a6480",
-    lineHeight:   1.6,
-    margin:       "0 0 24px",
+    fontSize:   14,
+    color:      "#5a6480",
+    lineHeight: 1.6,
+    margin:     "0 0 24px",
   },
   body: {
     fontSize:   14,
@@ -213,12 +217,12 @@ const styles = {
     transition:   "opacity 0.2s",
   },
   backLink: {
-    display:    "block",
-    marginTop:  20,
-    fontSize:   13,
-    color:      "#3b5bdb",
+    display:        "block",
+    marginTop:      20,
+    fontSize:       13,
+    color:          "#3b5bdb",
     textDecoration: "none",
-    fontWeight: 500,
+    fontWeight:     500,
   },
   devHint: {
     marginTop:    16,

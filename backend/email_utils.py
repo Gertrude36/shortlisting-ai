@@ -3,34 +3,45 @@ backend/email_utils.py
 
 Sends password-reset emails via Resend API (https://resend.com).
 
-WHY RESEND INSTEAD OF SMTP?
-  Render.com (and most cloud platforms) BLOCK outbound SMTP connections
-  on ports 465 and 587. That is why you see:
-    [Errno 101] Network is unreachable
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ROOT CAUSE OF THE 403 ERROR YOU SAW:
+  ─────────────────────────────────────
+  Error 1010 = Cloudflare bot-protection blocked the request.
+  Two things caused it:
+    1. MAIL_FROM was set to aishortlisting@gmail.com — a Gmail
+       address that is NOT verified in Resend → instant 403.
+    2. Missing User-Agent header → Cloudflare treats the request
+       as a bot and blocks it.
 
-  Resend uses plain HTTPS (port 443) which is NEVER blocked.
-  Free tier: 3,000 emails/month, 100/day — more than enough.
+  BOTH are fixed below.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SETUP (one-time, ~3 minutes):
-  1. Sign up free at https://resend.com
-  2. Go to API Keys → Create API Key → copy it
-  3. Go to Domains → Add Domain (or use the free sandbox:
-       from: onboarding@resend.dev  ← works instantly, no domain needed)
-  4. In Render Dashboard → Your Service → Environment → Add:
-       RESEND_API_KEY = re_xxxxxxxxxxxxxxxxxxxx
-       MAIL_FROM      = onboarding@resend.dev   (or your verified domain email)
-       MAIL_FROM_NAME = Shortlisting AI
+SETUP (one-time, ~5 minutes):
+  OPTION A — Free sandbox (no domain needed, works instantly):
+    1. Sign up free at https://resend.com
+    2. Go to API Keys → Create API Key → copy it
+    3. In Render Dashboard → Your Service → Environment → Add:
+         RESEND_API_KEY = re_xxxxxxxxxxxxxxxxxxxx
+         MAIL_FROM      = onboarding@resend.dev      ← free sandbox sender
+         MAIL_FROM_NAME = Shortlisting AI
 
-  That's it. No App Passwords, no 2FA, no SMTP config needed.
+  OPTION B — Your own domain (recommended for production):
+    1. Sign up free at https://resend.com
+    2. Go to Domains → Add Domain → add your domain → verify DNS
+    3. Go to API Keys → Create API Key → copy it
+    4. In Render Dashboard → Your Service → Environment → Add:
+         RESEND_API_KEY = re_xxxxxxxxxxxxxxxxxxxx
+         MAIL_FROM      = noreply@yourdomain.com     ← must match verified domain
+         MAIL_FROM_NAME = Shortlisting AI
+
+  ⚠️  NEVER use a Gmail / Yahoo / Hotmail address as MAIL_FROM.
+      Resend only accepts addresses from domains you have verified,
+      OR the sandbox address onboarding@resend.dev.
 
 REQUIRED ENV VARS:
   RESEND_API_KEY   your Resend API key  (re_xxxx...)
-  MAIL_FROM        sender address       (onboarding@resend.dev for sandbox)
+  MAIL_FROM        sender address       (onboarding@resend.dev  OR  noreply@yourdomain.com)
   MAIL_FROM_NAME   sender display name  (Shortlisting AI)
-
-OPTIONAL FALLBACK:
-  If RESEND_API_KEY is not set, the reset link is printed to logs
-  (same dev-mode behaviour as before).
 """
 
 import os
@@ -39,24 +50,39 @@ import urllib.request
 import urllib.error
 
 # ── Config from environment ───────────────────────────────────────────────────
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_LrQHbr7r_5dPT4DftE34AP6mUHR37kUzs")
-MAIL_FROM      = os.getenv("MAIL_FROM","aishortlisting@gmail.com")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+MAIL_FROM      = os.getenv("MAIL_FROM", "onboarding@resend.dev")
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Shortlisting AI")
 
-# ── Startup warning if not configured ────────────────────────────────────────
-if not RESEND_API_KEY:
-    print(
-        "\n[email_utils] ⚠️  WARNING: RESEND_API_KEY is not set!\n"
-        "             Password reset emails will NOT be delivered.\n"
-        "             Fix:\n"
-        "               1. Sign up free at https://resend.com\n"
-        "               2. Create an API key\n"
-        "               3. Add to Render Dashboard → Environment:\n"
-        "                    RESEND_API_KEY = re_xxxxxxxxxxxx\n"
-        "                    MAIL_FROM      = onboarding@resend.dev\n"
-    )
+# ── Startup validation ────────────────────────────────────────────────────────
+def _validate_config():
+    warnings = []
+
+    if not RESEND_API_KEY:
+        warnings.append(
+            "\n[email_utils] ⚠️  WARNING: RESEND_API_KEY is not set!\n"
+            "             Password reset emails will NOT be delivered.\n"
+            "             Fix: Add RESEND_API_KEY to Render Dashboard → Environment."
+        )
+
+    # Warn if someone left a Gmail/Hotmail/Yahoo address as MAIL_FROM
+    free_providers = ("@gmail.com", "@yahoo.com", "@hotmail.com", "@outlook.com")
+    if any(MAIL_FROM.lower().endswith(p) for p in free_providers):
+        warnings.append(
+            f"\n[email_utils] ⚠️  WARNING: MAIL_FROM is set to '{MAIL_FROM}'.\n"
+            "             Resend does NOT allow free email providers as senders.\n"
+            "             Fix: Set MAIL_FROM to one of:\n"
+            "               • onboarding@resend.dev  (free sandbox, works instantly)\n"
+            "               • noreply@yourdomain.com  (after verifying domain in Resend)\n"
+        )
+
+    for w in warnings:
+        print(w)
+
+_validate_config()
 
 
+# ── HTML email template ───────────────────────────────────────────────────────
 def _build_html(to_name: str, reset_link: str) -> str:
     return f"""
 <!DOCTYPE html>
@@ -178,6 +204,14 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
         _print_dev_fallback(to_name, to_email, reset_link)
         return False
 
+    # Warn (but still try) if MAIL_FROM looks like a free provider
+    free_providers = ("@gmail.com", "@yahoo.com", "@hotmail.com", "@outlook.com")
+    if any(MAIL_FROM.lower().endswith(p) for p in free_providers):
+        print(
+            f"[email_utils] ⚠️  MAIL_FROM '{MAIL_FROM}' is a free email provider.\n"
+            "              Resend will reject this with 403. Use onboarding@resend.dev instead."
+        )
+
     payload = json.dumps({
         "from":    f"{MAIL_FROM_NAME} <{MAIL_FROM}>",
         "to":      [to_email],
@@ -193,21 +227,49 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
         headers = {
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type":  "application/json",
+            # ✅ FIX: Adding User-Agent prevents Cloudflare error 1010 (bot block)
+            "User-Agent":    "ShortlistingAI/1.0 (contact@shortlisting.ai)",
         },
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode()
             print(f"[email_utils] ✅ Reset email sent to {to_email} via Resend. Response: {body}")
             return True
 
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else "(no body)"
-        print(
-            f"[email_utils] ❌ Resend API HTTP error {e.code}: {body}\n"
-            f"              Dev fallback reset link: {reset_link}"
-        )
+
+        # Provide actionable guidance for common error codes
+        if e.code == 403:
+            print(
+                f"[email_utils] ❌ Resend API 403 Forbidden.\n"
+                f"              Response: {body}\n"
+                "              Most likely causes:\n"
+                "                1. MAIL_FROM is a Gmail/Yahoo/Hotmail address — not allowed.\n"
+                "                   Fix: Set MAIL_FROM=onboarding@resend.dev in Render env vars.\n"
+                "                2. RESEND_API_KEY is wrong or expired.\n"
+                "                   Fix: Regenerate key at https://resend.com/api-keys\n"
+            )
+        elif e.code == 422:
+            print(
+                f"[email_utils] ❌ Resend API 422 Unprocessable.\n"
+                f"              Response: {body}\n"
+                "              MAIL_FROM domain is not verified in Resend.\n"
+                "              Fix: Use onboarding@resend.dev OR verify your domain at https://resend.com/domains\n"
+            )
+        elif e.code == 401:
+            print(
+                f"[email_utils] ❌ Resend API 401 Unauthorized.\n"
+                "              RESEND_API_KEY is missing or invalid.\n"
+                "              Fix: Check your key at https://resend.com/api-keys\n"
+            )
+        else:
+            print(
+                f"[email_utils] ❌ Resend API HTTP error {e.code}: {body}"
+            )
+
     except urllib.error.URLError as e:
         print(
             f"[email_utils] ❌ Resend API connection error: {e.reason}\n"
