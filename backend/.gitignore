@@ -1,0 +1,8 @@
+__pycache__/
+node_modules/
+poppler-25.12.0/
+uploads/
+*.db
+*.sqbpro
+shortlisting/
+.env

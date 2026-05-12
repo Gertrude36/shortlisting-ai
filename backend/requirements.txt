@@ -18,7 +18,7 @@ xgboost==2.0.3
 pandas>=2.2.3
 numpy>=2.0.0
 python-dotenv==1.0.1
-opencv-python-headless==4.13.0.92
+opencv-python-headless>=4.9.0
 
 # ── Document processing ───────────────────────────────────────
 Pillow==10.3.0
