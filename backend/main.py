@@ -216,9 +216,6 @@ def _build_allowed_origins() -> list[str]:
 
 ALLOWED_ORIGINS = _build_allowed_origins()
 
-# ✅ CORS FIX: Middleware must be added BEFORE any routes are defined.
-# allow_origin_regex covers any Vercel preview deployments too
-# (e.g. shortlisting-ai-abc123-gertrude36.vercel.app).
 app.add_middleware(
     CORSMiddleware,
     allow_origins     = ALLOWED_ORIGINS,
@@ -231,11 +228,6 @@ app.add_middleware(
 )
 
 
-# ✅ CORS FIX: Explicit OPTIONS preflight handler.
-# When the browser sends a preflight OPTIONS request, FastAPI must respond
-# with the correct headers BEFORE the actual request is sent.
-# Without this, some FastAPI + Render combinations drop the CORS headers
-# on preflight responses, causing the browser to block the real request.
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str, request: Request):
     origin = request.headers.get("origin", "")
@@ -410,16 +402,6 @@ async def ignore_tracker(path: str):
 
 @app.post("/auth/register", response_model=TokenResponse, tags=["auth"])
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    """
-    ✅ FIX 1: The 400 errors on /auth/register were caused by Pydantic
-    validation failures (weak password, invalid role, etc.) being returned
-    before this function even runs. Those are now caught by the
-    validation_exception_handler above and returned as clean 422 errors
-    with human-readable messages.
-
-    This function only raises 400 for business logic errors (duplicate email).
-    """
-    # Normalise email to lowercase to prevent duplicate accounts
     email = payload.email.lower().strip()
 
     if db.query(User).filter(User.email == email).first():
@@ -444,7 +426,6 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 @app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    # Normalise email to match registration normalisation
     email = payload.email.lower().strip()
     user  = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
@@ -480,15 +461,6 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/auth/forgot-password", tags=["auth"])
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """
-    ✅ FIX 2: Always returns 200 with the same generic message, even if the
-    email doesn't exist. This prevents email enumeration attacks.
-
-    If email sending fails, the reset link is printed to Render logs so you
-    can manually share it during development/testing.
-    Check: Render Dashboard → shortlisting-ai-backend → Logs
-    """
-    # Normalise email
     email = payload.email.lower().strip()
     user  = db.query(User).filter(User.email == email).first()
 
@@ -507,16 +479,13 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
         )
 
         if not sent:
-            # email_utils already printed the dev fallback link — nothing more to do here
             print(
                 f"[forgot_password] ⚠️  Email failed for {user.email}. "
                 "Check Render logs for the reset link."
             )
     else:
-        # Don't reveal that the email doesn't exist — just log it server-side
         print(f"[forgot_password] No account found for email: {email} (returning 200 anyway)")
 
-    # Always return the same response — never reveal whether the email exists
     return {
         "message": (
             "If an account with that email exists, a password reset link "
@@ -527,15 +496,8 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
 @app.post("/auth/reset-password", tags=["auth"])
 def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
-    """
-    ✅ FIX 3: Added token format pre-check.
-    Email clients sometimes URL-encode the token (replacing + with %2B, etc.).
-    If the token looks URL-encoded, return a clear error telling the user to
-    copy the link directly rather than clicking it in some email clients.
-    """
     token = payload.token.strip()
 
-    # Basic sanity check — a JWT always has exactly 2 dots
     if token.count(".") != 2:
         raise HTTPException(
             status_code=400,

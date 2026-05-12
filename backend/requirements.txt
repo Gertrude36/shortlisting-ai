@@ -31,5 +31,10 @@ pymupdf==1.24.5
 # ── HTTP client (for AI integrations) ────────────────────────
 httpx>=0.27.0
 
-# NOTE: aiosmtplib was removed — email is sent via Resend HTTPS API
-# using Python stdlib urllib only. No SMTP, no extra packages needed.
+# ── AI semantic matching ──────────────────────────────────────
+# torch is installed separately in render-build.sh (CPU-only wheel)
+# to avoid the huge default CUDA build (~2.5 GB).
+sentence-transformers==2.7.0
+
+# NOTE: email is sent via Brevo HTTPS API using Python stdlib urllib only.
+# No SMTP, no extra packages needed.
