@@ -31,9 +31,10 @@ services:
     region: oregon
     plan: free
 
-    buildCommand: >
-      apt-get install -y tesseract-ocr poppler-utils &&
-      pip install -r requirements.txt
+    # ✅ FIX: Call render-build.sh instead of running apt-get inline.
+    # The inline buildCommand never called the script, so French language
+    # packs were missing and the CPU-only torch trick was skipped.
+    buildCommand: chmod +x render-build.sh && ./render-build.sh
 
     # ✅ THE KEY FIX: $PORT not 10000
     # Render injects the correct port via $PORT — hardcoding breaks port detection
