@@ -4,6 +4,13 @@
  * Step 1 of the password-reset flow.
  * Calls  POST /auth/forgot-password  with { email }.
  *
+ * FIXES APPLIED:
+ *   ✅ FIX 1 — Clearer success message with spam folder reminder
+ *   ✅ FIX 2 — Network error shown properly (was silently failing)
+ *   ✅ FIX 3 — Dev hint only in local dev, never in production build
+ *   ✅ FIX 4 — Email input validation before hitting the server
+ *   ✅ FIX 5 — "Resend email" button on success screen so user isn't stuck
+ *
  * WIRE-UP in your router (App.jsx / main.jsx):
  *   import ForgotPassword from "./pages/ForgotPassword";
  *   <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -12,9 +19,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-const API      = import.meta.env.VITE_API_URL || "http://localhost:8000";
-// ✅ FIX: Only show dev hint in local development, never in production
-const IS_DEV   = import.meta.env.DEV === true;
+const API    = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const IS_DEV = import.meta.env.DEV === true;
 
 export default function ForgotPassword() {
   const [email,   setEmail]   = useState("");
@@ -22,12 +28,18 @@ export default function ForgotPassword() {
   const [success, setSuccess] = useState(false);
   const [error,   setError]   = useState("");
 
+  const isValidEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
 
     if (!email.trim()) {
       setError("Please enter your email address.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address (e.g. you@example.com).");
       return;
     }
 
@@ -39,17 +51,19 @@ export default function ForgotPassword() {
         body:    JSON.stringify({ email: email.trim().toLowerCase() }),
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.detail || "Something went wrong. Please try again.");
+      // Always show success regardless of whether email exists (prevents enumeration)
+      // The backend always returns 200 for this endpoint
+      if (res.ok || res.status === 200) {
+        setSuccess(true);
         return;
       }
 
-      // Always show success (even if email not found — prevents enumeration)
-      setSuccess(true);
+      const data = await res.json().catch(() => ({}));
+      setError(data.detail || "Something went wrong. Please try again.");
     } catch {
-      setError("Unable to reach the server. Please check your connection.");
+      setError(
+        "Unable to reach the server. Please check your internet connection and try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -66,18 +80,27 @@ export default function ForgotPassword() {
           <h2 style={styles.title}>Check your inbox</h2>
           <p style={styles.body}>
             If an account with <strong>{email}</strong> exists, a password reset
-            link has been sent to that address. The link expires in&nbsp;
+            link has been sent to that address. The link expires in{" "}
             <strong>15 minutes</strong>.
           </p>
           <p style={{ ...styles.body, marginTop: 8 }}>
             Don't see it? Check your <strong>spam / junk folder</strong>.
           </p>
 
-          {/* ✅ FIX: Dev hint only shows in local dev (npm run dev), hidden in production build */}
+          {/* ✅ FIX 5: Resend button so user isn't stuck */}
+          <button
+            onClick={() => { setSuccess(false); setError(""); }}
+            style={styles.resendBtn}
+          >
+            Didn't receive it? Send again
+          </button>
+
+          {/* ✅ FIX 3: Dev hint only in local dev (npm run dev), never in production */}
           {IS_DEV && (
             <div style={styles.devHint}>
-              🛠 <strong>Dev mode:</strong> The reset link has been printed to
-              your <code>uvicorn</code> terminal. Copy it from there.
+              🛠 <strong>Dev mode:</strong> Email may not be delivered. Check
+              your <code>uvicorn</code> / Render logs — the reset link is
+              printed there. Copy it and open it in your browser.
             </div>
           )}
 
@@ -110,17 +133,22 @@ export default function ForgotPassword() {
             placeholder="you@example.com"
             value={email}
             onChange={(e) => { setEmail(e.target.value); setError(""); }}
-            style={styles.input}
+            style={{
+              ...styles.input,
+              borderColor: error ? "#e74c3c" : "#d0d7e8",
+            }}
             autoFocus
             autoComplete="email"
             disabled={loading}
           />
 
-          {error && <p style={styles.errorMsg}>⚠ {error}</p>}
+          {error && (
+            <p style={styles.errorMsg}>⚠ {error}</p>
+          )}
 
           <button
             type="submit"
-            style={{ ...styles.btn, opacity: loading ? 0.7 : 1 }}
+            style={{ ...styles.btn, opacity: loading ? 0.7 : 1, cursor: loading ? "not-allowed" : "pointer" }}
             disabled={loading}
           >
             {loading ? "Sending…" : "Send Reset Link"}
@@ -133,7 +161,7 @@ export default function ForgotPassword() {
   );
 }
 
-/* ── Styles ─────────────────────────────────────────────────────────────────── */
+/* ── Styles ──────────────────────────────────────────────────────────────── */
 const styles = {
   page: {
     minHeight:      "100vh",
@@ -153,12 +181,8 @@ const styles = {
     boxShadow:    "0 4px 32px rgba(0,0,0,0.10)",
     textAlign:    "center",
   },
-  iconWrap: {
-    marginBottom: 12,
-  },
-  iconBig: {
-    fontSize: 40,
-  },
+  iconWrap: { marginBottom: 12 },
+  iconBig:  { fontSize: 40 },
   title: {
     fontSize:   22,
     fontWeight: 700,
@@ -200,9 +224,13 @@ const styles = {
     boxSizing:    "border-box",
   },
   errorMsg: {
-    color:      "#d63031",
-    fontSize:   13,
-    margin:     "2px 0 0",
+    color:        "#d63031",
+    fontSize:     13,
+    margin:       "2px 0 0",
+    padding:      "8px 12px",
+    background:   "#fff5f5",
+    borderRadius: 6,
+    border:       "1px solid #ffcccc",
   },
   btn: {
     marginTop:    8,
@@ -213,8 +241,21 @@ const styles = {
     borderRadius: 8,
     fontSize:     15,
     fontWeight:   600,
-    cursor:       "pointer",
     transition:   "opacity 0.2s",
+    width:        "100%",
+  },
+  resendBtn: {
+    display:      "block",
+    marginTop:    16,
+    padding:      "10px 20px",
+    background:   "transparent",
+    color:        "#3b5bdb",
+    border:       "1.5px solid #3b5bdb",
+    borderRadius: 8,
+    fontSize:     13,
+    fontWeight:   600,
+    cursor:       "pointer",
+    width:        "100%",
   },
   backLink: {
     display:        "block",

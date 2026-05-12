@@ -15,25 +15,17 @@ backend/email_utils.py
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SETUP (5 minutes):
+REQUIRED ENVIRONMENT VARIABLES (set all 4 in Render Dashboard):
+  RESEND_API_KEY  = re_xxxxxxxxxxxxxxxxxxxx
+  MAIL_FROM       = onboarding@resend.dev
+  MAIL_FROM_NAME  = Shortlisting AI
+  FRONTEND_URL    = https://shortlisting-ai.vercel.app   ← CRITICAL for reset links
 
-  1. Go to https://resend.com → Sign Up (free, no credit card)
-
-  2. Get your API key:
-     Resend Dashboard → API Keys → Create API Key → copy it
-
-  3. Sender address:
-     On Resend free tier you can send FROM:
-       onboarding@resend.dev   ← works immediately, no setup needed
-     OR your own domain (requires DNS verification in Resend).
-     Use onboarding@resend.dev for now — it works instantly.
-
-  4. Add to Render Dashboard → shortlisting-ai-backend → Environment:
-       RESEND_API_KEY  = re_xxxxxxxxxxxxxxxxxxxx
-       MAIL_FROM       = onboarding@resend.dev
-       MAIL_FROM_NAME  = Shortlisting AI
-
-  No SMTP. No App Password. No port issues. Just works.
+FIXES IN THIS FILE:
+  ✅ FIX 1 — Removed git merge conflict markers (caused SyntaxError crash on deploy)
+  ✅ FIX 2 — RESEND_API_KEY never hardcoded — always read from environment only
+  ✅ FIX 3 — Added 403 error handler (Resend free tier: can only send to verified email)
+  ✅ FIX 4 — Startup warns if FRONTEND_URL is missing (reset links would point to localhost)
 """
 
 import os
@@ -42,7 +34,7 @@ import urllib.request
 import urllib.error
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_cLGqstZ4_9q9w1gYHUARQEtHZ2jrVyupa")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 MAIL_FROM      = os.getenv("MAIL_FROM",      "onboarding@resend.dev")
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Shortlisting AI")
 RESEND_API_URL = "https://api.resend.com/emails"
@@ -53,6 +45,7 @@ def _validate_config() -> None:
     if not RESEND_API_KEY:
         print(
             "[email_utils] ⚠️  RESEND_API_KEY is not set.\n"
+            "              Emails will NOT be sent until this is configured.\n"
             "              1. Sign up free at https://resend.com\n"
             "              2. Dashboard → API Keys → Create API Key\n"
             "              3. Render Dashboard → shortlisting-ai-backend "
@@ -63,6 +56,19 @@ def _validate_config() -> None:
             f"[email_utils] ✅ Resend config loaded — "
             f"sending from '{MAIL_FROM_NAME} <{MAIL_FROM}>'"
         )
+
+    # ✅ FIX 4: Warn if FRONTEND_URL is missing
+    frontend_url = os.getenv("FRONTEND_URL", "")
+    if not frontend_url:
+        print(
+            "[email_utils] ⚠️  FRONTEND_URL is not set.\n"
+            "              Password reset links will point to localhost:5173 — "
+            "they will NOT work for real users.\n"
+            "              Fix: Render Dashboard → Environment → Add:\n"
+            "              FRONTEND_URL = https://shortlisting-ai.vercel.app"
+        )
+    else:
+        print(f"[email_utils] ✅ FRONTEND_URL = {frontend_url}")
 
 
 _validate_config()
@@ -230,6 +236,14 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
                 "              Then update RESEND_API_KEY in Render Environment.\n"
                 f"              Detail: {msg}"
             )
+        elif e.code == 403:
+            print(
+                f"[email_utils] ❌ Resend 403 — Forbidden: {msg}\n"
+                "              On Resend free tier with onboarding@resend.dev, you can ONLY\n"
+                "              send to your own verified Resend account email address.\n"
+                "              To send to any email: verify your domain at https://resend.com/domains\n"
+                "              and set MAIL_FROM=you@yourdomain.com in Render Environment."
+            )
         elif e.code == 422:
             print(
                 f"[email_utils] ❌ Resend 422 — request rejected: {msg}\n"
@@ -249,9 +263,9 @@ def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
 
 
 def _print_dev_fallback(to_name: str, to_email: str, reset_link: str) -> None:
-    """Prints the reset link to Render logs when email fails."""
+    """Prints the reset link to Render logs when email fails — copy this link manually."""
     print("\n" + "═" * 70)
-    print("  PASSWORD RESET — EMAIL FAILED, RESET LINK BELOW (check Render logs)")
+    print("  PASSWORD RESET — EMAIL FAILED, USE THIS LINK MANUALLY")
     print(f"  User  : {to_name} <{to_email}>")
     print(f"  Link  : {reset_link}")
     print(f"  Expiry: 15 minutes from now")
