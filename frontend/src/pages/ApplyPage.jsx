@@ -1,3 +1,5 @@
+javascript
+
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
@@ -7,11 +9,22 @@ import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
 import api, { BACKEND } from '../api/axios'
 
+// ✅ FIX K — "experience" added as an optional document type.
+// REQUIRED_DOC_KEYS is derived from this array and intentionally excludes
+// "experience" (required: false) so fresh graduates are not blocked.
 const DOC_TYPES = [
   { key: 'id_card',     label: 'National ID / Passport',    icon: '🪪', description: 'Official government-issued ID. Name must match your account.', required: true },
   { key: 'cv',          label: 'CV / Resume',               icon: '📄', description: 'Your up-to-date curriculum vitae or resume.',                   required: true },
   { key: 'diploma',     label: 'Academic Diploma / Degree', icon: '🎓', description: 'Highest academic qualification matching your field of study.',   required: true },
   { key: 'certificate', label: 'Professional Certificate',  icon: '📜', description: 'Any professional certification relevant to the role. Optional.', required: false },
+  // ✅ FIX K (NEW):
+  {
+    key:         'experience',
+    label:       'Experience Document',
+    icon:        '💼',
+    description: 'Employment letter, reference letter, or work certificate. Optional — recommended if you have declared work experience. It will be cross-checked against your declared years.',
+    required:    false,
+  },
 ]
 const REQUIRED_DOC_KEYS = DOC_TYPES.filter(d => d.required).map(d => d.key)
 const STEPS = ['Position Info', 'Your Details', 'Documents', 'Submit']
@@ -173,7 +186,7 @@ export default function ApplyPage() {
   const _isAdvisory = msg =>
     msg && (msg.startsWith('⚠') || msg.toLowerCase().includes('will be reviewed') ||
       msg.toLowerCase().includes('manual review') || msg.toLowerCase().includes('accepted') ||
-      msg.toLowerCase().includes('advisory'))
+      msg.toLowerCase().includes('advisory') || msg.toLowerCase().includes('cross-checked'))
 
   const handleUpload = async (docType, file) => {
     if (!applicationId) { toast.error('Please complete your details first'); return }
@@ -409,6 +422,7 @@ export default function ApplyPage() {
                   </div>
                 )}
 
+                {/* ✅ FIX K — updated info box to mention experience as a 2nd optional document */}
                 <div style={{
                   padding:      '16px 20px',
                   background:   '#fffbeb',
@@ -421,7 +435,7 @@ export default function ApplyPage() {
                 }}>
                   <strong>📋 Documents required:</strong><br />
                   <strong>Required (3):</strong> National ID/Passport, CV/Resume, Academic Diploma<br />
-                  <strong>Optional (1):</strong> Professional Certificate
+                  <strong>Optional (2):</strong> Professional Certificate, Experience Document (employment/reference letter — recommended if you have work experience)
                 </div>
 
                 <button
@@ -541,6 +555,23 @@ export default function ApplyPage() {
                       />
                     </div>
                   </div>
+
+                  {/* ✅ FIX K — hint: nudge applicants with experience > 0 to upload an experience doc */}
+                  {parseInt(form.experience_years) > 0 && (
+                    <div style={{
+                      padding:      '10px 14px',
+                      background:   '#eff6ff',
+                      border:       '1px solid #bfdbfe',
+                      borderRadius: 6,
+                      fontSize:     '.82rem',
+                      color:        '#1e40af',
+                      lineHeight:   1.6,
+                    }}>
+                      💼 <strong>Tip:</strong> You've declared {form.experience_years} year(s) of experience.
+                      Uploading an experience document (employment letter / reference letter) in the next step
+                      can strengthen your application.
+                    </div>
+                  )}
 
                   {/* Skills */}
                   <div>
@@ -903,6 +934,7 @@ export default function ApplyPage() {
                     ['Field',      form.field_of_study],
                     ['Experience', `${form.experience_years || 0} year(s)`],
                     ['Skills',     form.skills],
+                    // ✅ FIX K — optional count now includes experience doc if uploaded
                     ['Documents',  `${requiredCount}/${REQUIRED_DOC_KEYS.length} required${successCount > requiredCount ? ` + ${successCount - requiredCount} optional` : ''} ✅`],
                   ].map(([label, value]) => (
                     <div key={label} style={{ display: 'flex', gap: 14, marginBottom: 10, fontSize: '.9rem' }}>
@@ -911,6 +943,29 @@ export default function ApplyPage() {
                     </div>
                   ))}
                 </div>
+
+                {/* ✅ FIX K — show experience doc note in submission confirmation */}
+                {docStatus['experience']?.status === 'success' && (
+                  <div style={{
+                    padding:      '12px 16px',
+                    background:   '#eff6ff',
+                    border:       '1px solid #bfdbfe',
+                    borderRadius: 8,
+                    marginBottom: 14,
+                    display:      'flex',
+                    alignItems:   'flex-start',
+                    gap:          8,
+                    fontSize:     '.85rem',
+                    color:        '#1e40af',
+                    lineHeight:   1.6,
+                  }}>
+                    <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      <strong>Experience document included.</strong> It will be cross-checked against your
+                      declared {form.experience_years} year(s) of experience during AI shortlisting.
+                    </span>
+                  </div>
+                )}
 
                 <div style={{
                   padding:      '14px 18px',
@@ -950,17 +1005,17 @@ export default function ApplyPage() {
                     onClick={handleFinalize}
                     disabled={submitting}
                     style={{
-                      display:      'inline-flex',
-                      alignItems:   'center',
-                      gap:          6,
-                      padding:      '10px 28px',
-                      borderRadius: 6,
-                      border:       'none',
-                      background:   submitting ? '#93c5fd' : '#2563eb',
-                      color:        '#ffffff',
-                      fontWeight:   700,
-                      cursor:       submitting ? 'not-allowed' : 'pointer',
-                      minWidth:     180,
+                      display:        'inline-flex',
+                      alignItems:     'center',
+                      gap:            6,
+                      padding:        '10px 28px',
+                      borderRadius:   6,
+                      border:         'none',
+                      background:     submitting ? '#93c5fd' : '#2563eb',
+                      color:          '#ffffff',
+                      fontWeight:     700,
+                      cursor:         submitting ? 'not-allowed' : 'pointer',
+                      minWidth:       180,
                       justifyContent: 'center',
                     }}
                   >

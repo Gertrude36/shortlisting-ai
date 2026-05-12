@@ -1,3 +1,5 @@
+python
+
 """
 backend/shortlisting_engine.py
 ────────────────────────────────────────────────────────────────
@@ -39,6 +41,41 @@ FIXES APPLIED IN THIS VERSION:
   ✅ FIX E (RETAINED) — Rebalanced scoring weights
   ✅ FIX F (RETAINED) — Skills not a standalone hard-reject gate
   ✅ RETAINED — All previous fixes (A–G)
+
+  ✅ FIX K (NEW) — Experience Document Cross-Check
+  ────────────────────────────────────────────────────────────────
+  The shortlisting engine now reads the uploaded "experience"
+  document (employment letter / reference letter / work certificate)
+  and cross-checks it against the declared experience_years.
+
+  HOW IT WORKS:
+    1. The "experience" doc text is extracted by main.py (same OCR
+       pipeline used for diploma/cv/certificate) and passed in
+       doc_texts["experience"].
+
+    2. _cross_check_experience_doc() parses year references from the
+       document text and estimates total experience years.
+
+    3. Results feed into _cross_check_form_vs_docs() as:
+         - confirmations  → declared years match document
+         - soft_warnings  → doc present but years unclear (HR review)
+         - hard_fails     → doc clearly contradicts declared years
+                            (large gap → score penalty + HR flag)
+
+    4. If no experience doc is uploaded AND experience_years > 0,
+       a soft warning is added (HR may verify manually).
+       If experience_years == 0, no warning is added (fresh graduate).
+
+  SCORING IMPACT:
+    - Confirmed by doc   → no penalty (trust the document)
+    - Doc missing (exp>0)→ no hard reject; soft warning only
+    - Doc contradicts    → 0.10–0.20 score penalty based on severity
+    - Doc unreadable     → soft warning; no score penalty
+
+  This means the shortlisting result will be MORE ACCURATE for:
+    - Experienced candidates who upload proof → rewarded
+    - Candidates who inflate experience_years → caught and penalised
+    - Fresh graduates (exp=0) → unaffected; no doc required
 """
 
 from __future__ import annotations
@@ -79,12 +116,16 @@ SKILLS_PENALTY_THRESHOLD     = 0.20
 SKILLS_WARN_THRESHOLD        = 0.30
 
 # ✅ FIX J — Experience hybrid gate thresholds
-# Gap = required_min_experience - applicant_experience_years
-# gap > EXP_HARD_REJECT_GAP  → hard reject (too far below minimum)
-# gap > 0 and <= EXP_HARD_REJECT_GAP → soft penalty on score
 EXP_HARD_REJECT_GAP     = 3    # Hard reject only if missing more than 3 years
 EXP_PENALTY_PER_YEAR    = 0.05 # Score penalty per missing year (max capped below)
 EXP_MAX_PENALTY         = 0.15 # Maximum score penalty for experience gap
+
+# ✅ FIX K — Experience document cross-check thresholds
+# How many years the document estimate can differ from declared before we flag
+EXP_DOC_MISMATCH_SOFT_GAP = 2   # gap <= 2 yrs → soft warning only
+EXP_DOC_MISMATCH_HARD_GAP = 4   # gap >  4 yrs → hard flag + score penalty
+EXP_DOC_INFLATION_PENALTY  = 0.10  # penalty when doc clearly shows fewer years
+EXP_DOC_LARGE_INFLATION_PENALTY = 0.20  # penalty when gap is very large
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job-specific field refinements (FIX D Layer 1)
@@ -155,17 +196,14 @@ EDU_ORDER: dict[str, int] = {
 
 # ✅ FIX H — Keyword fallback ordered most-specific → least-specific
 _EDU_KEYWORD_MAP: list[tuple[str, int]] = [
-    # PhD / Doctorate
     ("phd",        4),
     ("ph.d",       4),
     ("doctor",     4),
-    # Master
     ("master",     3),
     ("msc",        3),
     ("mba",        3),
     ("m.sc",       3),
     ("postgrad",   3),
-    # Bachelor — check BEFORE "diploma"/"cert" to avoid false lows
     ("bachelor",   2),
     ("undergrad",  2),
     ("bsc",        2),
@@ -174,8 +212,7 @@ _EDU_KEYWORD_MAP: list[tuple[str, int]] = [
     ("llb",        2),
     ("honours",    2),
     ("hons",       2),
-    ("degree",     2),   # generic "degree" → treat as bachelor level
-    # Diploma / Certificate
+    ("degree",     2),
     ("diploma",    1),
     ("hnd",        1),
     ("hnc",        1),
@@ -184,7 +221,6 @@ _EDU_KEYWORD_MAP: list[tuple[str, int]] = [
     ("associate",  1),
 ]
 
-# Human-readable labels for error messages
 _ORD_LABEL: dict[int, str] = {
     1: "Diploma",
     2: "Bachelor's degree",
@@ -224,33 +260,14 @@ def _levenshtein_ratio(a: str, b: str) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _edu_ordinal(level: str) -> int:
-    """
-    Convert ANY education level string to an ordinal (1–4).
-
-    1 = Diploma/Certificate
-    2 = Bachelor's degree
-    3 = Master's degree
-    4 = PhD / Doctorate
-
-    Uses:
-      1. Exact match in EDU_ORDER dict
-      2. Keyword scan via _EDU_KEYWORD_MAP  ← FIX H
-      3. Default 1
-    """
     if not level:
         return 1
     norm = _normalize(level)
-
-    # 1. Exact match
     if norm in EDU_ORDER:
         return EDU_ORDER[norm]
-
-    # 2. Keyword scan
     for keyword, ordinal in _EDU_KEYWORD_MAP:
         if keyword in norm:
             return ordinal
-
-    # 3. Unknown — default to lowest
     return 1
 
 
@@ -453,11 +470,6 @@ def _exp_gap_status(exp_years: int, req_min_exp: int) -> tuple[str, int, float]:
       status  = "pass" | "penalty" | "hard_reject"
       gap     = max(0, req_min_exp - exp_years)
       penalty = score penalty to apply (0.0 if pass or hard_reject)
-
-    Logic:
-      gap == 0              → "pass"    (meets minimum)
-      0 < gap <= EXP_HARD_REJECT_GAP → "penalty"  (score reduced but not rejected)
-      gap > EXP_HARD_REJECT_GAP      → "hard_reject" (too far below minimum)
     """
     gap = max(0, req_min_exp - exp_years)
     if gap == 0:
@@ -469,6 +481,163 @@ def _exp_gap_status(exp_years: int, req_min_exp: int) -> tuple[str, int, float]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX K (NEW) — Experience document cross-check helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _estimate_years_from_experience_doc(exp_doc_text: str) -> int | None:
+    """
+    Parse an experience document (employment letter / reference letter /
+    work certificate) and estimate total years of experience mentioned.
+
+    Strategy (in priority order):
+      1. Look for explicit "X years of experience" phrases.
+      2. Look for date ranges (e.g. "Jan 2018 – Dec 2022") and sum durations.
+      3. Return None if no reliable estimate can be made.
+
+    Returns the estimated integer years, or None if uncertain.
+    """
+    if not exp_doc_text or not exp_doc_text.strip():
+        return None
+
+    text = _normalize(exp_doc_text)
+
+    # ── Strategy 1: explicit "X years" phrase ────────────────────────────────
+    # Matches: "5 years", "three years", "2+ years", "over 4 years"
+    word_numbers = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    explicit = re.findall(r"(\d+)\s*\+?\s*year[s]?\s+(?:of\s+)?(?:work\s+)?experience", text)
+    if explicit:
+        return max(int(y) for y in explicit)
+
+    for word, num in word_numbers.items():
+        if re.search(rf"\b{word}\b\s*\+?\s*year[s]?\s+(?:of\s+)?(?:work\s+)?experience", text):
+            return num
+
+    # ── Strategy 2: date ranges ───────────────────────────────────────────────
+    # Matches: "2018 to 2022", "2018 - 2022", "january 2018 to march 2022"
+    # We collect all 4-digit years in the text and calculate the span.
+    CURRENT_YEAR = 2026
+    year_pairs = re.findall(
+        r"(20\d{2}|19\d{2})\s*(?:[-–—to/]+)\s*(20\d{2}|19\d{2}|present|current|now|date)",
+        text
+    )
+
+    if year_pairs:
+        total_months = 0
+        for start_str, end_str in year_pairs:
+            start = int(start_str)
+            end   = CURRENT_YEAR if end_str in ("present", "current", "now", "date") else int(end_str)
+            if 1950 <= start <= CURRENT_YEAR and start <= end <= CURRENT_YEAR + 1:
+                total_months += (end - start) * 12
+        if total_months > 0:
+            return max(1, round(total_months / 12))
+
+    # ── Strategy 3: single years mentioned (loose fallback) ─────────────────
+    all_years = [int(y) for y in re.findall(r"\b(20\d{2}|19\d{2})\b", text)
+                 if 1970 <= int(y) <= CURRENT_YEAR]
+    if len(all_years) >= 2:
+        span = max(all_years) - min(all_years)
+        if 0 < span <= 40:
+            return span
+
+    return None  # Cannot determine reliably
+
+
+def _cross_check_experience_doc(
+    declared_exp_years: int,
+    exp_doc_text: str,
+) -> tuple[list[str], list[str], list[str], float]:
+    """
+    Cross-check the experience document against declared experience_years.
+
+    Returns (hard_fails, soft_warnings, confirmations, exp_doc_penalty).
+
+    Logic:
+      - No doc + exp == 0  → no comment (fresh graduate, expected)
+      - No doc + exp >  0  → soft warning (HR may verify manually)
+      - Doc present        → estimate years from doc and compare
+        - Match (gap <= EXP_DOC_MISMATCH_SOFT_GAP)    → confirmation
+        - Small gap (2–4 yrs)                          → soft warning
+        - Large gap (> EXP_DOC_MISMATCH_HARD_GAP yrs) → hard fail + penalty
+        - Cannot estimate                              → soft warning
+    """
+    hard_fails:    list[str] = []
+    soft_warnings: list[str] = []
+    confirmations: list[str] = []
+    exp_doc_penalty: float   = 0.0
+
+    has_exp_doc = bool(exp_doc_text and exp_doc_text.strip())
+
+    if not has_exp_doc:
+        if declared_exp_years > 0:
+            soft_warnings.append(
+                f"⚠ No experience document uploaded. Declared {declared_exp_years} year(s) "
+                "of experience could not be verified from a supporting document. "
+                "HR may request an employment letter or reference letter for verification."
+            )
+        # exp == 0 with no doc → fresh graduate, nothing to flag
+        return hard_fails, soft_warnings, confirmations, exp_doc_penalty
+
+    # Document is present — try to estimate years
+    estimated = _estimate_years_from_experience_doc(exp_doc_text)
+    print(
+        f"[exp_doc_check] declared={declared_exp_years}yr "
+        f"doc_estimated={estimated}yr"
+    )
+
+    if estimated is None:
+        # Doc exists but years are unclear (e.g. a general reference letter
+        # that only mentions roles without dates)
+        soft_warnings.append(
+            "⚠ Experience document uploaded but specific duration could not be "
+            "determined automatically. HR will verify experience years manually."
+        )
+        return hard_fails, soft_warnings, confirmations, exp_doc_penalty
+
+    gap = declared_exp_years - estimated  # positive = inflation; negative = underreport
+
+    if abs(gap) <= EXP_DOC_MISMATCH_SOFT_GAP:
+        # Good match
+        confirmations.append(
+            f"✅ Experience document confirms approximately {estimated} year(s) of experience "
+            f"(declared: {declared_exp_years} yr(s) — within acceptable range)."
+        )
+
+    elif EXP_DOC_MISMATCH_SOFT_GAP < gap <= EXP_DOC_MISMATCH_HARD_GAP:
+        # Moderate inflation — soft warning, small penalty
+        exp_doc_penalty = EXP_DOC_INFLATION_PENALTY
+        soft_warnings.append(
+            f"⚠ Experience discrepancy: declared {declared_exp_years} yr(s) but document "
+            f"suggests approximately {estimated} yr(s) — a gap of {gap} year(s). "
+            f"A score adjustment of {exp_doc_penalty*100:.0f}% has been applied. "
+            "HR review is recommended."
+        )
+
+    elif gap > EXP_DOC_MISMATCH_HARD_GAP:
+        # Significant inflation — hard fail + large penalty
+        exp_doc_penalty = EXP_DOC_LARGE_INFLATION_PENALTY
+        hard_fails.append(
+            f"EXPERIENCE INFLATION RISK: Declared {declared_exp_years} yr(s) but the uploaded "
+            f"experience document suggests only approximately {estimated} yr(s) — "
+            f"a gap of {gap} year(s) which exceeds the acceptable threshold. "
+            f"A score adjustment of {exp_doc_penalty*100:.0f}% has been applied. "
+            "HR must manually verify before shortlisting."
+        )
+
+    else:
+        # Underreported experience (doc shows MORE than declared) → no penalty, soft note
+        soft_warnings.append(
+            f"⚠ Experience document suggests approximately {estimated} yr(s) — "
+            f"slightly more than declared ({declared_exp_years} yr(s)). "
+            "This is not a problem. HR may update the record if needed."
+        )
+
+    return hard_fails, soft_warnings, confirmations, exp_doc_penalty
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Document ↔ Form cross-check
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -476,15 +645,28 @@ def _cross_check_form_vs_docs(
     application: Application,
     doc_texts: dict[str, str],
 ) -> tuple[list[str], list[str], list[str], float]:
+    """
+    Cross-checks uploaded documents against form fields.
+
+    doc_texts keys: "id_card", "cv", "diploma", "certificate", "experience"
+
+    Returns (hard_fails, soft_warnings, confirmations, total_cv_skill_penalty).
+    Note: experience doc penalty is included in hard_fails/soft_warnings but
+    is returned SEPARATELY via _cross_check_experience_doc so the caller can
+    apply it to the score independently.
+    """
     hard_fails:    list[str] = []
     soft_warnings: list[str] = []
     confirmations: list[str] = []
     cv_skill_penalty = 0.0
 
-    diploma_text = doc_texts.get("diploma",     "")
-    cv_text      = doc_texts.get("cv",          "")
-    cert_text    = doc_texts.get("certificate", "")
+    diploma_text     = doc_texts.get("diploma",     "")
+    cv_text          = doc_texts.get("cv",          "")
+    cert_text        = doc_texts.get("certificate", "")
+    # ✅ FIX K: experience document text
+    experience_text  = doc_texts.get("experience",  "")
 
+    # ── 1. DIPLOMA → Education level + Field of study ────────────────────────
     if diploma_text.strip():
         edu_ok, edu_msg = verify_education_level_from_document(
             application.education_level or "", diploma_text
@@ -522,6 +704,7 @@ def _cross_check_form_vs_docs(
                 "(The uploaded diploma does not match the field declared in the form.)"
             )
 
+    # ── 2. CV → Skills cross-check ───────────────────────────────────────────
     if cv_text.strip() and application.skills:
         declared_skills = _parse_list(application.skills)
         if declared_skills:
@@ -563,6 +746,7 @@ def _cross_check_form_vs_docs(
             "⚠ CV text could not be extracted — skills cross-check skipped. HR review required."
         )
 
+    # ── 3. CERTIFICATE → Certifications cross-check ──────────────────────────
     if cert_text.strip() and application.certifications:
         declared_certs = _parse_list(application.certifications)
         if declared_certs:
@@ -576,6 +760,22 @@ def _cross_check_form_vs_docs(
                     f"⚠ Declared certifications ({', '.join(declared_certs[:3])}) "
                     "not matched in uploaded certificate. HR verification required."
                 )
+
+    # ── 4. EXPERIENCE DOCUMENT → Experience years cross-check ────────────────
+    # ✅ FIX K: always run the experience cross-check.
+    # Results are merged into the same hard_fails/warnings/confirmations lists
+    # so they appear in the shortlisting reason alongside the other document checks.
+    exp_hard, exp_warn, exp_confirm, exp_doc_penalty = _cross_check_experience_doc(
+        declared_exp_years=int(application.experience_years or 0),
+        exp_doc_text=experience_text,
+    )
+    hard_fails.extend(exp_hard)
+    soft_warnings.extend(exp_warn)
+    confirmations.extend(exp_confirm)
+
+    # ✅ FIX K: add experience doc penalty on top of skills penalty so both
+    # are captured in the single returned penalty float.
+    cv_skill_penalty += exp_doc_penalty
 
     return hard_fails, soft_warnings, confirmations, cv_skill_penalty
 
@@ -608,7 +808,6 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     cert_overlap_count     = _overlap_count(app_certs, req_certs)
     has_certifications     = int(len(app_certs) > 0)
 
-    # ✅ FIX H — robust ordinal for both applicant and required levels
     app_edu_ord = _edu_ordinal(edu_level)
 
     edu_level_match = int(any(_token_match(edu_level, lvl) for lvl in req_edu_lvls))
@@ -631,7 +830,6 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     exp_surplus            = min(exp_years - req_min_exp, 10)
     years_since_graduation = max(0, min(2026 - grad_year, 30))
 
-    # ✅ FIX E — Education-first weights
     combined_match_score = round(
         0.30 * edu_meets_minimum
         + 0.25 * field_match
@@ -695,8 +893,6 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
     ✅ FIX J: Experience is now hybrid:
       - Hard reject ONLY if gap > EXP_HARD_REJECT_GAP (default 3 years)
       - Otherwise applies a score penalty (returned as exp_penalty)
-      - This allows strong candidates (high edu + skills score) to still
-        be shortlisted even if they are slightly below the experience minimum
     """
     req          = _job_req_from_db(job)
     app_skills   = _parse_list(application.skills)
@@ -710,7 +906,7 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
     failures:    list[str] = []
     exp_penalty: float     = 0.0
 
-    # ── 1. EDUCATION (highest priority) ──────────────────────────────────────
+    # ── 1. EDUCATION ─────────────────────────────────────────────────────────
     if req_edu_lvls:
         app_edu_ord      = _edu_ordinal(edu_level)
         min_required_ord = min(_edu_ordinal(lvl) for lvl in req_edu_lvls)
@@ -731,7 +927,7 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
                 "We encourage you to pursue further education and apply again."
             )
 
-    # ── 2. FIELD OF STUDY ─────────────────────────────────────────────────────
+    # ── 2. FIELD OF STUDY ────────────────────────────────────────────────────
     all_expected_fields = _get_expected_fields_for_job(job)
     if all_expected_fields:
         refined_fields = _refine_req_fields_for_job(job, all_expected_fields)
@@ -760,7 +956,7 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
                     f"Required: {', '.join(refined_fields[:4])}."
                 )
 
-    # ── 3. EXPERIENCE (✅ FIX J — hybrid gate) ────────────────────────────────
+    # ── 3. EXPERIENCE (✅ FIX J — hybrid gate) ───────────────────────────────
     exp_status, exp_gap, exp_penalty = _exp_gap_status(exp_years, req_min_exp)
 
     print(
@@ -769,16 +965,13 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
     )
 
     if exp_status == "hard_reject":
-        # Gap is too large — hard reject
         failures.append(
             f"Experience ({exp_years} yr(s)) is significantly below the minimum required "
             f"({req_min_exp} yr(s)) — gap of {exp_gap} year(s) exceeds the allowable threshold. "
             "We encourage you to gain more experience and apply again."
         )
-    # "penalty" → not added to failures; penalty returned and applied to score
-    # "pass"    → nothing to do
 
-    # ── 4. SKILLS (only hard-reject if truly zero) ────────────────────────────
+    # ── 4. SKILLS ────────────────────────────────────────────────────────────
     if req_skills and app_skills:
         ratio = _overlap_ratio(app_skills, req_skills)
         if ratio <= SKILLS_HARD_REJECT_THRESHOLD:
@@ -822,12 +1015,14 @@ def _compute_display_score(
     penalty = min(len(gate_failures) * 0.15, 0.60)
 
     # ✅ FIX J — apply experience penalty from hybrid gate
+    # ✅ FIX K — cv_skill_penalty already includes exp_doc_penalty (added in
+    #            _cross_check_form_vs_docs), so no extra term needed here.
     final = max(0.0, blended - penalty - cv_skill_penalty - skills_score_penalty - exp_penalty)
     return round(min(final, 1.0), 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX I+J — Reason builder: Education → Field → Exp → Skills
+# ✅ FIX I+J+K — Reason builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_reason(
@@ -876,7 +1071,7 @@ def _build_reason(
     criteria_failed:   list[str] = []
     criteria_warnings: list[str] = []
 
-    # ── 1. EDUCATION ──────────────────────────────────────────────────────────
+    # ── 1. EDUCATION ─────────────────────────────────────────────────────────
     if edu_meets_min:
         criteria_met.append("Education level meets the minimum requirement for this position.")
     else:
@@ -888,7 +1083,7 @@ def _build_reason(
             "We encourage you to pursue further education and apply again."
         )
 
-    # ── 2. FIELD OF STUDY ─────────────────────────────────────────────────────
+    # ── 2. FIELD OF STUDY ────────────────────────────────────────────────────
     refined_fields    = _refine_req_fields_for_job(job, _get_expected_fields_for_job(job))
     fuzzy_field_ok    = _field_match(application.field_of_study or "", refined_fields)
     ai_compat, _      = _ai_field_job_compatible(application.field_of_study or "", job.title)
@@ -903,7 +1098,7 @@ def _build_reason(
             f"(required: {', '.join(refined_fields[:3]) or ', '.join(req_fields[:3]) or 'see job description'})."
         )
 
-    # ── 3. EXPERIENCE (✅ FIX J — show hybrid result) ─────────────────────────
+    # ── 3. EXPERIENCE (FIX J — hybrid result) ────────────────────────────────
     exp_status, exp_gap, _ = _exp_gap_status(exp_years, req_min_exp)
 
     if exp_status == "pass":
@@ -916,7 +1111,6 @@ def _build_reason(
             criteria_met.append("Years of experience meet the minimum requirement for this position.")
 
     elif exp_status == "penalty":
-        # ✅ FIX J: Shown as a WARNING, not a failure — candidate is not rejected
         criteria_warnings.append(
             f"⚠ Experience gap noted: you have {exp_years} yr(s) but this role requires "
             f"a minimum of {req_min_exp} yr(s) ({exp_gap} yr(s) short). "
@@ -932,7 +1126,7 @@ def _build_reason(
             "We encourage you to gain more experience and apply again."
         )
 
-    # ── 4. SKILLS (graduated — advisory unless zero) ──────────────────────────
+    # ── 4. SKILLS ────────────────────────────────────────────────────────────
     skills_msg_base = (
         f"Skills matched: {len(matched_skills)}/{len(req_skills) or 0} required "
         f"({sk_ratio*100:.0f}%)."
@@ -959,7 +1153,7 @@ def _build_reason(
             "We encourage you to develop these skills and apply again."
         )
 
-    # ── Certifications ────────────────────────────────────────────────────────
+    # ── 5. CERTIFICATIONS ────────────────────────────────────────────────────
     if req_certs:
         cert_msg = (
             f"Certifications: {len(matched_certs)}/{len(req_certs)} matched ({cert_ratio*100:.0f}%)."
@@ -971,6 +1165,10 @@ def _build_reason(
         else:
             criteria_warnings.append(cert_msg + " (Advisory — will be verified manually by HR.)")
 
+    # ── 6. DOCUMENT CROSS-CHECK RESULTS (including experience doc) ───────────
+    # ✅ FIX K: experience doc confirmations/warnings/fails already merged
+    # into doc_confirmations/doc_warnings/doc_hard_fails by the caller
+    # (predict()), so they appear here in the reason automatically.
     for c in (doc_confirmations or []):
         criteria_met.append(c)
     for w in (doc_warnings or []):
@@ -1025,6 +1223,9 @@ def predict(
     """
     Returns (decision, score, reason_json).
 
+    doc_texts keys accepted:
+      "id_card", "cv", "diploma", "certificate", "experience"  ← ✅ FIX K
+
     Evaluation priority:
       1. Education level  (hard gate — highest priority)
       2. Field of study   (hard gate)
@@ -1032,9 +1233,9 @@ def predict(
                            otherwise score penalty applied)
       4. Skills           (soft — only hard if ratio == 0)
       5. ML model score   (blended)
-      6. Document cross-check
+      6. Document cross-check (diploma, cv, certificate, experience)
+                           ← ✅ FIX K: experience doc now included
     """
-    # ✅ FIX J: _hard_gate now returns 3 values including exp_penalty
     passed, gate_failures, exp_penalty = _hard_gate(application, job)
     df                                  = build_feature_vector(application, job)
 
@@ -1065,6 +1266,9 @@ def predict(
     cv_skill_penalty   = 0.0
 
     if doc_texts:
+        # ✅ FIX K: doc_texts may now contain "experience" key.
+        # _cross_check_form_vs_docs handles it internally via
+        # _cross_check_experience_doc and merges the results.
         doc_hard_fails, doc_warnings, doc_confirmations, cv_skill_penalty = (
             _cross_check_form_vs_docs(application, doc_texts)
         )
@@ -1072,7 +1276,6 @@ def predict(
     all_gate_failures = gate_failures + doc_hard_fails
     all_passed        = passed and len(doc_hard_fails) == 0
 
-    # ✅ FIX J — pass exp_penalty into score computation
     display_score = _compute_display_score(
         ml_prob, combined_match_score, all_gate_failures,
         job_is_known, cv_skill_penalty, skills_ratio,

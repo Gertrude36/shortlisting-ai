@@ -12,10 +12,15 @@ FIXES APPLIED:
   ✅ FIX 3 — cascade="all, delete-orphan" on Job.applications and
      Application.documents ensures DB integrity on deletion.
 
-  ✅ FIX 4 (NEW) — PostgreSQL compatibility:
+  ✅ FIX 4 — PostgreSQL compatibility:
      - SAEnum now uses native_enum=False so enums work on both
        SQLite and PostgreSQL without requiring CREATE TYPE migrations.
      - Text columns used for long fields (no VARCHAR length limits).
+
+  ✅ FIX 5 (NEW) — Added DocumentType.experience for experience/employment
+     letters, reference letters, or work certificates. This document is
+     used by the shortlisting engine to cross-verify declared
+     experience_years against real evidence.
 """
 
 from __future__ import annotations
@@ -48,6 +53,9 @@ class DocumentType(str, enum.Enum):
     cv          = "cv"
     diploma     = "diploma"
     certificate = "certificate"
+    # ✅ FIX 5 (NEW): Experience document — employment letter, reference
+    # letter, or work certificate proving declared experience_years.
+    experience  = "experience"
 
 
 # ── Models ────────────────────────────────────────────────────────────────────

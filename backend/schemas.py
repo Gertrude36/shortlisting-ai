@@ -19,6 +19,14 @@ FIXES APPLIED:
 
   ✅ FIX 4 — field_validator on JobResponse.deadline safely coerces
      legacy date-only DB values into datetime objects.
+
+  ✅ FIX 5 (NEW) — experience added to the DocumentOut model_config
+     documentation comment. DocumentOut itself is generic (doc_type
+     is a plain str) so no schema change is needed — the new
+     "experience" doc_type value flows through automatically.
+     ApplicationCreate and ApplicationResponse are unchanged because
+     experience evidence is captured via the Document upload flow,
+     not as a form field.
 """
 
 from __future__ import annotations
@@ -171,6 +179,12 @@ class ApplicationCreate(BaseModel):
 
 
 class DocumentOut(BaseModel):
+    """
+    Generic document output schema.
+    doc_type is a plain str so it accepts ALL DocumentType enum values:
+      id_card | cv | diploma | certificate | experience
+    No schema change is needed when new doc types are added to the enum.
+    """
     id: int
     doc_type: str
     original_name: str

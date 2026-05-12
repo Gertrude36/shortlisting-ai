@@ -23,6 +23,29 @@ FIXES APPLIED:
 
   ✅ FIX 4 — CSP / Google Fonts: The fix for this is in index.html
      (frontend), not here. See the fixed index.html file.
+
+  ✅ FIX K (NEW) — Experience document upload support.
+     ─────────────────────────────────────────────────────────────────
+     The "experience" document type (employment letter / reference
+     letter / work certificate) is now accepted by the upload endpoint.
+
+     CHANGES IN THIS FILE:
+       1. ALLOWED_DOC_TYPES now includes "experience".
+       2. DOC_TYPE_LABELS now has a human-readable label for "experience".
+       3. REQUIRED_DOC_TYPES is UNCHANGED — experience is OPTIONAL.
+          Applicants without work experience (fresh graduates) are not
+          forced to upload a document that doesn't exist for them.
+       4. The upload endpoint validates "experience" just like other
+          optional doc types (no pre_submission_check for experience —
+          it is a free-form letter, not a structured document).
+       5. _run_verification_and_prediction() already passes all doc_texts
+          to predict() via the doc_texts dict — the "experience" key is
+          picked up automatically by shortlisting_engine.py (Fix K there).
+       6. DOC_TYPE_LABELS is used in:
+          - upload response ("doc_label")
+          - list_documents response ("doc_label")
+          - HR report "documents" list ("doc_label")
+          All three now correctly label experience documents.
 """
 from __future__ import annotations
 
@@ -159,7 +182,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.1",
+    version     = "2.9.2",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -255,15 +278,23 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
-ALLOWED_DOC_TYPES  = {"id_card", "cv", "diploma", "certificate"}
-REQUIRED_DOC_TYPES = {"id_card", "cv", "diploma"}
 MAX_FILE_SIZE_MB   = 5
 
+# ✅ FIX K — "experience" added as an accepted (optional) document type.
+# REQUIRED_DOC_TYPES is intentionally unchanged: experience is optional
+# so fresh graduates with 0 years are not blocked from applying.
+ALLOWED_DOC_TYPES  = {"id_card", "cv", "diploma", "certificate", "experience"}
+REQUIRED_DOC_TYPES = {"id_card", "cv", "diploma"}
+
+# ✅ FIX K — Human-readable label for the experience document type.
+# Used in upload responses, list_documents, and the HR report.
 DOC_TYPE_LABELS = {
     "id_card":     "National ID / Passport",
     "cv":          "CV / Resume",
     "diploma":     "Academic Diploma / Degree Certificate",
     "certificate": "Professional Certificate (optional)",
+    # ✅ FIX K (NEW):
+    "experience":  "Experience Document (Employment / Reference Letter / Work Certificate) — optional",
 }
 
 DOC_TYPE_LABELS_REQUIRED = {
@@ -688,6 +719,8 @@ def finalize_application(
 
     print(f"[finalize] application_id={application_id} | docs found={len(docs)} | types={uploaded_types}")
 
+    # ✅ FIX K: REQUIRED_DOC_TYPES does NOT include "experience" — only the
+    # three core docs (id_card, cv, diploma) must be present to finalize.
     missing = sorted(REQUIRED_DOC_TYPES - uploaded_types)
     if missing:
         missing_labels = [DOC_TYPE_LABELS_REQUIRED.get(m, m) for m in missing]
@@ -703,12 +736,22 @@ def finalize_application(
     app_obj.submitted_at = datetime.now(timezone.utc)
     db.add(app_obj); db.commit()
 
+    # ✅ FIX K: include "experience" in the upload summary shown to the applicant.
+    has_experience_doc = "experience" in uploaded_types
+    experience_note    = (
+        " Experience document included — this will be cross-checked during shortlisting."
+        if has_experience_doc
+        else " Tip: uploading an experience document (employment letter / reference letter) "
+             "can strengthen your application if you have declared work experience."
+    )
+
     return {
         "success":         True,
         "application_id":  application_id,
         "message": (
             "✅ All required documents verified. Your application has been submitted successfully! "
             "You will be notified of the shortlisting decision."
+            + experience_note
         ),
         "uploaded_types":  sorted(uploaded_types),
         "documents_count": len(docs),
@@ -766,14 +809,15 @@ async def upload_document(
             detail="Application not found. You can only upload documents to your own applications."
         )
 
+    # ✅ FIX K: ALLOWED_DOC_TYPES now includes "experience".
     if doc_type not in ALLOWED_DOC_TYPES:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Invalid document type '{doc_type}'. "
                 f"Accepted types: {', '.join(sorted(ALLOWED_DOC_TYPES))}. "
-                "You must upload: "
-                + ", ".join(f"{k} ({v})" for k, v in DOC_TYPE_LABELS.items())
+                "Required: id_card, cv, diploma. "
+                "Optional: certificate, experience."
             ),
         )
 
@@ -807,13 +851,25 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    check_passed, check_message = pre_submission_check(
-        file_path       = save_path,
-        declared_type   = doc_type,
-        applicant_name  = current_user.full_name,
-        field_of_study  = app_obj.field_of_study  or "",
-        education_level = app_obj.education_level or "",
-    )
+    # ✅ FIX K: Skip pre_submission_check for "experience" documents.
+    # Experience letters are free-form (no structured layout, no logo,
+    # no specific keyword pattern to verify against), so the structured
+    # pre-submission check would incorrectly reject valid letters.
+    # The cross-check happens later in shortlisting_engine.py (Fix K there).
+    if doc_type == "experience":
+        check_passed   = True
+        check_message  = (
+            "✓ Experience document accepted. It will be cross-checked "
+            "against your declared experience years during shortlisting."
+        )
+    else:
+        check_passed, check_message = pre_submission_check(
+            file_path       = save_path,
+            declared_type   = doc_type,
+            applicant_name  = current_user.full_name,
+            field_of_study  = app_obj.field_of_study  or "",
+            education_level = app_obj.education_level or "",
+        )
 
     if not check_passed:
         try:
@@ -875,6 +931,8 @@ def list_documents(
             {
                 "id":            d.id,
                 "doc_type":      _doc_type_value(d),
+                # ✅ FIX K: DOC_TYPE_LABELS now has a label for "experience"
+                # so experience documents are correctly labelled here.
                 "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
                 "original_name": d.original_name,
                 "uploaded_at":   d.uploaded_at,
@@ -1017,6 +1075,8 @@ def get_job_report(
             "documents":         [
                 {
                     "doc_type":      _doc_type_value(d),
+                    # ✅ FIX K: DOC_TYPE_LABELS now has a label for "experience"
+                    # so it displays correctly in the HR report.
                     "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
                     "original_name": d.original_name,
                 }
@@ -1090,16 +1150,29 @@ def _run_verification_and_prediction(
     doc_paths = [d.file_path        for d in docs]
     doc_types = [_doc_type_value(d) for d in docs]
 
+    # ✅ FIX K: verify_documents only receives the core structural documents
+    # (id_card, cv, diploma, certificate). The "experience" document is a
+    # free-form letter that is NOT passed through verify_documents — instead
+    # it is cross-checked inside shortlisting_engine.predict() via doc_texts.
+    # Filtering here prevents verify_documents from raising an error on an
+    # unrecognised doc type.
+    VERIFIABLE_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
+    verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
+    verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
+
     doc_ok, doc_detail = verify_documents(
         applicant_name  = user.full_name,
         education_level = app_obj.education_level or "",
         field_of_study  = app_obj.field_of_study  or "",
-        document_paths  = doc_paths,
-        declared_types  = doc_types,
+        document_paths  = verify_paths,
+        declared_types  = verify_types,
     )
 
     identity_match = "Identity: ✓" in doc_detail
 
+    # ✅ FIX K: Extract text from ALL uploaded documents including "experience".
+    # The shortlisting engine reads doc_texts["experience"] to cross-check
+    # declared experience_years against the content of the uploaded letter.
     doc_texts: dict[str, str] = {}
     for d in docs:
         if os.path.exists(d.file_path):
