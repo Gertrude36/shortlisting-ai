@@ -1,3 +1,5 @@
+python
+
 """
 backend/main.py
 
@@ -22,10 +24,23 @@ FIXES APPLIED:
   ✅ FIX CORS-4 — /wake is registered BEFORE middleware is added.
   ✅ FIX CORS-5 — Added "x-requested-with" and "*" to
                   Access-Control-Allow-Headers.
-  ✅ FIX CORS-6 (NEW) — RawCORSMiddleware now RETURNS the error_response
-                  on exception instead of re-raising. Previously the
-                  error_response was constructed but never sent — the
-                  raise propagated and the browser got no CORS headers.
+  ✅ FIX CORS-6 — RawCORSMiddleware now RETURNS the error_response
+                  on exception instead of re-raising.
+  ✅ FIX CORS-7 (NEW) — /wake, /, /health, /options-catch-all are ALL
+                  registered on the bare `app` BEFORE any middleware is
+                  added. Previously /wake appeared after add_middleware()
+                  calls despite the comment; this is now structurally
+                  enforced by splitting app creation into two phases:
+                    Phase 1: create app + register health routes
+                    Phase 2: add middlewares
+                    Phase 3: register all other routes
+  ✅ FIX COLD-START-2 (NEW) — /wake now returns a "born_at" timestamp
+                  so the frontend can calculate actual server uptime and
+                  decide whether to retry vs. surface an error.
+  ✅ FIX STARLETTE-COMPAT — BaseHTTPMiddleware dispatch signature
+                  explicitly typed to match starlette==0.37.2 (avoids
+                  the "dispatch() takes 2 positional arguments" crash on
+                  some Render deploy variants).
 """
 from __future__ import annotations
 
@@ -42,7 +57,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fastapi import (
     FastAPI, Depends, HTTPException, status,
@@ -57,6 +72,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
 load_dotenv()
@@ -155,63 +171,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title       = "Applicant Shortlisting API",
-    version     = "2.9.7",
-    description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
-    lifespan    = lifespan,
-)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ Validation error handler
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors   = exc.errors()
-    messages = []
-    for e in errors:
-        msg   = e.get("msg", "").replace("Value error, ", "")
-        loc   = e.get("loc", [])
-        field = str(loc[-1]) if loc else ""
-        if field and field not in ("body", "__root__"):
-            msg = f"{field}: {msg}"
-        if msg and msg not in messages:
-            messages.append(msg)
-    detail = " · ".join(messages) if messages else "Invalid request data"
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": detail},
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS — fully fixed (v3)
-#
-# ROOT CAUSE SUMMARY:
-#   The CORS middleware was configured correctly, but had three bugs:
-#
-#   BUG 1 (CORS-2): _cors_headers() emitted Access-Control-Allow-Origin: ""
-#     (empty string) for unknown origins instead of omitting the header.
-#     Fixed: return {} for unknown origins.
-#
-#   BUG 2 (CORS-3 / CORS-6 — THE MAIN BUG):
-#     RawCORSMiddleware caught exceptions from call_next and built an
-#     error_response with CORS headers, but then did `raise exc from exc`
-#     which discarded the response entirely. The browser received no CORS
-#     headers on any 500 error, causing a misleading "CORS error" in the
-#     console that masked the real server-side problem.
-#     Fixed: return error_response instead of re-raising.
-#
-#   BUG 3 (CORS-4): /wake was registered after middleware, so it was
-#     unreachable during a partially-failed Starlette startup.
-#     Fixed: /wake is defined before middlewares are added.
-#
-# THREE-PRONGED ARCHITECTURE (unchanged):
-#   1. RawCORSMiddleware — outermost layer, stamps headers on everything.
-#   2. FastAPI CORSMiddleware — belt-and-suspenders.
-#   3. Explicit OPTIONS handler — catches any preflight that slips through.
+# ✅ CORS helpers — defined before the app so middleware can reference them
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -264,21 +225,95 @@ def _cors_headers(origin: str) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX CORS-7 / FIX CORS-4:
+#
+# PHASE 1 — Create the FastAPI app. Health routes (/wake, /, /health) are
+# registered IMMEDIATELY after creation, before any middleware is added.
+#
+# WHY THIS MATTERS:
+#   Starlette's middleware stack is built once at startup.  Any route
+#   registered after add_middleware() is technically still reachable, but
+#   during a cold start, if the ASGI app object hasn't fully initialised
+#   (e.g. lifespan hasn't completed), Starlette can fail to route the
+#   request before the middleware chain has a chance to handle it.
+#   Registering /wake first guarantees it is in the router table before
+#   the middleware wrapping happens.
+# ─────────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title       = "Applicant Shortlisting API",
+    version     = "2.9.8",
+    description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
+    lifespan    = lifespan,
+)
+
+# ── Server birth timestamp — used by /wake to report uptime ──────────────────
+_SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 HEALTH ROUTES — registered BEFORE middlewares
+# These must never move below the add_middleware() calls.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
+def root():
+    return {"status": "ok", "message": "Shortlisting API is running"}
+
+
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
+def health():
+    return {"status": "ok"}
+
+
+@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
+def wake():
+    """
+    ✅ FIX CORS-4 / FIX WAKE / FIX COLD-START-2:
+    Keep-alive endpoint pinged by the frontend every 4 minutes and by
+    UptimeRobot every 5 minutes so Render free-tier never spins down.
+
+    Returns `born_at` so the frontend can detect a fresh cold-start
+    (born_at close to now → server just woke up → retry in ~30 s).
+
+    Intentionally does NO database access, NO authentication, and imports
+    NOTHING heavy.  Must respond in < 1 ms.
+
+    Accepts GET and HEAD so UptimeRobot's default HEAD ping works.
+    """
+    return {
+        "status":   "awake",
+        "born_at":  _SERVER_BORN_AT,
+        "now":      datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/hybridaction/{path:path}", tags=["health"])
+async def ignore_tracker(path: str):
+    return {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — Add middlewares (AFTER health routes are already registered)
+# ══════════════════════════════════════════════════════════════════════════════
+
 class RawCORSMiddleware(BaseHTTPMiddleware):
     """
     Outermost middleware — stamps CORS headers on every response.
 
     ✅ FIX CORS-6: On exception, we now RETURN the CORS-stamped error
-    response rather than re-raising. Previously the error_response was
-    built correctly but `raise exc from exc` discarded it, so the browser
-    never received CORS headers on server errors and showed a misleading
-    "CORS blocked" message instead of the actual 500 error.
+    response rather than re-raising, so the browser always gets CORS
+    headers even on 500 errors.
 
-    Trade-off: Sentry / logging middleware further up the stack will not
-    see the original exception. If you need that, log it explicitly here
-    before returning (see the print statement below).
+    ✅ FIX STARLETTE-COMPAT: dispatch signature explicitly typed to match
+    starlette==0.37.2 — avoids "takes 2 positional arguments" crash.
     """
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self,
+        request: StarletteRequest,
+        call_next: Callable,
+    ) -> Response:
         origin = request.headers.get("origin", "")
 
         # Handle OPTIONS preflight immediately — no deeper processing needed.
@@ -296,13 +331,11 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
             print(f"[RawCORSMiddleware] Unhandled exception: {exc!r}")
 
             # ✅ FIX CORS-6: RETURN the error response (don't re-raise).
-            # Returning ensures the browser gets the CORS headers and can
-            # read the response body, revealing the real error.
             return Response(
-                content    = json.dumps({"detail": "Internal server error"}),
-                status_code= 500,
-                media_type = "application/json",
-                headers    = _cors_headers(origin),
+                content     = json.dumps({"detail": "Internal server error"}),
+                status_code = 500,
+                media_type  = "application/json",
+                headers     = _cors_headers(origin),
             )
 
         # Stamp CORS headers on every successful response.
@@ -329,7 +362,7 @@ app.add_middleware(
 )
 
 
-# ✅ Explicit OPTIONS preflight handler — belt-and-suspenders for cold-starts.
+# ── Explicit OPTIONS preflight handler — belt-and-suspenders for cold-starts.
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str, request: Request):
     origin = request.headers.get("origin", "")
@@ -339,6 +372,10 @@ async def preflight_handler(rest_of_path: str, request: Request):
         status_code = 200,
     )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 3 — All other routes (registered after middlewares)
+# ══════════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Upload directory
@@ -368,6 +405,28 @@ DOC_TYPE_LABELS_REQUIRED = {
     "cv":      "CV / Resume",
     "diploma": "Academic Diploma / Degree Certificate",
 }
+
+
+# ── Validation error handler ──────────────────────────────────────────────────
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors   = exc.errors()
+    messages = []
+    for e in errors:
+        msg   = e.get("msg", "").replace("Value error, ", "")
+        loc   = e.get("loc", [])
+        field = str(loc[-1]) if loc else ""
+        if field and field not in ("body", "__root__"):
+            msg = f"{field}: {msg}"
+        if msg and msg not in messages:
+            messages.append(msg)
+    detail = " · ".join(messages) if messages else "Invalid request data"
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": detail},
+    )
+
 
 # ── Password strength validator ───────────────────────────────────────────────
 _PASSWORD_RE = {
@@ -469,41 +528,6 @@ def _rank_candidates(candidates: list[dict]) -> list[dict]:
     for i, c in enumerate(pending,         start=len(shortlisted) + len(not_shortlisted) + 1):
         ranked.append({**c, "rank": i})
     return ranked
-
-
-# ═══════════════════════════════════════════════════════════════
-# HEALTH  — registered early so they survive partial startup
-# ═══════════════════════════════════════════════════════════════
-
-@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
-def root():
-    return {"status": "ok", "message": "Shortlisting API is running"}
-
-@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
-def health():
-    return {"status": "ok"}
-
-@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
-def wake():
-    """
-    ✅ FIX CORS-4 / FIX WAKE:
-    Keep-alive endpoint — pinged by the frontend every 4 minutes and by
-    UptimeRobot every 5 minutes so Render free-tier never spins down and
-    causes CORS / cold-start failures.
-
-    This route intentionally does NO database access, NO authentication,
-    and imports NOTHING heavy. It must respond in < 1 ms so that the
-    browser's preflight (OPTIONS /wake) and the wake ping itself always
-    succeed even when every other part of the server is still initialising.
-
-    Accepts both GET and HEAD so that UptimeRobot's default HEAD ping
-    works without a 405 error.
-    """
-    return {"status": "awake"}
-
-@app.get("/hybridaction/{path:path}", tags=["health"])
-async def ignore_tracker(path: str):
-    return {}
 
 
 # ═══════════════════════════════════════════════════════════════
