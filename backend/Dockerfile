@@ -35,4 +35,8 @@ EXPOSE 10000
 # NOTE: sentence-transformers loads the AI model once per worker (~90 MB each).
 # On Render free tier (512 MB RAM) 4 workers × ~120 MB = ~480 MB — just fits.
 # If you see OOM errors, drop to --workers 2.
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 4
+CMD uvicorn main:app \
+    --host 0.0.0.0 \
+    --port ${PORT:-10000} \
+    --workers 2 \
+    --timeout-keep-alive 75
