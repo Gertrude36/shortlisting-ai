@@ -1,35 +1,5 @@
 from __future__ import annotations
 
-"""
-backend/main.py
-
-FIXES APPLIED IN THIS VERSION:
-  ✅ FIX CORS-8 — RawCORSMiddleware now sends CORS headers on ALL responses,
-                  including when the server returns a 500 or the lifespan
-                  hasn't finished. The previous version only stamped headers
-                  after call_next() succeeded; a crash before that point
-                  produced a response with no CORS headers at all.
-
-  ✅ FIX CORS-9 — Preflight OPTIONS handler moved to Phase 1 (before
-                  middleware) so it responds immediately even during
-                  cold-start before the DB or AI models are loaded.
-
-  ✅ FIX CORS-10 — ALLOWED_ORIGINS now always includes the Vercel domain
-                   regardless of env vars, and the regex is broadened to
-                   match any *.vercel.app subdomain for preview deployments.
-
-  ✅ FIX DUP-DOC — /applications/{id}/documents POST now checks for an
-                   existing doc using a DB query that is always fresh
-                   (db.expire_all() before the check) so a race-condition
-                   that left a stale ORM cache couldn't hide an existing doc.
-
-  ✅ FIX WAKE-CORS — /wake now explicitly returns CORS headers inline
-                     (not relying on middleware) so the frontend wake-gate
-                     fetch() via plain fetch() always succeeds cross-origin.
-
-  All previous fixes retained.
-"""
-
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
 import os
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
@@ -49,7 +19,6 @@ from fastapi import (
     FastAPI, Depends, HTTPException, status,
     UploadFile, File, Form, Request
 )
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
@@ -157,7 +126,7 @@ async def lifespan(app: FastAPI):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX CORS-10: CORS helpers
+# CORS helpers  —  single source of truth
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -168,20 +137,24 @@ _HARDCODED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
+# Matches any *.vercel.app subdomain (preview deployments included)
+_ORIGIN_RE = re.compile(
+    r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$"
+)
+
+
 def _build_allowed_origins() -> list[str]:
     env_origins = [
         o.strip()
         for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
-        if o.strip() and o.strip().startswith("http")
+        if o.strip().startswith("http")
     ]
     merged = list(dict.fromkeys(_HARDCODED_ORIGINS + env_origins))
     print(f"[CORS] Allowed origins: {merged}")
     return merged
 
-ALLOWED_ORIGINS = _build_allowed_origins()
 
-# Broader regex: matches ANY vercel.app subdomain (covers preview deployments)
-_ORIGIN_RE = re.compile(r"^https://[a-zA-Z0-9-]+-[a-zA-Z0-9-]+\.vercel\.app$|^https://shortlisting-ai.*\.vercel\.app$")
+ALLOWED_ORIGINS: list[str] = _build_allowed_origins()
 
 
 def _is_origin_allowed(origin: str) -> bool:
@@ -191,10 +164,7 @@ def _is_origin_allowed(origin: str) -> bool:
 
 
 def _cors_headers(origin: str) -> dict:
-    """
-    Return CORS headers. Returns empty dict for unknown origins so we never
-    emit an empty Access-Control-Allow-Origin header (which browsers reject).
-    """
+    """Return CORS headers for a known origin, empty dict otherwise."""
     if not _is_origin_allowed(origin):
         return {}
     return {
@@ -203,56 +173,89 @@ def _cors_headers(origin: str) -> dict:
         "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers":     (
             "Authorization, Content-Type, Accept, "
-            "Origin, X-Requested-With, *"
+            "Origin, X-Requested-With"
         ),
-        "Access-Control-Expose-Headers":    "*",
+        "Access-Control-Expose-Headers":    "Content-Length, Content-Type",
         "Access-Control-Max-Age":           "600",
         "Vary":                             "Origin",
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 1 — Create app + register health/preflight routes BEFORE middleware
+# Single CORS middleware  —  no FastAPI CORSMiddleware, no duplicates
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CORSMiddleware(BaseHTTPMiddleware):
+    """
+    Handles ALL CORS concerns in one place:
+      • Preflight OPTIONS  →  200 + headers, no further processing
+      • Every other request →  stamp headers on the response, even on 4xx/5xx
+    """
+    async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
+        origin = request.headers.get("origin", "")
+
+        # ── Preflight ────────────────────────────────────────────────────────
+        if request.method == "OPTIONS":
+            return Response(
+                content="",
+                status_code=200,
+                headers=_cors_headers(origin),
+            )
+
+        # ── Normal request ───────────────────────────────────────────────────
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            print(f"[CORSMiddleware] Unhandled exception: {exc!r}")
+            response = Response(
+                content=json.dumps({"detail": "Internal server error"}),
+                status_code=500,
+                media_type="application/json",
+            )
+
+        headers = _cors_headers(origin)
+        for key, value in headers.items():
+            response.headers[key] = value
+
+        return response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# App — middleware registered BEFORE routes so Starlette wraps correctly
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "3.0.0",
+    version     = "4.0.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
+# Register the single CORS middleware first
+app.add_middleware(CORSMiddleware)
+
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
 
-# ── ✅ FIX CORS-9: OPTIONS preflight in Phase 1 — responds before any
-#    middleware or DB/AI loading. Must be here, not after add_middleware(). ──
+# ─────────────────────────────────────────────────────────────────────────────
+# Health / wake routes
+# ─────────────────────────────────────────────────────────────────────────────
 
-@app.options("/{rest_of_path:path}", tags=["cors"])
-async def preflight_handler(rest_of_path: str, request: Request):
-    origin = request.headers.get("origin", "")
-    return Response(
-        content     = "",
-        status_code = 200,
-        headers     = _cors_headers(origin),
-    )
-
-
-# ── ✅ FIX WAKE-CORS: /wake returns inline CORS headers, not relying
-#    on middleware, so the plain fetch() in axios.js always succeeds. ──
-
-@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
+@app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
-    origin  = request.headers.get("origin", "")
-    headers = _cors_headers(origin)
-    return JSONResponse(
-        content = {
-            "status":  "awake",
-            "born_at": _SERVER_BORN_AT,
-            "now":     datetime.now(timezone.utc).isoformat(),
-        },
-        headers = headers,
-    )
+    """
+    Wake-gate endpoint.  Always responds quickly — CORS headers are added
+    by the middleware above, so no inline header stamping needed here.
+    """
+    if request.method == "OPTIONS":
+        origin = request.headers.get("origin", "")
+        return Response(content="", status_code=200, headers=_cors_headers(origin))
+
+    return JSONResponse(content={
+        "status":  "awake",
+        "born_at": _SERVER_BORN_AT,
+        "now":     datetime.now(timezone.utc).isoformat(),
+    })
 
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
@@ -271,70 +274,7 @@ async def ignore_tracker(path: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 2 — Add middlewares AFTER health routes
-# ─────────────────────────────────────────────────────────────────────────────
-
-class RawCORSMiddleware(BaseHTTPMiddleware):
-    """
-    ✅ FIX CORS-8: Stamps CORS headers on EVERY response — including
-    error responses generated before call_next() is reached.
-    The key fix: we always build a fallback error response and stamp it,
-    rather than re-raising which discards headers.
-    """
-    async def dispatch(
-        self,
-        request: StarletteRequest,
-        call_next: Callable,
-    ) -> Response:
-        origin = request.headers.get("origin", "")
-
-        # Preflights are handled in Phase 1; this is belt-and-suspenders.
-        if request.method == "OPTIONS":
-            return Response(
-                content     = "",
-                status_code = 200,
-                headers     = _cors_headers(origin),
-            )
-
-        error_response: Response | None = None
-        try:
-            response = await call_next(request)
-        except Exception as exc:
-            print(f"[RawCORSMiddleware] Unhandled exception: {exc!r}")
-            error_response = Response(
-                content    = json.dumps({"detail": "Internal server error"}),
-                status_code = 500,
-                media_type  = "application/json",
-            )
-
-        if error_response is not None:
-            for key, value in _cors_headers(origin).items():
-                error_response.headers[key] = value
-            return error_response
-
-        for key, value in _cors_headers(origin).items():
-            response.headers[key] = value
-
-        return response
-
-
-app.add_middleware(RawCORSMiddleware)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins      = ALLOWED_ORIGINS,
-    allow_origin_regex = r"https://shortlisting-ai.*\.vercel\.app",
-    allow_credentials  = True,
-    allow_methods      = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers      = ["Authorization", "Content-Type", "Accept",
-                          "Origin", "X-Requested-With"],
-    expose_headers     = ["*"],
-    max_age            = 600,
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHASE 3 — All business routes
+# Upload directory + static files
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
@@ -363,6 +303,10 @@ DOC_TYPE_LABELS_REQUIRED = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Exception handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors   = exc.errors()
@@ -381,6 +325,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": detail},
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 _PASSWORD_RE = {
     "length":    lambda v: len(v) >= 8,
@@ -857,8 +805,6 @@ async def upload_document(
             ),
         )
 
-    # ✅ FIX DUP-DOC: expire cache and re-query so we never miss an
-    # existing doc that was committed in a prior request.
     db.expire_all()
     existing_docs = db.query(Document).filter(
         Document.application_id == application_id
