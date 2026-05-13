@@ -1,5 +1,3 @@
-python
-
 from __future__ import annotations
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -169,15 +167,6 @@ def _is_origin_allowed(origin: str) -> bool:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Raw ASGI CORS wrapper — outermost layer, below uvicorn
-#
-# Render's free tier returns 503s directly from their proxy during cold-start,
-# BEFORE our Python process receives the request. These 503s have no CORS
-# headers, so the browser reports a CORS error instead of showing the real
-# "server is starting" message.
-#
-# This wrapper intercepts the send() coroutine and injects CORS headers onto
-# EVERY HTTP response — including infrastructure-level 503s — before they
-# reach the browser.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RawASGICORSWrapper:
@@ -191,7 +180,6 @@ class RawASGICORSWrapper:
             await self._inner(scope, receive, send)
             return
 
-        # Extract origin from request headers
         origin = ""
         for name, value in scope.get("headers", []):
             if name == b"origin":
@@ -200,7 +188,6 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        # ── Fast-path preflight: respond immediately, no inner app needed ──
         if method == "OPTIONS" and _is_origin_allowed(origin):
             response_headers = [
                 (b"access-control-allow-origin",      origin.encode()),
@@ -221,7 +208,6 @@ class RawASGICORSWrapper:
             await send({"type": "http.response.body", "body": b""})
             return
 
-        # ── For all other requests: intercept send() to inject headers ──────
         if not _is_origin_allowed(origin):
             await self._inner(scope, receive, send)
             return
@@ -232,7 +218,6 @@ class RawASGICORSWrapper:
             nonlocal headers_sent
             if message["type"] == "http.response.start" and not headers_sent:
                 headers_sent = True
-                # Mutate a copy so we don't alter the original message dict
                 raw_headers: list = list(message.get("headers", []))
                 existing = {name.lower() for name, _ in raw_headers}
                 if b"access-control-allow-origin" not in existing:
@@ -310,8 +295,6 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 # Build the FastAPI app
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Keep a module-level reference to the FastAPI instance so route decorators
-# always use the real FastAPI object, not the ASGI wrapper.
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
     version     = "4.0.0",
@@ -319,8 +302,6 @@ _app = FastAPI(
     lifespan    = lifespan,
 )
 
-# Middleware registration: add FastAPICORSMiddleware first (innermost),
-# then _CORSFallbackMiddleware (outermost Starlette layer).
 _app.add_middleware(
     FastAPICORSMiddleware,
     allow_origins      = ALLOWED_ORIGINS,
@@ -333,8 +314,6 @@ _app.add_middleware(
 )
 _app.add_middleware(_CORSFallbackMiddleware)
 
-# Wrap with the raw ASGI layer AFTER all middleware is registered.
-# uvicorn receives `app` (the wrapper); all routes are on `_app`.
 app = RawASGICORSWrapper(_app)
 
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
