@@ -14,21 +14,18 @@ FIXES APPLIED:
                       that gets partially processed still returns headers.
   ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 
-  ✅ FIX CORS-2 (NEW) — _cors_headers() no longer emits an empty-string
-                        Access-Control-Allow-Origin header for unknown
-                        origins; the header is omitted entirely, which is
-                        what the CORS spec requires.
-  ✅ FIX CORS-3 (NEW) — RawCORSMiddleware wraps call_next in try/except so
-                        an unhandled exception during request processing
-                        still returns CORS headers (previously the exception
-                        propagated and no headers were stamped).
-  ✅ FIX CORS-4 (NEW) — /wake is registered BEFORE middleware is added so
-                        it is reachable even during a Starlette startup that
-                        fails partway through. Route order moved to top of
-                        app definition.
-  ✅ FIX CORS-5 (NEW) — Added "x-requested-with" and "*" to
-                        Access-Control-Allow-Headers so axios custom headers
-                        are never blocked by a preflight.
+  ✅ FIX CORS-2 — _cors_headers() no longer emits an empty-string
+                  Access-Control-Allow-Origin header for unknown origins.
+  ✅ FIX CORS-3 — RawCORSMiddleware wraps call_next in try/except AND
+                  actually returns the CORS-stamped error response instead
+                  of re-raising (which previously discarded the response).
+  ✅ FIX CORS-4 — /wake is registered BEFORE middleware is added.
+  ✅ FIX CORS-5 — Added "x-requested-with" and "*" to
+                  Access-Control-Allow-Headers.
+  ✅ FIX CORS-6 (NEW) — RawCORSMiddleware now RETURNS the error_response
+                  on exception instead of re-raising. Previously the
+                  error_response was constructed but never sent — the
+                  raise propagated and the browser got no CORS headers.
 """
 from __future__ import annotations
 
@@ -160,7 +157,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.6",
+    version     = "2.9.7",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -190,28 +187,31 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS — fully fixed (v2)
+# ✅ CORS — fully fixed (v3)
 #
-# ROOT CAUSE OF THE ORIGINAL BUG:
-#   The CORS middleware was configured correctly, but:
-#   1. _cors_headers() emitted Access-Control-Allow-Origin: "" (empty string)
-#      for unknown origins instead of omitting the header entirely.
-#      Chrome/Firefox treat an empty-string value as a CORS failure even
-#      when the origin would otherwise be allowed by another middleware layer.
-#   2. RawCORSMiddleware did not catch exceptions from call_next, so any
-#      unhandled 500 error during request processing skipped header stamping.
-#   3. Render free-tier cold-start: the server may take up to ~30 s to wake.
-#      During that window the TCP connection can fail before any HTTP bytes
-#      are sent. The browser sees "no CORS header" and reports a CORS error
-#      even though the real problem is a network timeout.
+# ROOT CAUSE SUMMARY:
+#   The CORS middleware was configured correctly, but had three bugs:
 #
-# THREE-PRONGED FIX (unchanged) + two new sub-fixes:
-#   1. RawCORSMiddleware — injected FIRST (outermost layer) so CORS headers
-#      are stamped on EVERY response including 500s, now with try/except.
-#   2. FastAPI CORSMiddleware — kept as belt-and-suspenders.
+#   BUG 1 (CORS-2): _cors_headers() emitted Access-Control-Allow-Origin: ""
+#     (empty string) for unknown origins instead of omitting the header.
+#     Fixed: return {} for unknown origins.
+#
+#   BUG 2 (CORS-3 / CORS-6 — THE MAIN BUG):
+#     RawCORSMiddleware caught exceptions from call_next and built an
+#     error_response with CORS headers, but then did `raise exc from exc`
+#     which discarded the response entirely. The browser received no CORS
+#     headers on any 500 error, causing a misleading "CORS error" in the
+#     console that masked the real server-side problem.
+#     Fixed: return error_response instead of re-raising.
+#
+#   BUG 3 (CORS-4): /wake was registered after middleware, so it was
+#     unreachable during a partially-failed Starlette startup.
+#     Fixed: /wake is defined before middlewares are added.
+#
+# THREE-PRONGED ARCHITECTURE (unchanged):
+#   1. RawCORSMiddleware — outermost layer, stamps headers on everything.
+#   2. FastAPI CORSMiddleware — belt-and-suspenders.
 #   3. Explicit OPTIONS handler — catches any preflight that slips through.
-#   4. _cors_headers() no longer emits the header at all for unknown origins.
-#   5. /wake pings back immediately — no DB, no auth, no heavy imports.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -244,16 +244,10 @@ def _is_origin_allowed(origin: str) -> bool:
 def _cors_headers(origin: str) -> dict:
     """
     Return CORS headers for a given request origin.
-
-    ✅ FIX CORS-2: If the origin is not on the allow-list we return an empty
-    dict — we do NOT set Access-Control-Allow-Origin to an empty string.
-    An empty-string value is treated by browsers as a failed CORS check
-    (same as a mismatched origin), and it also prevents other middleware
-    layers from setting the correct header later.
+    Returns an empty dict for unknown/missing origins (never sets the
+    header to an empty string, which browsers treat as a CORS failure).
     """
     if not origin or not _is_origin_allowed(origin):
-        # Return no CORS headers — let the browser block the request.
-        # Do NOT return {"Access-Control-Allow-Origin": ""}.
         return {}
 
     return {
@@ -272,38 +266,44 @@ def _cors_headers(origin: str) -> dict:
 
 class RawCORSMiddleware(BaseHTTPMiddleware):
     """
-    Outermost middleware layer — stamps CORS headers unconditionally.
+    Outermost middleware — stamps CORS headers on every response.
 
-    ✅ FIX CORS-3: Wraps call_next in try/except so that an unhandled
-    exception during request processing does not prevent CORS headers
-    from being attached to the error response. Without this, a 500 that
-    bubbles up before FastAPI's own exception handlers run would reach
-    the browser with no CORS headers, causing a spurious CORS error that
-    masks the real server-side problem.
+    ✅ FIX CORS-6: On exception, we now RETURN the CORS-stamped error
+    response rather than re-raising. Previously the error_response was
+    built correctly but `raise exc from exc` discarded it, so the browser
+    never received CORS headers on server errors and showed a misleading
+    "CORS blocked" message instead of the actual 500 error.
+
+    Trade-off: Sentry / logging middleware further up the stack will not
+    see the original exception. If you need that, log it explicitly here
+    before returning (see the print statement below).
     """
     async def dispatch(self, request: Request, call_next):
         origin = request.headers.get("origin", "")
 
-        # Handle OPTIONS preflight immediately — no need to go deeper.
+        # Handle OPTIONS preflight immediately — no deeper processing needed.
         if request.method == "OPTIONS":
             return Response(
-                content    = "",
-                status_code= 200,
-                headers    = _cors_headers(origin),
+                content     = "",
+                status_code = 200,
+                headers     = _cors_headers(origin),
             )
 
         try:
             response = await call_next(request)
         except Exception as exc:
-            # Re-raise after stamping CORS headers on a 500 response so the
-            # browser can read the error body rather than showing a CORS error.
-            error_response = Response(
-                content     = json.dumps({"detail": "Internal server error"}),
-                status_code = 500,
-                media_type  = "application/json",
-                headers     = _cors_headers(origin),
+            # Log the real error so it appears in Render logs.
+            print(f"[RawCORSMiddleware] Unhandled exception: {exc!r}")
+
+            # ✅ FIX CORS-6: RETURN the error response (don't re-raise).
+            # Returning ensures the browser gets the CORS headers and can
+            # read the response body, revealing the real error.
+            return Response(
+                content    = json.dumps({"detail": "Internal server error"}),
+                status_code= 500,
+                media_type = "application/json",
+                headers    = _cors_headers(origin),
             )
-            raise exc from exc  # still propagate so Sentry / logs capture it
 
         # Stamp CORS headers on every successful response.
         for key, value in _cors_headers(origin).items():
@@ -312,8 +312,7 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Register raw middleware FIRST (outermost = processed first on request,
-# last on response — so its headers are applied after inner middleware).
+# Register raw middleware FIRST (outermost layer).
 app.add_middleware(RawCORSMiddleware)
 
 # Standard FastAPI CORS middleware (belt-and-suspenders).
@@ -335,8 +334,8 @@ app.add_middleware(
 async def preflight_handler(rest_of_path: str, request: Request):
     origin = request.headers.get("origin", "")
     return JSONResponse(
-        content = {},
-        headers = _cors_headers(origin),
+        content     = {},
+        headers     = _cors_headers(origin),
         status_code = 200,
     )
 
