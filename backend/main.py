@@ -44,12 +44,6 @@ FIXES APPLIED:
   ✅ DEPLOY FIX 2 — from __future__ import annotations moved to line 1,
                   ABOVE the module docstring (Python requires it to be
                   the very first statement; the docstring was blocking it).
-
-  ✅ FIX UPLOAD-SUBMITTED — upload_document now blocks uploads to already
-                  submitted applications with a clear 400 error instead of
-                  a confusing "document already uploaded" duplicate error.
-  ✅ FIX DELETE-SUBMITTED — delete_document now blocks deletions from
-                  already submitted applications with a clear 400 error.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -242,7 +236,7 @@ def _cors_headers(origin: str) -> dict:
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.9",
+    version     = "2.9.8",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -888,16 +882,6 @@ async def upload_document(
             detail="Application not found. You can only upload documents to your own applications."
         )
 
-    # ✅ FIX UPLOAD-SUBMITTED — block uploads after submission
-    if app_obj.submitted_at is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This application has already been submitted and can no longer be modified. "
-                "Document uploads are only allowed before submission."
-            ),
-        )
-
     if doc_type not in ALLOWED_DOC_TYPES:
         raise HTTPException(
             status_code=400,
@@ -1049,16 +1033,6 @@ def delete_document(
     ).first()
     if not app_obj:
         raise HTTPException(status_code=403, detail="Not authorized")
-
-    # ✅ FIX DELETE-SUBMITTED — block deletions after submission
-    if app_obj.submitted_at is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This application has already been submitted. "
-                "Documents cannot be removed after submission."
-            ),
-        )
 
     try:
         if os.path.exists(doc.file_path):
