@@ -25,16 +25,31 @@
  *   reports this as "No 'Access-Control-Allow-Origin' header" even
  *   though the CORS config is correct.
  *
- * FIXES:
- *   1. Wake ping runs in ALL environments (not just prod) — removed
- *      the IS_PROD guard that was preventing it from working locally.
- *   2. Aggressive warm-up: ping /wake immediately on load, then every
- *      4 minutes.
- *   3. Auto-retry on network errors: if a request fails with a network
- *      error (ERR_FAILED / no response), we wait 3 seconds and retry
- *      once automatically — this recovers from cold-start failures
- *      transparently.
- *   4. Increased timeout to 45s for the first cold-start request.
+ * ✅ FIX COLD-START-2 (NEW) — WAKE GATE
+ * ─────────────────────────────────────────────────────────────────
+ * ROOT CAUSE OF REMAINING COLD-START FAILURES:
+ *   The original code fired _wake() and then immediately allowed
+ *   requests to proceed. Because _wake() is async and the first page
+ *   API call (e.g. GET /applications/{id}/documents) fires in the same
+ *   JS microtask queue tick, there was effectively zero gap between
+ *   "we pinged /wake" and "we sent the real request" — the server had
+ *   no time to finish booting.
+ *
+ * FIX — Wake Gate (promise-based mutex):
+ *   A module-level Promise (_wakeGate) is created once on import.
+ *   It resolves when /wake responds successfully OR after a 10s timeout
+ *   (so a broken /wake endpoint never blocks the app forever).
+ *   The request interceptor awaits _wakeGate for all non-public routes
+ *   before sending any request, guaranteeing the server is alive.
+ *
+ *   Public routes (/auth/login, /jobs GET, etc.) skip the gate so the
+ *   jobs listing page loads instantly without waiting for the server.
+ *
+ * OTHER FIXES retained from previous version:
+ *   1. Wake ping runs in ALL environments (not just prod).
+ *   2. Aggressive keep-alive: ping /wake every 4 minutes.
+ *   3. Auto-retry on network errors: wait 4s and retry once.
+ *   4. Increased timeout to 45s for cold-start requests.
  */
 
 import axios from 'axios'
@@ -51,25 +66,58 @@ const api = axios.create({
   timeout:         45_000,   // 45s — generous enough for a cold-start wakeup
 })
 
+// ── Wake gate ─────────────────────────────────────────────────────────────────
+//
+// _wakeGate is a Promise that resolves once the backend is confirmed alive.
+// All authenticated requests await this before being sent, ensuring the
+// server has had time to finish booting after a cold-start.
+//
+// The gate resolves (not rejects) on both success AND timeout so that
+// a broken /wake endpoint never blocks the entire app permanently.
+// After the gate resolves once, subsequent requests skip the wait entirely
+// because awaiting an already-resolved Promise is instant.
+
+let _wakeGateResolve          // called when server confirms it's awake
+let _serverConfirmedAwake = false
+
+const _wakeGate = new Promise((resolve) => {
+  _wakeGateResolve = () => {
+    _serverConfirmedAwake = true
+    resolve()
+  }
+
+  // Safety timeout — if /wake never responds in 10s, unblock anyway.
+  // This prevents the app from hanging forever if /wake itself is broken.
+  setTimeout(() => {
+    if (!_serverConfirmedAwake) {
+      console.warn('[axios] Wake gate timed out after 10s — unblocking requests anyway.')
+      resolve()
+    }
+  }, 10_000)
+})
+
 // ── Wake-up ping + keep-alive interval ───────────────────────────────────────
 //
-// FIX: removed IS_PROD guard — wake ping now runs everywhere.
-// Render free-tier cold-starts affect anyone who opens the app after
-// ~15 min of inactivity, in any environment.
-//
-// Uses plain fetch() — never triggers axios interceptors or causes
-// spurious 401 redirects.
+// Uses plain fetch() so it never triggers axios interceptors.
+// On success: resolves the wake gate so queued requests can proceed.
+// On failure: the 10s safety timeout will unblock them instead.
 
 const _wake = () =>
-  fetch(`${BACKEND}/wake`, { method: 'GET' }).catch(() => {
-    // Silently ignore — server may still be sleeping; the retry logic
-    // in the response interceptor will recover the actual request.
-  })
+  fetch(`${BACKEND}/wake`, { method: 'GET' })
+    .then((res) => {
+      if (res.ok && !_serverConfirmedAwake) {
+        _wakeGateResolve()
+      }
+    })
+    .catch(() => {
+      // Server still sleeping — the safety timeout will unblock the gate.
+      // The _retryOnce interceptor will handle the actual failed request.
+    })
 
-// Warm up immediately on load
+// Warm up immediately on module load
 _wake()
 
-// Keep alive every 4 minutes (Render sleeps after ~15 min)
+// Keep alive every 4 minutes (Render sleeps after ~15 min of inactivity)
 setInterval(_wake, 4 * 60 * 1000)
 
 // ── Auth storage keys ─────────────────────────────────────────────────────────
@@ -85,12 +133,15 @@ export function clearAuthStorage() {
   })
 }
 
-// ── Public routes — skip Authorization header & 401 redirect ─────────────────
+// ── Public routes — skip Authorization header, 401 redirect, AND wake gate ───
 //
 // Each entry specifies BOTH the HTTP method and the path pattern.
 //
 //   method: 'ANY'  → public for all HTTP methods (e.g. auth endpoints)
 //   method: 'GET'  → public only for GET requests (e.g. job listing)
+//
+// Public routes skip the wake gate so the jobs listing page and auth
+// pages load instantly without waiting for the server to confirm it's alive.
 //
 const PUBLIC_ROUTES = [
   { method: 'ANY', path: '/auth/login' },
@@ -105,7 +156,8 @@ const PUBLIC_ROUTES = [
 ]
 
 /**
- * Returns true if this request should skip the Authorization header.
+ * Returns true if this request should skip the Authorization header,
+ * the 401 redirect, and the wake gate.
  *
  * @param {string} url    - The request URL path (e.g. '/jobs/5')
  * @param {string} method - The HTTP method in UPPERCASE (e.g. 'GET', 'POST')
@@ -129,15 +181,26 @@ const isPublic = (url = '', method = '') => {
 
 // ── Request interceptor ───────────────────────────────────────────────────────
 api.interceptors.request.use(
-  (config) => {
-    if (!isPublic(config.url, config.method)) {
+  async (config) => {
+    const pub = isPublic(config.url, config.method)
+
+    // ── Wake gate: hold non-public requests until server confirms alive ──
+    // Awaiting an already-resolved Promise is synchronous (0ms cost),
+    // so this only adds latency on the very first request after a cold-start.
+    if (!pub) {
+      await _wakeGate
+    }
+
+    // ── Attach Authorization header ──────────────────────────────────────
+    if (!pub) {
       const token =
         localStorage.getItem('token') ||
         sessionStorage.getItem('token')
       if (token) config.headers.Authorization = `Bearer ${token}`
     }
 
-    // Let axios set Content-Type automatically for FormData (boundary header)
+    // ── Let axios set Content-Type automatically for FormData ────────────
+    // (axios must set the multipart boundary automatically)
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type']
     }
@@ -157,9 +220,10 @@ const _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * Retry a failed axios request once after a short delay.
- * Used to transparently recover from Render cold-start TCP failures.
+ * Used to transparently recover from Render cold-start TCP failures
+ * that slip through before the wake gate resolves.
  *
- * We only retry on network errors (no response at all), not on HTTP
+ * Only retries on network errors (no response at all), not on HTTP
  * error responses (4xx / 5xx) — those are real errors from the server.
  */
 const _retryOnce = async (error) => {
@@ -178,15 +242,25 @@ const _retryOnce = async (error) => {
     'Server may be cold-starting — waking up and retrying in 4 seconds…'
   )
 
-  // Ping /wake and wait for the server to come back up
+  // Ping /wake, wait for the server to come back up, then resolve gate
   await _wake()
-  await _sleep(4000)
+  await _sleep(4_000)
+
+  // Mark gate as resolved so future requests don't wait again
+  _wakeGateResolve()
 
   return api(config)
 }
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // Any successful response confirms the server is alive — resolve the gate
+    // in case it hadn't been resolved yet (e.g. a public route responded first).
+    if (!_serverConfirmedAwake) {
+      _wakeGateResolve()
+    }
+    return response
+  },
   async (error) => {
     // ── Retry once on network failure (cold-start recovery) ──────────────
     if (!error.response) {
@@ -211,7 +285,7 @@ api.interceptors.response.use(
         if (window.location.pathname !== '/login') {
           window.location.href = '/login'
         }
-        setTimeout(() => { _redirecting = false }, 3000)
+        setTimeout(() => { _redirecting = false }, 3_000)
       }
     }
 
