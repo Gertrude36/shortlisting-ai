@@ -2,34 +2,15 @@
 backend/schemas.py
 ────────────────────────────────────────────────────────────────
 FIXES APPLIED:
-  ✅ FIX 1 (CRITICAL) — ApplicationResponse.submitted_at is now
-     Optional[datetime] instead of datetime. Since models.py now
-     defaults submitted_at to None for drafts, serialising a draft
-     application would crash with a validation error if this field
-     was non-optional. The finalize endpoint still stamps it with a
-     real datetime, so finalized applications are unaffected.
-
-  ✅ FIX 2 — CandidateListItem.submitted_at also made Optional for
-     the same reason (HR endpoint filters to submitted_at != None,
-     but the Pydantic schema must still accept None defensively).
-
-  ✅ FIX 3 — deadline changed from Optional[date] to Optional[datetime]
-     in both JobCreate and JobResponse so HR can specify the exact
-     hour, minute, and second when a posting closes.
-
-  ✅ FIX 4 — field_validator on JobResponse.deadline safely coerces
-     legacy date-only DB values into datetime objects.
-
-  ✅ FIX 5 (NEW) — experience added to the DocumentOut model_config
-     documentation comment. DocumentOut itself is generic (doc_type
-     is a plain str) so no schema change is needed — the new
-     "experience" doc_type value flows through automatically.
-     ApplicationCreate and ApplicationResponse are unchanged because
-     experience evidence is captured via the Document upload flow,
-     not as a form field.
+  ✅ FIX 1 (CRITICAL) — ApplicationResponse.submitted_at is now Optional[datetime].
+  ✅ FIX 2 — CandidateListItem.submitted_at also made Optional.
+  ✅ FIX 3 — deadline changed from Optional[date] to Optional[datetime].
+  ✅ FIX 4 — field_validator on JobResponse.deadline safely coerces legacy date values.
+  ✅ FIX 5 — DocumentOut accepts "experience" doc_type automatically (plain str).
+  ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
-
 from __future__ import annotations
+
 from datetime import datetime, date
 from typing import Optional, List
 import re
@@ -211,8 +192,6 @@ class ApplicationResponse(BaseModel):
     ai_reason: Optional[str]
     doc_verified: bool
     # ✅ FIX 1 (CRITICAL): Must be Optional because drafts have submitted_at=None.
-    # Before this fix, returning a draft (e.g. during the document upload step)
-    # would crash with a Pydantic validation error since None is not a datetime.
     submitted_at: Optional[datetime] = None
     shortlisted_at: Optional[datetime] = None
     documents: List[DocumentOut] = []
@@ -237,8 +216,7 @@ class CandidateListItem(BaseModel):
     ai_score: Optional[float]
     ai_reason: Optional[str]
     doc_verified: bool
-    # ✅ FIX 2: Also Optional here for defensive consistency,
-    # even though the HR endpoint filters to submitted_at != None.
+    # ✅ FIX 2: Optional for defensive consistency.
     submitted_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

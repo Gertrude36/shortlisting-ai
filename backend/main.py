@@ -2,50 +2,12 @@
 backend/main.py
 
 FIXES APPLIED:
-  ✅ FIX 1 — /auth/register 400 errors.
-     Root cause: Pydantic's RegisterRequest schema validates the password
-     on the way in and raises a 422 (which the custom handler converts to
-     a readable 422). BUT — the frontend was logging this as a 400 because
-     some older Pydantic / FastAPI combos returned 400 for body parse errors.
-     The custom validation_exception_handler now always returns 422 with
-     a human-readable detail string, never a raw Pydantic dump.
-     Also added a check: if the email domain looks disposable or the
-     role field is missing, return 400 with a clear message.
-
-  ✅ FIX 2 — /auth/forgot-password no longer silently swallows email
-     failures. If sending fails it still returns 200 (to prevent email
-     enumeration) but now also logs the dev fallback link prominently.
-     The reset link is now logged even on success for traceability.
-
-  ✅ FIX 3 — /auth/reset-password: added token format pre-check so
-     malformed tokens (e.g. URL-encoding issues from the email client)
-     return a clear 400 before hitting JWT decode.
-
-  ✅ FIX 4 — CSP / Google Fonts: The fix for this is in index.html
-     (frontend), not here. See the fixed index.html file.
-
-  ✅ FIX K (NEW) — Experience document upload support.
-     ─────────────────────────────────────────────────────────────────
-     The "experience" document type (employment letter / reference
-     letter / work certificate) is now accepted by the upload endpoint.
-
-     CHANGES IN THIS FILE:
-       1. ALLOWED_DOC_TYPES now includes "experience".
-       2. DOC_TYPE_LABELS now has a human-readable label for "experience".
-       3. REQUIRED_DOC_TYPES is UNCHANGED — experience is OPTIONAL.
-          Applicants without work experience (fresh graduates) are not
-          forced to upload a document that doesn't exist for them.
-       4. The upload endpoint validates "experience" just like other
-          optional doc types (no pre_submission_check for experience —
-          it is a free-form letter, not a structured document).
-       5. _run_verification_and_prediction() already passes all doc_texts
-          to predict() via the doc_texts dict — the "experience" key is
-          picked up automatically by shortlisting_engine.py (Fix K there).
-       6. DOC_TYPE_LABELS is used in:
-          - upload response ("doc_label")
-          - list_documents response ("doc_label")
-          - HR report "documents" list ("doc_label")
-          All three now correctly label experience documents.
+  ✅ FIX 1 — /auth/register 400 errors resolved.
+  ✅ FIX 2 — /auth/forgot-password no longer silently swallows email failures.
+  ✅ FIX 3 — /auth/reset-password: token format pre-check added.
+  ✅ FIX 4 — CSP / Google Fonts fix is in index.html (frontend).
+  ✅ FIX K — Experience document upload support added.
+  ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
 from __future__ import annotations
 
@@ -101,7 +63,7 @@ Base.metadata.create_all(bind=engine)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# One-time database migration — compatible with BOTH SQLite and PostgreSQL
+# One-time database migration
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_sqlite_db() -> bool:
@@ -109,12 +71,7 @@ def _is_sqlite_db() -> bool:
 
 
 def ensure_job_columns():
-    """
-    Safely adds missing columns to the jobs table.
-    Works on both SQLite (local dev) and PostgreSQL (Render production).
-    """
     use_sqlite = _is_sqlite_db()
-
     inspector        = inspect(engine)
     existing_columns = [col["name"] for col in inspector.get_columns("jobs")]
 
@@ -147,7 +104,6 @@ def ensure_job_columns():
             conn.execute(text(
                 "UPDATE jobs SET number_of_posts = 1 WHERE number_of_posts IS NULL"
             ))
-
             if use_sqlite:
                 conn.execute(text(
                     "UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"
@@ -156,7 +112,6 @@ def ensure_job_columns():
                 conn.execute(text(
                     "UPDATE jobs SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL"
                 ))
-
             conn.commit()
         except Exception as exc:
             conn.rollback()
@@ -167,7 +122,7 @@ ensure_job_columns()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lifespan — ai_matcher failure does NOT crash the server
+# Lifespan
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -182,7 +137,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.2",
+    version     = "2.9.3",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -190,8 +145,6 @@ app = FastAPI(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ✅ FIX 1: Validation error handler
-# Returns a clean, human-readable error — never a raw Pydantic dump.
-# The frontend shows this string directly to the user.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.exception_handler(RequestValidationError)
@@ -199,10 +152,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     errors   = exc.errors()
     messages = []
     for e in errors:
-        # Strip Pydantic's "Value error, " prefix
-        msg = e.get("msg", "").replace("Value error, ", "")
-        # Include the field name for clarity (e.g. "password: ...")
-        loc = e.get("loc", [])
+        msg   = e.get("msg", "").replace("Value error, ", "")
+        loc   = e.get("loc", [])
         field = str(loc[-1]) if loc else ""
         if field and field not in ("body", "__root__"):
             msg = f"{field}: {msg}"
@@ -269,7 +220,7 @@ async def preflight_handler(rest_of_path: str, request: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Upload directory — writable on Render (/tmp/uploads)
+# Upload directory
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
@@ -281,13 +232,9 @@ ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 MAX_FILE_SIZE_MB   = 5
 
 # ✅ FIX K — "experience" added as an accepted (optional) document type.
-# REQUIRED_DOC_TYPES is intentionally unchanged: experience is optional
-# so fresh graduates with 0 years are not blocked from applying.
 ALLOWED_DOC_TYPES  = {"id_card", "cv", "diploma", "certificate", "experience"}
 REQUIRED_DOC_TYPES = {"id_card", "cv", "diploma"}
 
-# ✅ FIX K — Human-readable label for the experience document type.
-# Used in upload responses, list_documents, and the HR report.
 DOC_TYPE_LABELS = {
     "id_card":     "National ID / Passport",
     "cv":          "CV / Resume",
@@ -419,7 +366,6 @@ def health():
 
 @app.get("/wake", tags=["health"])
 def wake():
-    """Lightweight endpoint used by the frontend to wake the backend from sleep."""
     return {"status": "awake"}
 
 @app.get("/hybridaction/{path:path}", tags=["health"])
@@ -719,8 +665,7 @@ def finalize_application(
 
     print(f"[finalize] application_id={application_id} | docs found={len(docs)} | types={uploaded_types}")
 
-    # ✅ FIX K: REQUIRED_DOC_TYPES does NOT include "experience" — only the
-    # three core docs (id_card, cv, diploma) must be present to finalize.
+    # ✅ FIX K: experience is optional — only the 3 core docs required.
     missing = sorted(REQUIRED_DOC_TYPES - uploaded_types)
     if missing:
         missing_labels = [DOC_TYPE_LABELS_REQUIRED.get(m, m) for m in missing]
@@ -736,7 +681,6 @@ def finalize_application(
     app_obj.submitted_at = datetime.now(timezone.utc)
     db.add(app_obj); db.commit()
 
-    # ✅ FIX K: include "experience" in the upload summary shown to the applicant.
     has_experience_doc = "experience" in uploaded_types
     experience_note    = (
         " Experience document included — this will be cross-checked during shortlisting."
@@ -809,7 +753,7 @@ async def upload_document(
             detail="Application not found. You can only upload documents to your own applications."
         )
 
-    # ✅ FIX K: ALLOWED_DOC_TYPES now includes "experience".
+    # ✅ FIX K: ALLOWED_DOC_TYPES includes "experience".
     if doc_type not in ALLOWED_DOC_TYPES:
         raise HTTPException(
             status_code=400,
@@ -851,11 +795,8 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # ✅ FIX K: Skip pre_submission_check for "experience" documents.
-    # Experience letters are free-form (no structured layout, no logo,
-    # no specific keyword pattern to verify against), so the structured
-    # pre-submission check would incorrectly reject valid letters.
-    # The cross-check happens later in shortlisting_engine.py (Fix K there).
+    # ✅ FIX K: Skip pre_submission_check for "experience" — free-form letters
+    # are cross-checked later inside shortlisting_engine.predict().
     if doc_type == "experience":
         check_passed   = True
         check_message  = (
@@ -931,8 +872,6 @@ def list_documents(
             {
                 "id":            d.id,
                 "doc_type":      _doc_type_value(d),
-                # ✅ FIX K: DOC_TYPE_LABELS now has a label for "experience"
-                # so experience documents are correctly labelled here.
                 "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
                 "original_name": d.original_name,
                 "uploaded_at":   d.uploaded_at,
@@ -1075,8 +1014,6 @@ def get_job_report(
             "documents":         [
                 {
                     "doc_type":      _doc_type_value(d),
-                    # ✅ FIX K: DOC_TYPE_LABELS now has a label for "experience"
-                    # so it displays correctly in the HR report.
                     "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
                     "original_name": d.original_name,
                 }
@@ -1150,12 +1087,8 @@ def _run_verification_and_prediction(
     doc_paths = [d.file_path        for d in docs]
     doc_types = [_doc_type_value(d) for d in docs]
 
-    # ✅ FIX K: verify_documents only receives the core structural documents
-    # (id_card, cv, diploma, certificate). The "experience" document is a
-    # free-form letter that is NOT passed through verify_documents — instead
-    # it is cross-checked inside shortlisting_engine.predict() via doc_texts.
-    # Filtering here prevents verify_documents from raising an error on an
-    # unrecognised doc type.
+    # ✅ FIX K: only structural docs go through verify_documents;
+    # "experience" is cross-checked inside shortlisting_engine.predict().
     VERIFIABLE_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
     verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
     verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
@@ -1170,9 +1103,7 @@ def _run_verification_and_prediction(
 
     identity_match = "Identity: ✓" in doc_detail
 
-    # ✅ FIX K: Extract text from ALL uploaded documents including "experience".
-    # The shortlisting engine reads doc_texts["experience"] to cross-check
-    # declared experience_years against the content of the uploaded letter.
+    # ✅ FIX K: Extract text from ALL docs including "experience".
     doc_texts: dict[str, str] = {}
     for d in docs:
         if os.path.exists(d.file_path):
@@ -1366,7 +1297,7 @@ def reshortlist_all_for_job(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PORT binding — required for Render to detect the open port.
+# PORT binding
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

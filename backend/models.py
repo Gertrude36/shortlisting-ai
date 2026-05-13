@@ -3,27 +3,16 @@ backend/models.py
 ────────────────────────────────────────────────────────────────
 FIXES APPLIED:
   ✅ FIX 1 (CRITICAL) — Application.submitted_at defaults to None.
-     Drafts have submitted_at=NULL and are only stamped when the
-     applicant calls POST /applications/{id}/finalize.
-
   ✅ FIX 2 — All DateTime defaults use lambda: datetime.now(timezone.utc).
-     datetime.utcnow() is deprecated in Python 3.12+.
-
   ✅ FIX 3 — cascade="all, delete-orphan" on Job.applications and
      Application.documents ensures DB integrity on deletion.
-
-  ✅ FIX 4 — PostgreSQL compatibility:
-     - SAEnum now uses native_enum=False so enums work on both
-       SQLite and PostgreSQL without requiring CREATE TYPE migrations.
-     - Text columns used for long fields (no VARCHAR length limits).
-
-  ✅ FIX 5 (NEW) — Added DocumentType.experience for experience/employment
-     letters, reference letters, or work certificates. This document is
-     used by the shortlisting engine to cross-verify declared
-     experience_years against real evidence.
+  ✅ FIX 4 — PostgreSQL compatibility: native_enum=False.
+  ✅ FIX 5 — Added DocumentType.experience for experience/employment
+     letters, reference letters, or work certificates.
+  ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
-
 from __future__ import annotations
+
 import enum
 from datetime import datetime, timezone
 
@@ -53,7 +42,7 @@ class DocumentType(str, enum.Enum):
     cv          = "cv"
     diploma     = "diploma"
     certificate = "certificate"
-    # ✅ FIX 5 (NEW): Experience document — employment letter, reference
+    # ✅ FIX 5: Experience document — employment letter, reference
     # letter, or work certificate proving declared experience_years.
     experience  = "experience"
 
@@ -68,9 +57,6 @@ class User(Base):
     email           = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
 
-    # ✅ FIX 4: native_enum=False stores the value as a plain VARCHAR,
-    #    which works identically on SQLite and PostgreSQL without
-    #    requiring a separate CREATE TYPE statement.
     role       = Column(SAEnum(UserRole, native_enum=False), nullable=False, default=UserRole.applicant)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -84,7 +70,6 @@ class Job(Base):
     title                     = Column(String(255), nullable=False, index=True)
     description               = Column(Text, nullable=True)
 
-    # Rich description fields
     location                  = Column(String(255), nullable=True)
     employment_type           = Column(String(100), nullable=True)
     salary_range              = Column(String(100), nullable=True)
@@ -92,7 +77,6 @@ class Job(Base):
     preferred_qualifications  = Column(Text, nullable=True)
     about_role                = Column(Text, nullable=True)
 
-    # Shortlisting criteria
     required_education_levels = Column(String(255), nullable=False, default="Bachelor's")
     required_fields           = Column(String(255), nullable=False, default="")
     required_min_experience   = Column(Integer, default=0)
@@ -100,7 +84,6 @@ class Job(Base):
     required_skills           = Column(Text, nullable=False, default="")
     required_certifications   = Column(Text, nullable=True)
 
-    # Additional fields
     job_level       = Column(String(100), nullable=True)
     number_of_posts = Column(Integer, nullable=True)
     deadline        = Column(DateTime(timezone=True), nullable=True)
@@ -137,8 +120,7 @@ class Application(Base):
     ai_reason    = Column(Text,    nullable=True)
     doc_verified = Column(Boolean, default=False)
 
-    # ✅ FIX 1 (CRITICAL): default=None — new applications are DRAFTS.
-    # submitted_at is only set when /finalize is called.
+    # ✅ FIX 1: default=None — new applications are DRAFTS.
     submitted_at   = Column(DateTime(timezone=True), nullable=True, default=None)
     shortlisted_at = Column(DateTime(timezone=True), nullable=True)
 
