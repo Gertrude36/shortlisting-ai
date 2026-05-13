@@ -1,4 +1,4 @@
-python
+from __future__ import annotations
 
 """
 backend/main.py
@@ -41,8 +41,10 @@ FIXES APPLIED:
                   explicitly typed to match starlette==0.37.2 (avoids
                   the "dispatch() takes 2 positional arguments" crash on
                   some Render deploy variants).
+  ✅ DEPLOY FIX 2 — from __future__ import annotations moved to line 1,
+                  ABOVE the module docstring (Python requires it to be
+                  the very first statement; the docstring was blocking it).
 """
-from __future__ import annotations
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
 import os
@@ -230,15 +232,6 @@ def _cors_headers(origin: str) -> dict:
 #
 # PHASE 1 — Create the FastAPI app. Health routes (/wake, /, /health) are
 # registered IMMEDIATELY after creation, before any middleware is added.
-#
-# WHY THIS MATTERS:
-#   Starlette's middleware stack is built once at startup.  Any route
-#   registered after add_middleware() is technically still reachable, but
-#   during a cold start, if the ASGI app object hasn't fully initialised
-#   (e.g. lifespan hasn't completed), Starlette can fail to route the
-#   request before the middleware chain has a chance to handle it.
-#   Registering /wake first guarantees it is in the router table before
-#   the middleware wrapping happens.
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -270,22 +263,13 @@ def health():
 @app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
 def wake():
     """
-    ✅ FIX CORS-4 / FIX WAKE / FIX COLD-START-2:
-    Keep-alive endpoint pinged by the frontend every 4 minutes and by
-    UptimeRobot every 5 minutes so Render free-tier never spins down.
-
-    Returns `born_at` so the frontend can detect a fresh cold-start
-    (born_at close to now → server just woke up → retry in ~30 s).
-
-    Intentionally does NO database access, NO authentication, and imports
-    NOTHING heavy.  Must respond in < 1 ms.
-
-    Accepts GET and HEAD so UptimeRobot's default HEAD ping works.
+    Keep-alive endpoint. Returns born_at so the frontend can detect a
+    fresh cold-start and decide whether to retry.
     """
     return {
-        "status":   "awake",
-        "born_at":  _SERVER_BORN_AT,
-        "now":      datetime.now(timezone.utc).isoformat(),
+        "status":  "awake",
+        "born_at": _SERVER_BORN_AT,
+        "now":     datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -301,13 +285,6 @@ async def ignore_tracker(path: str):
 class RawCORSMiddleware(BaseHTTPMiddleware):
     """
     Outermost middleware — stamps CORS headers on every response.
-
-    ✅ FIX CORS-6: On exception, we now RETURN the CORS-stamped error
-    response rather than re-raising, so the browser always gets CORS
-    headers even on 500 errors.
-
-    ✅ FIX STARLETTE-COMPAT: dispatch signature explicitly typed to match
-    starlette==0.37.2 — avoids "takes 2 positional arguments" crash.
     """
     async def dispatch(
         self,
@@ -327,10 +304,7 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
         except Exception as exc:
-            # Log the real error so it appears in Render logs.
             print(f"[RawCORSMiddleware] Unhandled exception: {exc!r}")
-
-            # ✅ FIX CORS-6: RETURN the error response (don't re-raise).
             return Response(
                 content     = json.dumps({"detail": "Internal server error"}),
                 status_code = 500,
@@ -338,7 +312,6 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
                 headers     = _cors_headers(origin),
             )
 
-        # Stamp CORS headers on every successful response.
         for key, value in _cors_headers(origin).items():
             response.headers[key] = value
 
