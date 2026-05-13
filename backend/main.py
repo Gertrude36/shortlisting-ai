@@ -19,6 +19,7 @@ from fastapi import (
     FastAPI, Depends, HTTPException, status,
     UploadFile, File, Form, Request
 )
+from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
@@ -126,7 +127,7 @@ async def lifespan(app: FastAPI):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORS helpers  —  single source of truth
+# CORS — single source of truth
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -163,65 +164,54 @@ def _is_origin_allowed(origin: str) -> bool:
     return origin in ALLOWED_ORIGINS or bool(_ORIGIN_RE.match(origin))
 
 
-def _cors_headers(origin: str) -> dict:
-    """Return CORS headers for a known origin, empty dict otherwise."""
-    if not _is_origin_allowed(origin):
-        return {}
-    return {
-        "Access-Control-Allow-Origin":      origin,
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers":     (
-            "Authorization, Content-Type, Accept, "
-            "Origin, X-Requested-With"
-        ),
-        "Access-Control-Expose-Headers":    "Content-Length, Content-Type",
-        "Access-Control-Max-Age":           "600",
-        "Vary":                             "Origin",
-    }
+# ── Fallback middleware ────────────────────────────────────────────────────────
+# FastAPICORSMiddleware handles the normal path.
+# This fallback catches edge cases: unhandled 500s, Render cold-start 503s
+# that uvicorn re-raises, and any response where CORS headers were stripped.
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Single CORS middleware  —  no FastAPI CORSMiddleware, no duplicates
-# ─────────────────────────────────────────────────────────────────────────────
-
-class CORSMiddleware(BaseHTTPMiddleware):
-    """
-    Handles ALL CORS concerns in one place:
-      • Preflight OPTIONS  →  200 + headers, no further processing
-      • Every other request →  stamp headers on the response, even on 4xx/5xx
-    """
+class _CORSFallbackMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
         origin = request.headers.get("origin", "")
 
-        # ── Preflight ────────────────────────────────────────────────────────
-        if request.method == "OPTIONS":
+        # Belt-and-suspenders OPTIONS handler
+        if request.method == "OPTIONS" and _is_origin_allowed(origin):
             return Response(
                 content="",
                 status_code=200,
-                headers=_cors_headers(origin),
+                headers={
+                    "Access-Control-Allow-Origin":      origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers":     (
+                        "Authorization, Content-Type, Accept, "
+                        "Origin, X-Requested-With"
+                    ),
+                    "Access-Control-Max-Age":           "600",
+                    "Vary":                             "Origin",
+                },
             )
 
-        # ── Normal request ───────────────────────────────────────────────────
         try:
             response = await call_next(request)
         except Exception as exc:
-            print(f"[CORSMiddleware] Unhandled exception: {exc!r}")
+            print(f"[CORSFallback] Unhandled exception: {exc!r}")
             response = Response(
                 content=json.dumps({"detail": "Internal server error"}),
                 status_code=500,
                 media_type="application/json",
             )
 
-        headers = _cors_headers(origin)
-        for key, value in headers.items():
-            response.headers[key] = value
+        # Only stamp if the header is missing (FastAPICORSMiddleware didn't add it)
+        if _is_origin_allowed(origin) and "access-control-allow-origin" not in response.headers:
+            response.headers["Access-Control-Allow-Origin"]      = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"]                             = "Origin"
 
         return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# App — middleware registered BEFORE routes so Starlette wraps correctly
+# App
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -231,8 +221,28 @@ app = FastAPI(
     lifespan    = lifespan,
 )
 
-# Register the single CORS middleware first
-app.add_middleware(CORSMiddleware)
+# ── Middleware registration order ─────────────────────────────────────────────
+# Starlette wraps middleware in reverse-add order:
+#   Last added = outermost = runs first on request, last on response.
+#
+# We want:
+#   Request:   _CORSFallbackMiddleware → FastAPICORSMiddleware → route handler
+#   Response:  route handler → FastAPICORSMiddleware → _CORSFallbackMiddleware
+#
+# So add FastAPICORSMiddleware FIRST, then _CORSFallbackMiddleware.
+
+app.add_middleware(
+    FastAPICORSMiddleware,
+    allow_origins      = ALLOWED_ORIGINS,
+    allow_origin_regex = r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$",
+    allow_credentials  = True,
+    allow_methods      = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers      = ["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    expose_headers     = ["Content-Length", "Content-Type"],
+    max_age            = 600,
+)
+
+app.add_middleware(_CORSFallbackMiddleware)
 
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
@@ -243,14 +253,6 @@ _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
 @app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
-    """
-    Wake-gate endpoint.  Always responds quickly — CORS headers are added
-    by the middleware above, so no inline header stamping needed here.
-    """
-    if request.method == "OPTIONS":
-        origin = request.headers.get("origin", "")
-        return Response(content="", status_code=200, headers=_cors_headers(origin))
-
     return JSONResponse(content={
         "status":  "awake",
         "born_at": _SERVER_BORN_AT,
