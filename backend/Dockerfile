@@ -26,17 +26,20 @@ RUN mkdir -p /tmp/uploads
 
 EXPOSE 10000
 
-# ── FIX: 4 workers so concurrent uploads don't block each other ──────────────
-# With 1 worker (the default), a slow OCR/AI document upload holds the entire
-# server hostage — new TCP connections queue up and time out, which the browser
-# misreports as a CORS error ("No Access-Control-Allow-Origin header present").
-# 4 workers means up to 4 simultaneous requests can be processed in parallel.
+# ── 1 worker only — Render free tier (512 MB RAM) can't fit more ─────────────
+# The AI model (sentence-transformers all-MiniLM-L6-v2) uses ~180 MB per
+# worker. Even 2 workers = ~360 MB+ → OOM → child processes die on startup.
 #
-# NOTE: sentence-transformers loads the AI model once per worker (~90 MB each).
-# On Render free tier (512 MB RAM) 4 workers × ~120 MB = ~480 MB — just fits.
-# If you see OOM errors, drop to --workers 2.
+# FastAPI is fully async with 1 worker — it handles many concurrent
+# connections without blocking, because the event loop processes I/O
+# (file reads, DB queries, HTTP) concurrently even in a single process.
+# Sync route handlers (like document upload) are automatically run in
+# FastAPI's threadpool so they don't block the event loop either.
+#
+# --timeout-keep-alive 75 : keeps HTTP/2 connections alive longer on
+#   Render's reverse proxy, reducing reconnect overhead between requests.
 CMD uvicorn main:app \
     --host 0.0.0.0 \
     --port ${PORT:-10000} \
-    --workers 2 \
+    --workers 1 \
     --timeout-keep-alive 75
