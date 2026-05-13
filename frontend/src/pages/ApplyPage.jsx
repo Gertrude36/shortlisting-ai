@@ -1,21 +1,41 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
-import { Upload, CheckCircle, XCircle, AlertCircle, Loader, ArrowRight, ArrowLeft, ShieldCheck, Info } from 'lucide-react'
+import { Upload, CheckCircle, XCircle, AlertCircle, Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, WifiOff } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
 import api, { BACKEND } from '../api/axios'
 
-// ✅ FIX K — "experience" added as an optional document type.
-// REQUIRED_DOC_KEYS is derived from this array and intentionally excludes
-// "experience" (required: false) so fresh graduates are not blocked.
 const DOC_TYPES = [
-  { key: 'id_card',     label: 'National ID / Passport',    icon: '🪪', description: 'Official government-issued ID. Name must match your account.', required: true },
-  { key: 'cv',          label: 'CV / Resume',               icon: '📄', description: 'Your up-to-date curriculum vitae or resume.',                   required: true },
-  { key: 'diploma',     label: 'Academic Diploma / Degree', icon: '🎓', description: 'Highest academic qualification matching your field of study.',   required: true },
-  { key: 'certificate', label: 'Professional Certificate',  icon: '📜', description: 'Any professional certification relevant to the role. Optional.', required: false },
-  // ✅ FIX K (NEW):
+  {
+    key:         'id_card',
+    label:       'National ID / Passport',
+    icon:        '🪪',
+    description: 'Official government-issued ID. Name must match your account.',
+    required:    true,
+  },
+  {
+    key:         'cv',
+    label:       'CV / Resume',
+    icon:        '📄',
+    description: 'Your up-to-date curriculum vitae or resume.',
+    required:    true,
+  },
+  {
+    key:         'diploma',
+    label:       'Academic Diploma / Degree',
+    icon:        '🎓',
+    description: 'Highest academic qualification matching your field of study.',
+    required:    true,
+  },
+  {
+    key:         'certificate',
+    label:       'Professional Certificate',
+    icon:        '📜',
+    description: 'Any professional certification relevant to the role. Optional.',
+    required:    false,
+  },
   {
     key:         'experience',
     label:       'Experience Document',
@@ -24,6 +44,7 @@ const DOC_TYPES = [
     required:    false,
   },
 ]
+
 const REQUIRED_DOC_KEYS = DOC_TYPES.filter(d => d.required).map(d => d.key)
 const STEPS = ['Position Info', 'Your Details', 'Documents', 'Submit']
 
@@ -81,7 +102,6 @@ function StepBar({ current }) {
   )
 }
 
-// Shared label style
 const fieldLabel = {
   display:       'block',
   fontSize:      '.8rem',
@@ -91,6 +111,58 @@ const fieldLabel = {
   letterSpacing: '.05em',
   marginBottom:  7,
 }
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Extract the most useful error message from an axios error.
+ * Handles three cases:
+ *   1. Network / CORS failure  → err.response is undefined
+ *   2. Backend HTTP error      → err.response.data.detail (string or object)
+ *   3. Fallback                → generic message
+ */
+function extractErrorDetail(err) {
+  if (!err.response) {
+    // Network error or CORS failure (server unreachable / cold-starting)
+    return {
+      message:   'Could not reach the server. The backend may be starting up — please wait 30 seconds and try again.',
+      isNetwork: true,
+    }
+  }
+
+  const data = err.response?.data
+  if (!data) {
+    return { message: `Server error (${err.response.status})`, isNetwork: false }
+  }
+
+  // FastAPI validation errors sometimes nest the message
+  if (typeof data.detail === 'string') {
+    return { message: data.detail, isNetwork: false }
+  }
+
+  if (Array.isArray(data.detail)) {
+    const msgs = data.detail.map(e => e.msg || JSON.stringify(e)).join(' · ')
+    return { message: msgs, isNetwork: false }
+  }
+
+  if (typeof data === 'string') {
+    return { message: data, isNetwork: false }
+  }
+
+  return { message: 'Upload failed. Please try again.', isNetwork: false }
+}
+
+const _isAdvisory = msg =>
+  msg && (
+    msg.startsWith('⚠') ||
+    msg.toLowerCase().includes('will be reviewed') ||
+    msg.toLowerCase().includes('manual review') ||
+    msg.toLowerCase().includes('accepted') ||
+    msg.toLowerCase().includes('advisory') ||
+    msg.toLowerCase().includes('cross-checked')
+  )
+
+// ─── component ──────────────────────────────────────────────────────────────
 
 export default function ApplyPage() {
   const { jobId } = useParams()
@@ -107,17 +179,22 @@ export default function ApplyPage() {
   const applicationIdRef = useRef(null)
   const submittedRef     = useRef(false)
   useEffect(() => { applicationIdRef.current = applicationId }, [applicationId])
-  useEffect(() => { submittedRef.current = submitted }, [submitted])
+  useEffect(() => { submittedRef.current     = submitted     }, [submitted])
 
   const [form, setForm] = useState({
     gender: '', education_level: '', field_of_study: '', graduation_year: '',
     experience_years: 0, skills: '', certifications: '', address: '', phone: '', date_of_birth: '',
   })
   const [formErrors, setFormErrors] = useState({})
+
   const [docStatus, setDocStatus] = useState(
-    Object.fromEntries(DOC_TYPES.map(d => [d.key, { status: 'idle', message: '', fileName: '', isAdvisory: false }]))
+    Object.fromEntries(DOC_TYPES.map(d => [
+      d.key,
+      { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+    ]))
   )
 
+  // Load job
   useEffect(() => {
     if (!jobId) return
     api.get(`/jobs/${jobId}`)
@@ -126,23 +203,26 @@ export default function ApplyPage() {
       .finally(() => setLoadingJob(false))
   }, [jobId])
 
+  // Cleanup draft on unmount (navigating away without submitting)
   useEffect(() => {
     return () => {
       if (applicationIdRef.current && !submittedRef.current) {
         const token = localStorage.getItem('token') || sessionStorage.getItem('token') || ''
         fetch(`${BACKEND}/applications/${applicationIdRef.current}`, {
-          method: 'DELETE',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          method:    'DELETE',
+          headers:   token ? { Authorization: `Bearer ${token}` } : {},
           keepalive: true,
         }).catch(() => {})
       }
     }
   }, [])
 
-  const requiredUploaded    = REQUIRED_DOC_KEYS.every(k => docStatus[k].status === 'success')
-  const successCount        = DOC_TYPES.filter(d => docStatus[d.key].status === 'success').length
-  const requiredCount       = REQUIRED_DOC_KEYS.filter(k => docStatus[k].status === 'success').length
-  const missingRequiredCount= REQUIRED_DOC_KEYS.length - requiredCount
+  const requiredUploaded     = REQUIRED_DOC_KEYS.every(k => docStatus[k].status === 'success')
+  const successCount         = DOC_TYPES.filter(d => docStatus[d.key].status === 'success').length
+  const requiredCount        = REQUIRED_DOC_KEYS.filter(k => docStatus[k].status === 'success').length
+  const missingRequiredCount = REQUIRED_DOC_KEYS.length - requiredCount
+
+  // ── form validation ───────────────────────────────────────────────────────
 
   const validateForm = () => {
     const errors = {}
@@ -154,6 +234,8 @@ export default function ApplyPage() {
     setFormErrors(errors)
     return Object.keys(errors).length === 0
   }
+
+  // ── create draft ──────────────────────────────────────────────────────────
 
   const handleCreateDraft = async () => {
     if (!validateForm()) return
@@ -168,47 +250,68 @@ export default function ApplyPage() {
         experience_years: parseInt(form.experience_years) || 0,
         skills:           form.skills,
         certifications:   form.certifications || null,
-        address:          form.address || null,
-        phone:            form.phone || null,
-        date_of_birth:    form.date_of_birth || null,
+        address:          form.address        || null,
+        phone:            form.phone          || null,
+        date_of_birth:    form.date_of_birth  || null,
       })
       setApplicationId(data.id)
       setStep(2)
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to create application')
+      const { message } = extractErrorDetail(err)
+      toast.error(message, { duration: 8000 })
     } finally {
       setSubmitting(false)
     }
   }
 
-  const _isAdvisory = msg =>
-    msg && (msg.startsWith('⚠') || msg.toLowerCase().includes('will be reviewed') ||
-      msg.toLowerCase().includes('manual review') || msg.toLowerCase().includes('accepted') ||
-      msg.toLowerCase().includes('advisory') || msg.toLowerCase().includes('cross-checked'))
+  // ── document upload ───────────────────────────────────────────────────────
 
   const handleUpload = async (docType, file) => {
     if (!applicationId) { toast.error('Please complete your details first'); return }
-    setDocStatus(prev => ({ ...prev, [docType]: { status: 'uploading', message: 'Uploading and validating…', fileName: file.name, isAdvisory: false } }))
+
+    setDocStatus(prev => ({
+      ...prev,
+      [docType]: { status: 'uploading', message: 'Uploading and validating…', fileName: file.name, isAdvisory: false, isNetwork: false },
+    }))
+
     const formData = new FormData()
     formData.append('doc_type', docType)
     formData.append('file', file)
+
     try {
       const { data } = await api.post(`/applications/${applicationId}/documents`, formData)
       const msg        = data.validation_message || 'Document accepted ✓'
       const isAdvisory = _isAdvisory(msg)
-      setDocStatus(prev => ({ ...prev, [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory } }))
+
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory, isNetwork: false },
+      }))
       toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} uploaded successfully`)
+
     } catch (err) {
-      const detail = err.response?.data?.detail || 'Upload failed. Please try again.'
-      setDocStatus(prev => ({ ...prev, [docType]: { status: 'error', message: detail, fileName: file.name, isAdvisory: false } }))
-      toast.error(`Upload rejected: ${detail}`, { duration: 8000 })
+      const { message, isNetwork } = extractErrorDetail(err)
+
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: { status: 'error', message, fileName: file.name, isAdvisory: false, isNetwork },
+      }))
+
+      toast.error(
+        isNetwork ? 'Server unreachable — wait 30 s and try again' : `Rejected: ${message}`,
+        { duration: 9000 }
+      )
     }
   }
 
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
-    setDocStatus(prev => ({ ...prev, [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false } }))
+    // Reset state so the card re-renders to "uploading" immediately
+    setDocStatus(prev => ({
+      ...prev,
+      [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+    }))
     handleUpload(docType, file)
     e.target.value = ''
   }
@@ -219,10 +322,17 @@ export default function ApplyPage() {
       const doc = data.documents.find(d => d.doc_type === docType)
       if (!doc) return
       await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
-      setDocStatus(prev => ({ ...prev, [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false } }))
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+      }))
       toast.success('Document removed.')
-    } catch { toast.error('Failed to remove document') }
+    } catch {
+      toast.error('Failed to remove document')
+    }
   }
+
+  // ── finalize / submit ─────────────────────────────────────────────────────
 
   const handleFinalize = async () => {
     if (!requiredUploaded) { toast.error('Please upload all 3 required documents.'); return }
@@ -232,13 +342,15 @@ export default function ApplyPage() {
       submittedRef.current = true
       setSubmitted(true)
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Submission failed. Please check your documents.', { duration: 8000 })
+      const { message } = extractErrorDetail(err)
+      toast.error(message, { duration: 8000 })
     } finally {
       setSubmitting(false)
     }
   }
 
-  /* ── Loading ── */
+  // ── loading / not-found ───────────────────────────────────────────────────
+
   if (loadingJob) return (
     <div className="page-wrapper">
       <Navbar />
@@ -248,7 +360,6 @@ export default function ApplyPage() {
     </div>
   )
 
-  /* ── Not found ── */
   if (!job) return (
     <div className="page-wrapper">
       <Navbar />
@@ -274,22 +385,14 @@ export default function ApplyPage() {
     </div>
   )
 
-  /* ── Success ── */
+  // ── success screen ────────────────────────────────────────────────────────
+
   if (submitted) return (
     <div className="page-wrapper">
       <Helmet><title>Application Submitted — Shortlisting AI</title></Helmet>
       <Navbar />
-      <div style={{
-        background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
-        padding:    '40px 0 36px',
-      }} />
-      <div style={{
-        display:        'flex',
-        flexDirection:  'column',
-        alignItems:     'center',
-        padding:        '60px 24px',
-        textAlign:      'center',
-      }}>
+      <div style={{ background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)', padding: '40px 0 36px' }} />
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 24px', textAlign: 'center' }}>
         <div style={{
           width:          80,
           height:         80,
@@ -345,27 +448,22 @@ export default function ApplyPage() {
     </div>
   )
 
+  // ── main render ───────────────────────────────────────────────────────────
+
   return (
     <>
       <Helmet><title>Apply — {job.title} | Shortlisting AI</title></Helmet>
       <div className="page-wrapper">
         <Navbar />
 
-        {/* ── Hero strip ── */}
+        {/* Hero strip */}
         <div style={{
           background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
           padding:    '36px 20px 30px',
           color:      '#ffffff',
         }}>
           <div className="container">
-            <div style={{
-              fontSize:      '.72rem',
-              fontWeight:    700,
-              color:         '#93c5fd',
-              letterSpacing: '.08em',
-              textTransform: 'uppercase',
-              marginBottom:  8,
-            }}>
+            <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#93c5fd', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 8 }}>
               Applying for
             </div>
             <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 800, color: '#ffffff' }}>
@@ -378,20 +476,15 @@ export default function ApplyPage() {
           <div className="container" style={{ maxWidth: 740 }}>
             <StepBar current={step} />
 
-            {/* ── STEP 0: Position Info ── */}
+            {/* ══════════════════════════════════════════════════════════════
+                STEP 0 — Position Info
+            ══════════════════════════════════════════════════════════════ */}
             {step === 0 && (
-              <div style={{
-                background:   '#ffffff',
-                border:       '1px solid #e5e7eb',
-                borderRadius: 12,
-                padding:      '32px 36px',
-              }}>
+              <div style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '32px 36px' }}>
                 <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 10 }}>
                   Step 1 of 4
                 </div>
-                <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#111827', marginBottom: 6 }}>
-                  About This Role
-                </h2>
+                <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#111827', marginBottom: 6 }}>About This Role</h2>
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 20 }} />
                 <p style={{ color: '#4b5563', fontSize: '1rem', lineHeight: 1.8, marginBottom: 24 }}>
                   {job.description || 'Review the role details before applying.'}
@@ -420,7 +513,6 @@ export default function ApplyPage() {
                   </div>
                 )}
 
-                {/* ✅ FIX K — updated info box to mention experience as a 2nd optional document */}
                 <div style={{
                   padding:      '16px 20px',
                   background:   '#fffbeb',
@@ -457,14 +549,11 @@ export default function ApplyPage() {
               </div>
             )}
 
-            {/* ── STEP 1: Details ── */}
+            {/* ══════════════════════════════════════════════════════════════
+                STEP 1 — Your Details
+            ══════════════════════════════════════════════════════════════ */}
             {step === 1 && (
-              <div style={{
-                background:   '#ffffff',
-                border:       '1px solid #e5e7eb',
-                borderRadius: 12,
-                padding:      '32px 36px',
-              }}>
+              <div style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '32px 36px' }}>
                 <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 10 }}>
                   Step 2 of 4
                 </div>
@@ -472,11 +561,10 @@ export default function ApplyPage() {
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 24 }} />
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
                   {/* Gender */}
                   <div>
-                    <label style={fieldLabel}>
-                      Gender <span style={{ color: '#dc2626' }}>*</span>
-                    </label>
+                    <label style={fieldLabel}>Gender <span style={{ color: '#dc2626' }}>*</span></label>
                     <select
                       className="form-select"
                       value={form.gender}
@@ -493,13 +581,12 @@ export default function ApplyPage() {
 
                   {/* Education level */}
                   <div>
-                    <label style={fieldLabel}>
-                      Highest Education Level <span style={{ color: '#dc2626' }}>*</span>
-                    </label>
+                    <label style={fieldLabel}>Highest Education Level <span style={{ color: '#dc2626' }}>*</span></label>
                     <select
                       className="form-select"
                       value={form.education_level}
                       onChange={e => setForm(f => ({ ...f, education_level: e.target.value }))}
+                      style={{ borderColor: formErrors.education_level ? '#dc2626' : undefined }}
                     >
                       <option value="">Select…</option>
                       <option>Diploma</option>
@@ -507,13 +594,12 @@ export default function ApplyPage() {
                       <option>Master's</option>
                       <option>PhD</option>
                     </select>
+                    {formErrors.education_level && <div style={{ color: '#dc2626', fontSize: '.78rem', marginTop: 4 }}>{formErrors.education_level}</div>}
                   </div>
 
                   {/* Field of study */}
                   <div>
-                    <label style={fieldLabel}>
-                      Field of Study <span style={{ color: '#dc2626' }}>*</span>
-                    </label>
+                    <label style={fieldLabel}>Field of Study <span style={{ color: '#dc2626' }}>*</span></label>
                     <input
                       className="form-input"
                       type="text"
@@ -528,9 +614,7 @@ export default function ApplyPage() {
                   {/* Graduation year + Experience */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                     <div>
-                      <label style={fieldLabel}>
-                        Graduation Year <span style={{ color: '#dc2626' }}>*</span>
-                      </label>
+                      <label style={fieldLabel}>Graduation Year <span style={{ color: '#dc2626' }}>*</span></label>
                       <input
                         className="form-input"
                         type="number"
@@ -539,7 +623,9 @@ export default function ApplyPage() {
                         placeholder="e.g. 2022"
                         value={form.graduation_year}
                         onChange={e => setForm(f => ({ ...f, graduation_year: e.target.value }))}
+                        style={{ borderColor: formErrors.graduation_year ? '#dc2626' : undefined }}
                       />
+                      {formErrors.graduation_year && <div style={{ color: '#dc2626', fontSize: '.78rem', marginTop: 4 }}>{formErrors.graduation_year}</div>}
                     </div>
                     <div>
                       <label style={fieldLabel}>Years of Experience</label>
@@ -554,7 +640,7 @@ export default function ApplyPage() {
                     </div>
                   </div>
 
-                  {/* ✅ FIX K — hint: nudge applicants with experience > 0 to upload an experience doc */}
+                  {/* Experience nudge */}
                   {parseInt(form.experience_years) > 0 && (
                     <div style={{
                       padding:      '10px 14px',
@@ -573,9 +659,7 @@ export default function ApplyPage() {
 
                   {/* Skills */}
                   <div>
-                    <label style={fieldLabel}>
-                      Skills <span style={{ color: '#dc2626' }}>*</span>
-                    </label>
+                    <label style={fieldLabel}>Skills <span style={{ color: '#dc2626' }}>*</span></label>
                     <textarea
                       className="form-input form-textarea"
                       placeholder="e.g. Python, SQL, Data Analysis (comma-separated)"
@@ -590,9 +674,7 @@ export default function ApplyPage() {
                   <div>
                     <label style={fieldLabel}>
                       Certifications{' '}
-                      <span style={{ fontWeight: 400, textTransform: 'none', color: '#9ca3af', fontSize: '.75rem', letterSpacing: 0 }}>
-                        (optional)
-                      </span>
+                      <span style={{ fontWeight: 400, textTransform: 'none', color: '#9ca3af', fontSize: '.75rem', letterSpacing: 0 }}>(optional)</span>
                     </label>
                     <textarea
                       className="form-input form-textarea"
@@ -648,14 +730,11 @@ export default function ApplyPage() {
               </div>
             )}
 
-            {/* ── STEP 2: Documents ── */}
+            {/* ══════════════════════════════════════════════════════════════
+                STEP 2 — Documents
+            ══════════════════════════════════════════════════════════════ */}
             {step === 2 && (
-              <div style={{
-                background:   '#ffffff',
-                border:       '1px solid #e5e7eb',
-                borderRadius: 12,
-                padding:      '32px 36px',
-              }}>
+              <div style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '32px 36px' }}>
                 <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 10 }}>
                   Step 3 of 4
                 </div>
@@ -686,9 +765,23 @@ export default function ApplyPage() {
                     const isError    = state.status === 'error'
                     const isLoading  = state.status === 'uploading'
                     const isAdvisory = isSuccess && state.isAdvisory
+                    const isNetwork  = isError   && state.isNetwork
 
-                    const borderColor = isSuccess && !isAdvisory ? '#16a34a' : isAdvisory ? '#d97706' : isError ? '#dc2626' : '#e5e7eb'
-                    const bgColor     = isSuccess && !isAdvisory ? '#f0fdf4' : isAdvisory ? '#fffbeb' : isError ? '#fff1f2' : '#f9fafb'
+                    const borderColor = isSuccess && !isAdvisory
+                      ? '#16a34a'
+                      : isAdvisory
+                        ? '#d97706'
+                        : isError
+                          ? '#dc2626'
+                          : '#e5e7eb'
+
+                    const bgColor = isSuccess && !isAdvisory
+                      ? '#f0fdf4'
+                      : isAdvisory
+                        ? '#fffbeb'
+                        : isError
+                          ? '#fff1f2'
+                          : '#f9fafb'
 
                     return (
                       <div key={doc.key} style={{
@@ -699,6 +792,8 @@ export default function ApplyPage() {
                         transition:   'all .2s',
                       }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+
+                          {/* Icon */}
                           <div style={{
                             width:          44,
                             height:         44,
@@ -713,6 +808,8 @@ export default function ApplyPage() {
                           }}>
                             {doc.icon}
                           </div>
+
+                          {/* Body */}
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontWeight: 700, fontSize: '.95rem', color: '#111827', marginBottom: 4 }}>
                               {doc.label}
@@ -725,6 +822,7 @@ export default function ApplyPage() {
                               {doc.description}
                             </div>
 
+                            {/* ── SUCCESS message ── */}
                             {isSuccess && state.message && (
                               <div style={{
                                 fontSize:     '.78rem',
@@ -733,31 +831,61 @@ export default function ApplyPage() {
                                 padding:      '8px 12px',
                                 borderRadius: 6,
                                 background:   isAdvisory ? '#fef3c7' : '#dcfce7',
-                                color:        isAdvisory ? '#78350f' : '#14532d',
+                                color:        isAdvisory ? '#78350f'  : '#14532d',
                                 border:       `1px solid ${isAdvisory ? '#fcd34d' : '#86efac'}`,
                                 display:      'flex',
                                 alignItems:   'flex-start',
                                 gap:          6,
                               }}>
-                                {isAdvisory ? <Info size={12} style={{ flexShrink: 0, marginTop: 1 }} /> : '✅ '}
+                                {isAdvisory
+                                  ? <Info size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                                  : <CheckCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                                }
                                 <span>{state.message}</span>
                               </div>
                             )}
+
+                            {/* ── ERROR message — shows FULL rejection reason ── */}
                             {isError && state.message && (
                               <div style={{
-                                fontSize:     '.78rem',
-                                lineHeight:   1.5,
+                                fontSize:     '.82rem',
+                                lineHeight:   1.6,
                                 marginBottom: 10,
-                                padding:      '8px 12px',
+                                padding:      '10px 14px',
                                 borderRadius: 6,
-                                background:   '#fee2e2',
-                                color:        '#7f1d1d',
-                                border:       '1px solid #fca5a5',
+                                background:   isNetwork ? '#fef3c7' : '#fee2e2',
+                                color:        isNetwork ? '#78350f'  : '#7f1d1d',
+                                border:       `1px solid ${isNetwork ? '#fcd34d' : '#fca5a5'}`,
                               }}>
-                                ❌ {state.message}
+                                {/* Header row */}
+                                <div style={{
+                                  display:      'flex',
+                                  alignItems:   'center',
+                                  gap:          6,
+                                  fontWeight:   700,
+                                  marginBottom: 6,
+                                  fontSize:     '.83rem',
+                                }}>
+                                  {isNetwork
+                                    ? <WifiOff size={13} style={{ flexShrink: 0 }} />
+                                    : <XCircle size={13} style={{ flexShrink: 0 }} />
+                                  }
+                                  {isNetwork ? 'Connection error' : 'Document rejected — reason:'}
+                                </div>
+                                {/* The actual reason from the backend */}
+                                <div style={{ paddingLeft: 19 }}>
+                                  {state.message}
+                                </div>
+                                {/* Network-specific help text */}
+                                {isNetwork && (
+                                  <div style={{ paddingLeft: 19, marginTop: 4, fontSize: '.78rem', opacity: .85 }}>
+                                    The server may be waking up (cold start). Wait ~30 seconds then click "Try Again".
+                                  </div>
+                                )}
                               </div>
                             )}
 
+                            {/* ── Action buttons ── */}
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                               {isLoading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
@@ -765,14 +893,7 @@ export default function ApplyPage() {
                                 </div>
                               ) : isSuccess ? (
                                 <>
-                                  <div style={{
-                                    display:    'flex',
-                                    alignItems: 'center',
-                                    gap:        5,
-                                    color:      isAdvisory ? '#78350f' : '#15803d',
-                                    fontSize:   '.85rem',
-                                    fontWeight: 600,
-                                  }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: isAdvisory ? '#78350f' : '#15803d', fontSize: '.85rem', fontWeight: 600 }}>
                                     <CheckCircle size={13} /> {state.fileName}
                                   </div>
                                   <button
@@ -792,17 +913,17 @@ export default function ApplyPage() {
                                 </>
                               ) : (
                                 <label style={{
-                                  display:        'inline-flex',
-                                  alignItems:     'center',
-                                  gap:            6,
-                                  padding:        '7px 14px',
-                                  borderRadius:   6,
-                                  border:         'none',
-                                  background:     isError ? '#dc2626' : '#2563eb',
-                                  color:          '#ffffff',
-                                  fontWeight:     700,
-                                  fontSize:       '.82rem',
-                                  cursor:         'pointer',
+                                  display:    'inline-flex',
+                                  alignItems: 'center',
+                                  gap:        6,
+                                  padding:    '7px 14px',
+                                  borderRadius: 6,
+                                  border:     'none',
+                                  background: isError ? '#dc2626' : '#2563eb',
+                                  color:      '#ffffff',
+                                  fontWeight: 700,
+                                  fontSize:   '.82rem',
+                                  cursor:     'pointer',
                                 }}>
                                   <Upload size={13} />
                                   {isError ? 'Try Again' : 'Choose File'}
@@ -816,19 +937,24 @@ export default function ApplyPage() {
                               )}
                             </div>
                           </div>
+
+                          {/* Status icon (right) */}
                           <div style={{ flexShrink: 0, marginTop: 4 }}>
                             {isSuccess && !isAdvisory && <CheckCircle size={20} color="#16a34a" />}
-                            {isAdvisory                && <Info size={20} color="#d97706" />}
-                            {isError                   && <XCircle size={20} color="#dc2626" />}
+                            {isAdvisory                && <Info        size={20} color="#d97706" />}
+                            {isError && !isNetwork     && <XCircle     size={20} color="#dc2626" />}
+                            {isNetwork                 && <WifiOff     size={20} color="#d97706" />}
                             {!isSuccess && !isError && !isLoading && <AlertCircle size={20} color="#d1d5db" />}
                             {isLoading                 && <div className="spinner" style={{ width: 20, height: 20 }} />}
                           </div>
+
                         </div>
                       </div>
                     )
                   })}
                 </div>
 
+                {/* Missing-docs warning */}
                 {!requiredUploaded && (
                   <div style={{
                     padding:      '12px 16px',
@@ -889,14 +1015,11 @@ export default function ApplyPage() {
               </div>
             )}
 
-            {/* ── STEP 3: Review & Submit ── */}
+            {/* ══════════════════════════════════════════════════════════════
+                STEP 3 — Review & Submit
+            ══════════════════════════════════════════════════════════════ */}
             {step === 3 && (
-              <div style={{
-                background:   '#ffffff',
-                border:       '1px solid #e5e7eb',
-                borderRadius: 12,
-                padding:      '32px 36px',
-              }}>
+              <div style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '32px 36px' }}>
                 <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 10 }}>
                   Step 4 of 4
                 </div>
@@ -908,21 +1031,9 @@ export default function ApplyPage() {
                   Please review your application details before final submission.
                 </p>
 
-                <div style={{
-                  background:   '#f9fafb',
-                  borderRadius: 10,
-                  padding:      '18px 22px',
-                  marginBottom: 22,
-                  border:       '1px solid #e5e7eb',
-                }}>
-                  <div style={{
-                    fontWeight:    700,
-                    fontSize:      '.78rem',
-                    textTransform: 'uppercase',
-                    letterSpacing: '.06em',
-                    marginBottom:  14,
-                    color:         '#374151',
-                  }}>
+                {/* Summary table */}
+                <div style={{ background: '#f9fafb', borderRadius: 10, padding: '18px 22px', marginBottom: 22, border: '1px solid #e5e7eb' }}>
+                  <div style={{ fontWeight: 700, fontSize: '.78rem', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 14, color: '#374151' }}>
                     Application Summary
                   </div>
                   {[
@@ -932,7 +1043,6 @@ export default function ApplyPage() {
                     ['Field',      form.field_of_study],
                     ['Experience', `${form.experience_years || 0} year(s)`],
                     ['Skills',     form.skills],
-                    // ✅ FIX K — optional count now includes experience doc if uploaded
                     ['Documents',  `${requiredCount}/${REQUIRED_DOC_KEYS.length} required${successCount > requiredCount ? ` + ${successCount - requiredCount} optional` : ''} ✅`],
                   ].map(([label, value]) => (
                     <div key={label} style={{ display: 'flex', gap: 14, marginBottom: 10, fontSize: '.9rem' }}>
@@ -942,7 +1052,7 @@ export default function ApplyPage() {
                   ))}
                 </div>
 
-                {/* ✅ FIX K — show experience doc note in submission confirmation */}
+                {/* Experience doc note */}
                 {docStatus['experience']?.status === 'success' && (
                   <div style={{
                     padding:      '12px 16px',
@@ -1025,6 +1135,7 @@ export default function ApplyPage() {
                 </div>
               </div>
             )}
+
           </div>
         </div>
       </div>

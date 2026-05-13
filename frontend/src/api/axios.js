@@ -22,7 +22,16 @@
  *   GET  /jobs/5 → public  (anyone can view a job detail)
  *   POST /jobs   → private (HR only — token required)
  *
- * All other existing behaviour is unchanged.
+ * ✅ FIX — KEEP-ALIVE PING INTERVAL
+ * ─────────────────────────────────────────────────────────────────
+ * Render free-tier spins the server DOWN after ~15 min of inactivity.
+ * When cold-starting, the first request fails at TCP level — before
+ * any HTTP headers (including CORS) are sent. The browser reports this
+ * as "No 'Access-Control-Allow-Origin' header" even though the backend
+ * config is correct.
+ *
+ * Fix: ping /wake immediately on load, then every 4 minutes, so the
+ * server never sleeps while the app is open.
  */
 
 import axios from 'axios'
@@ -42,11 +51,23 @@ const api = axios.create({
   timeout:         30_000,
 })
 
-// ── Wake-up ping (production only) ───────────────────────────────────────────
+// ── Wake-up ping + keep-alive interval (production only) ─────────────────────
+//
+// Two problems solved:
+//   1. Immediate ping on load warms the server before the user interacts.
+//   2. Repeated pings every 4 minutes prevent cold-starts mid-session.
+//
+// Uses plain fetch() — never triggers axios interceptors or causes
+// spurious 401 redirects.
+//
 if (IS_PROD) {
-  api
-    .get('/wake', { timeout: 60_000 })
-    .catch(() => {})   // silently ignore — just a warm-up ping
+  const wake = () => fetch(`${BACKEND}/wake`).catch(() => {})
+
+  // Warm up immediately on load
+  wake()
+
+  // Keep alive every 4 minutes
+  setInterval(wake, 4 * 60 * 1000)
 }
 
 // ── Auth storage keys ─────────────────────────────────────────────────────────
@@ -64,14 +85,10 @@ export function clearAuthStorage() {
 
 // ── Public routes — skip Authorization header & 401 redirect ─────────────────
 //
-// ✅ FIX: Each entry specifies BOTH the HTTP method and the path pattern.
+// Each entry specifies BOTH the HTTP method and the path pattern.
 //
 //   method: 'ANY'  → public for all HTTP methods (e.g. auth endpoints)
 //   method: 'GET'  → public only for GET requests (e.g. job listing)
-//
-// This prevents POST /jobs from being treated as public just because
-// GET /jobs is public — which was the root cause of "Not authenticated"
-// on the HR Job Create page.
 //
 const PUBLIC_ROUTES = [
   { method: 'ANY', path: '/auth/login' },
@@ -91,16 +108,14 @@ const PUBLIC_ROUTES = [
  * @param {string} method - The HTTP method in UPPERCASE (e.g. 'GET', 'POST')
  */
 const isPublic = (url = '', method = '') => {
-  const path       = url.split('?')[0]          // strip query string
+  const path        = url.split('?')[0]
   const upperMethod = method.toUpperCase()
 
   return PUBLIC_ROUTES.some(({ method: routeMethod, path: routePath }) => {
-    // Check path: exact match OR sub-path (e.g. /jobs matches /jobs/5)
     const pathMatches =
       path === routePath ||
       path.startsWith(routePath + '/')
 
-    // Check method: 'ANY' means all methods; otherwise must match exactly
     const methodMatches =
       routeMethod === 'ANY' ||
       routeMethod === upperMethod
@@ -112,7 +127,6 @@ const isPublic = (url = '', method = '') => {
 // ── Request interceptor ───────────────────────────────────────────────────────
 api.interceptors.request.use(
   (config) => {
-    // ✅ FIX: pass both URL and METHOD to isPublic
     if (!isPublic(config.url, config.method)) {
       const token =
         localStorage.getItem('token') ||

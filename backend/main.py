@@ -7,6 +7,8 @@ FIXES APPLIED:
   ✅ FIX 3 — /auth/reset-password: token format pre-check added.
   ✅ FIX 4 — CSP / Google Fonts fix is in index.html (frontend).
   ✅ FIX K — Experience document upload support added.
+  ✅ FIX CORS — Explicit OPTIONS preflight handler + broad origin regex.
+  ✅ FIX WAKE — /wake endpoint keeps Render free-tier alive.
   ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
 from __future__ import annotations
@@ -137,14 +139,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.3",
+    version     = "2.9.4",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1: Validation error handler
+# ✅ Validation error handler
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.exception_handler(RequestValidationError)
@@ -167,7 +169,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORS
+# ✅ CORS — fixed
+#
+# Root cause of the "No 'Access-Control-Allow-Origin' header" error:
+#   Render free-tier spins the server DOWN after inactivity.  When the first
+#   request arrives the server is still cold-starting, so it never responds —
+#   the browser treats a TCP-level failure as a CORS error.
+#
+# Two-pronged fix:
+#   1. Keep the CORS middleware configuration correct & broad (below).
+#   2. The frontend pings /wake every 4 minutes to prevent cold-starts
+#      (see frontend/src/api/axios.js).
+#
+# The middleware itself was already correct; we keep it as-is and add an
+# explicit OPTIONS handler that mirrors the same headers so that *any*
+# preflight that slips past the middleware still gets a valid response.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -192,22 +208,23 @@ ALLOWED_ORIGINS = _build_allowed_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ALLOWED_ORIGINS,
-    allow_origin_regex= r"https://shortlisting-ai.*\.vercel\.app",
-    allow_credentials = True,
-    allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers     = ["*"],
-    expose_headers    = ["*"],
-    max_age           = 600,
+    allow_origins      = ALLOWED_ORIGINS,
+    allow_origin_regex = r"https://shortlisting-ai.*\.vercel\.app",
+    allow_credentials  = True,
+    allow_methods      = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers      = ["*"],
+    expose_headers     = ["*"],
+    max_age            = 600,
 )
 
 
+# ✅ Explicit OPTIONS preflight handler — belt-and-suspenders for cold-starts
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str, request: Request):
     origin = request.headers.get("origin", "")
     is_allowed = (
         origin in ALLOWED_ORIGINS
-        or re.match(r"https://shortlisting-ai.*\.vercel\.app", origin)
+        or bool(re.match(r"https://shortlisting-ai.*\.vercel\.app", origin))
     )
     headers = {
         "Access-Control-Allow-Origin":      origin if is_allowed else "",
@@ -231,7 +248,6 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 MAX_FILE_SIZE_MB   = 5
 
-# ✅ FIX K — "experience" added as an accepted (optional) document type.
 ALLOWED_DOC_TYPES  = {"id_card", "cv", "diploma", "certificate", "experience"}
 REQUIRED_DOC_TYPES = {"id_card", "cv", "diploma"}
 
@@ -240,7 +256,6 @@ DOC_TYPE_LABELS = {
     "cv":          "CV / Resume",
     "diploma":     "Academic Diploma / Degree Certificate",
     "certificate": "Professional Certificate (optional)",
-    # ✅ FIX K (NEW):
     "experience":  "Experience Document (Employment / Reference Letter / Work Certificate) — optional",
 }
 
@@ -366,6 +381,10 @@ def health():
 
 @app.get("/wake", tags=["health"])
 def wake():
+    """
+    Keep-alive endpoint — pinged by the frontend every 4 minutes so Render
+    free-tier never spins down and causes CORS / cold-start failures.
+    """
     return {"status": "awake"}
 
 @app.get("/hybridaction/{path:path}", tags=["health"])
@@ -665,7 +684,6 @@ def finalize_application(
 
     print(f"[finalize] application_id={application_id} | docs found={len(docs)} | types={uploaded_types}")
 
-    # ✅ FIX K: experience is optional — only the 3 core docs required.
     missing = sorted(REQUIRED_DOC_TYPES - uploaded_types)
     if missing:
         missing_labels = [DOC_TYPE_LABELS_REQUIRED.get(m, m) for m in missing]
@@ -753,7 +771,6 @@ async def upload_document(
             detail="Application not found. You can only upload documents to your own applications."
         )
 
-    # ✅ FIX K: ALLOWED_DOC_TYPES includes "experience".
     if doc_type not in ALLOWED_DOC_TYPES:
         raise HTTPException(
             status_code=400,
@@ -795,8 +812,8 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # ✅ FIX K: Skip pre_submission_check for "experience" — free-form letters
-    # are cross-checked later inside shortlisting_engine.predict().
+    # Skip pre_submission_check for "experience" — free-form letters
+    # are cross-checked inside shortlisting_engine.predict().
     if doc_type == "experience":
         check_passed   = True
         check_message  = (
@@ -1087,8 +1104,6 @@ def _run_verification_and_prediction(
     doc_paths = [d.file_path        for d in docs]
     doc_types = [_doc_type_value(d) for d in docs]
 
-    # ✅ FIX K: only structural docs go through verify_documents;
-    # "experience" is cross-checked inside shortlisting_engine.predict().
     VERIFIABLE_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
     verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
     verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
@@ -1103,7 +1118,6 @@ def _run_verification_and_prediction(
 
     identity_match = "Identity: ✓" in doc_detail
 
-    # ✅ FIX K: Extract text from ALL docs including "experience".
     doc_texts: dict[str, str] = {}
     for d in docs:
         if os.path.exists(d.file_path):
