@@ -420,19 +420,21 @@ def _rank_candidates(candidates: list[dict]) -> list[dict]:
 # HEALTH
 # ═══════════════════════════════════════════════════════════════
 
-@app.get("/", tags=["health"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
 def root():
     return {"status": "ok", "message": "Shortlisting API is running"}
 
-@app.get("/health", tags=["health"])
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
     return {"status": "ok"}
 
-@app.get("/wake", tags=["health"])
+@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
 def wake():
     """
-    Keep-alive endpoint — pinged by the frontend every 4 minutes so Render
-    free-tier never spins down and causes CORS / cold-start failures.
+    Keep-alive endpoint — pinged by the frontend every 4 minutes and by
+    UptimeRobot every 5 minutes so Render free-tier never spins down and
+    causes CORS / cold-start failures. Accepts both GET and HEAD so that
+    UptimeRobot's default HEAD ping works without a 405 error.
     """
     return {"status": "awake"}
 
