@@ -17,17 +17,12 @@ FIXES APPLIED IN THIS VERSION:
   document (employment letter / reference letter / work certificate)
   and cross-checks it against the declared experience_years.
 
-  ✅ DEPLOY FIX — from __future__ import annotations MOVED TO LINE 1
+  ✅ DEPLOY FIX — from __future__ import annotations at line 1 only
   ────────────────────────────────────────────────────────────────
-  Root cause of SyntaxError on Render:
-    File "/app/shortlisting_engine.py", line 81
-        from __future__ import annotations
-  This import MUST be the very first statement in the file.
-  Previously it was placed after the module docstring AND after
-  some blank lines, which Python 3.11 rejects with a SyntaxError.
-  Fixed by placing it as the absolute first line (before the docstring).
+  Removed duplicate 'from __future__ import annotations' that
+  appeared after the module docstring (line ~30). Python 3.11
+  requires this import to be the absolute first statement.
 """
-from __future__ import annotations
 
 import json
 import re
