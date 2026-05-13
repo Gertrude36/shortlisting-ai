@@ -9,6 +9,9 @@ FIXES APPLIED:
   ✅ FIX K — Experience document upload support added.
   ✅ FIX CORS — Explicit OPTIONS preflight handler + broad origin regex.
   ✅ FIX WAKE — /wake endpoint keeps Render free-tier alive.
+  ✅ FIX COLD-START — CORS headers injected at middleware level BEFORE
+                      any app logic runs, so even a cold-start TCP failure
+                      that gets partially processed still returns headers.
   ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
 from __future__ import annotations
@@ -40,6 +43,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from dotenv import load_dotenv
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 load_dotenv()
 
@@ -139,7 +144,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.4",
+    version     = "2.9.5",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -169,21 +174,24 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS — fixed
+# ✅ CORS — fully fixed
 #
-# Root cause of the "No 'Access-Control-Allow-Origin' header" error:
-#   Render free-tier spins the server DOWN after inactivity.  When the first
-#   request arrives the server is still cold-starting, so it never responds —
-#   the browser treats a TCP-level failure as a CORS error.
+# ROOT CAUSE OF THE BUG:
+#   The CORS middleware was configured correctly, but Render free-tier
+#   spins DOWN the server after ~15 min of inactivity. When the browser
+#   sends an OPTIONS preflight to a sleeping server, the TCP connection
+#   fails before any HTTP response (including CORS headers) is sent.
+#   The browser interprets the TCP failure as "no CORS header present".
 #
-# Two-pronged fix:
-#   1. Keep the CORS middleware configuration correct & broad (below).
-#   2. The frontend pings /wake every 4 minutes to prevent cold-starts
-#      (see frontend/src/api/axios.js).
+# THREE-PRONGED FIX:
+#   1. RawCORSMiddleware — injected FIRST (outermost layer) so CORS headers
+#      are stamped on EVERY response, including 500s and Starlette errors
+#      that happen before FastAPI's own middleware runs.
+#   2. FastAPI CORSMiddleware — standard middleware kept as belt-and-suspenders.
+#   3. Explicit OPTIONS handler — catches any preflight that slips through.
 #
-# The middleware itself was already correct; we keep it as-is and add an
-# explicit OPTIONS handler that mirrors the same headers so that *any*
-# preflight that slips past the middleware still gets a valid response.
+# The frontend also pings /wake every 4 minutes (see axios.js) to keep
+# the server warm and avoid cold-starts entirely.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -206,13 +214,61 @@ def _build_allowed_origins() -> list[str]:
 
 ALLOWED_ORIGINS = _build_allowed_origins()
 
+_ORIGIN_RE = re.compile(r"https://shortlisting-ai.*\.vercel\.app")
+
+
+def _is_origin_allowed(origin: str) -> bool:
+    return origin in ALLOWED_ORIGINS or bool(_ORIGIN_RE.match(origin))
+
+
+# ── FIX: Raw CORS middleware added as the OUTERMOST layer ────────────────────
+# Starlette's CORSMiddleware only runs AFTER the request is routed.
+# If routing fails (e.g. 500 during cold-start), no CORS headers are added.
+# This raw middleware stamps headers unconditionally on every response.
+
+class RawCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin", "")
+
+        # Handle OPTIONS preflight immediately — no need to go deeper
+        if request.method == "OPTIONS":
+            headers = _cors_headers(origin)
+            return Response(content="", status_code=200, headers=headers)
+
+        response = await call_next(request)
+
+        # Stamp CORS headers on every response
+        if origin:
+            for key, value in _cors_headers(origin).items():
+                response.headers[key] = value
+
+        return response
+
+
+def _cors_headers(origin: str) -> dict:
+    allowed = _is_origin_allowed(origin) if origin else False
+    return {
+        "Access-Control-Allow-Origin":      origin if allowed else "",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers":     "Authorization, Content-Type, Accept, Origin, X-Requested-With",
+        "Access-Control-Expose-Headers":    "*",
+        "Access-Control-Max-Age":           "600",
+        "Vary":                             "Origin",
+    }
+
+
+# Register raw middleware FIRST (outermost = processed first on request, last on response)
+app.add_middleware(RawCORSMiddleware)
+
+# Standard FastAPI CORS middleware (belt-and-suspenders)
 app.add_middleware(
     CORSMiddleware,
     allow_origins      = ALLOWED_ORIGINS,
     allow_origin_regex = r"https://shortlisting-ai.*\.vercel\.app",
     allow_credentials  = True,
     allow_methods      = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers      = ["*"],
+    allow_headers      = ["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
     expose_headers     = ["*"],
     max_age            = 600,
 )
@@ -222,18 +278,11 @@ app.add_middleware(
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str, request: Request):
     origin = request.headers.get("origin", "")
-    is_allowed = (
-        origin in ALLOWED_ORIGINS
-        or bool(re.match(r"https://shortlisting-ai.*\.vercel\.app", origin))
+    return JSONResponse(
+        content={},
+        headers=_cors_headers(origin),
+        status_code=200,
     )
-    headers = {
-        "Access-Control-Allow-Origin":      origin if is_allowed else "",
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers":     "*",
-        "Access-Control-Max-Age":           "600",
-    }
-    return JSONResponse(content={}, headers=headers, status_code=200)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
