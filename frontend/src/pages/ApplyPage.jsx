@@ -171,8 +171,13 @@ export default function ApplyPage() {
 
   const applicationIdRef = useRef(null)
   const submittedRef     = useRef(false)
-  // Track which doc types are currently being uploaded (prevent duplicate POSTs)
-  const uploadingRef     = useRef(new Set())
+
+  // Track uploaded doc IDs locally so we never need a GET before DELETE.
+  // Map: docType -> serverId (number | null)
+  const uploadedDocIds = useRef({})
+
+  // Prevent concurrent uploads of the same doc type
+  const uploadingRef = useRef(new Set())
 
   useEffect(() => { applicationIdRef.current = applicationId }, [applicationId])
   useEffect(() => { submittedRef.current     = submitted     }, [submitted])
@@ -203,8 +208,8 @@ export default function ApplyPage() {
       if (applicationIdRef.current && !submittedRef.current) {
         const token = localStorage.getItem('token') || sessionStorage.getItem('token') || ''
         fetch(`${BACKEND}/applications/${applicationIdRef.current}`, {
-          method: 'DELETE',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          method:    'DELETE',
+          headers:   token ? { Authorization: `Bearer ${token}` } : {},
           keepalive: true,
         }).catch(() => {})
       }
@@ -258,9 +263,14 @@ export default function ApplyPage() {
 
   // ── Document upload ───────────────────────────────────────────────────────
   /**
-   * KEY FIX: before uploading, check if this doc type is already on the
-   * server. If it is, delete it first so we never hit the 400 "already
-   * uploaded" error caused by stale retry state.
+   * KEY PERFORMANCE FIX:
+   * We track the server-side doc ID locally in uploadedDocIds.current.
+   * On re-upload:
+   *   - If we have a cached ID → DELETE by ID directly (no GET needed)
+   *   - If no cached ID → just upload (backend will 400 only if truly duplicate)
+   *
+   * This eliminates 1 full round-trip before every upload, which was the main
+   * source of slowness (especially on cold-started Render instances).
    */
   const handleUpload = useCallback(async (docType, file) => {
     if (!applicationId) { toast.error('Please complete your details first'); return }
@@ -269,31 +279,34 @@ export default function ApplyPage() {
     if (uploadingRef.current.has(docType)) return
     uploadingRef.current.add(docType)
 
-    // Show uploading state immediately
     setDocStatus(prev => ({
       ...prev,
-      [docType]: { status: 'uploading', message: 'Uploading and validating…', fileName: file.name, isAdvisory: false, isNetwork: false },
+      [docType]: { status: 'uploading', message: 'Uploading and verifying…', fileName: file.name, isAdvisory: false, isNetwork: false },
     }))
 
     try {
-      // ── Step 1: check for an existing doc on the server and delete it ──
-      try {
-        const { data: listData } = await api.get(`/applications/${applicationId}/documents`)
-        const existing = listData.documents?.find(d => d.doc_type === docType)
-        if (existing) {
-          await api.delete(`/applications/${applicationId}/documents/${existing.id}`)
+      // ── Step 1: If we know the existing doc ID, delete it directly ────────
+      // No GET needed — we track IDs locally after each successful upload.
+      const existingId = uploadedDocIds.current[docType]
+      if (existingId) {
+        try {
+          await api.delete(`/applications/${applicationId}/documents/${existingId}`)
+        } catch {
+          // If delete fails (doc already gone), continue — upload will succeed
         }
-      } catch {
-        // If the list/delete fails, continue anyway — the upload itself
-        // will surface the real error.
+        delete uploadedDocIds.current[docType]
       }
 
-      // ── Step 2: upload the new file ──────────────────────────────────
+      // ── Step 2: Upload the new file ───────────────────────────────────────
       const formData = new FormData()
       formData.append('doc_type', docType)
       formData.append('file', file)
 
       const { data } = await api.post(`/applications/${applicationId}/documents`, formData)
+
+      // Cache the server-assigned doc ID for fast re-upload / delete later
+      if (data.id) uploadedDocIds.current[docType] = data.id
+
       const msg        = data.validation_message || 'Document accepted ✓'
       const isAdvisory = _isAdvisory(msg)
 
@@ -306,19 +319,28 @@ export default function ApplyPage() {
     } catch (err) {
       const { message, isNetwork } = extractErrorDetail(err)
 
-      // If it's a duplicate-doc 400 from the server (shouldn't happen after
-      // the delete above, but belt-and-suspenders), treat it as retriable.
+      // Handle "already uploaded" 400 — means our local cache was stale.
+      // Fetch the real ID and set status to error so user can retry cleanly.
       const isDuplicate = err.response?.status === 400 &&
         message?.toLowerCase().includes('already been uploaded')
+
+      if (isDuplicate) {
+        // Fetch the existing doc ID so next retry can delete it properly
+        try {
+          const { data: listData } = await api.get(`/applications/${applicationId}/documents`)
+          const existing = listData.documents?.find(d => d.doc_type === docType)
+          if (existing?.id) uploadedDocIds.current[docType] = existing.id
+        } catch { /* non-fatal */ }
+      }
 
       setDocStatus(prev => ({
         ...prev,
         [docType]: {
-          status:    'error',
-          message:   isDuplicate
-            ? 'Upload conflict resolved — please click Try Again.'
+          status:     'error',
+          message:    isDuplicate
+            ? 'Previous upload detected — click Try Again to replace it.'
             : message,
-          fileName:  file.name,
+          fileName:   file.name,
           isAdvisory: false,
           isNetwork,
         },
@@ -338,15 +360,24 @@ export default function ApplyPage() {
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
-    e.target.value = ''   // reset input so same file can be re-selected
+    e.target.value = ''   // reset so same file can be re-selected
     handleUpload(docType, file)
   }
 
+  // ── Delete doc ────────────────────────────────────────────────────────────
   const handleDeleteDoc = async (docType) => {
+    const existingId = uploadedDocIds.current[docType]
     try {
-      const { data } = await api.get(`/applications/${applicationId}/documents`)
-      const doc = data.documents?.find(d => d.doc_type === docType)
-      if (doc) await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
+      if (existingId) {
+        // Fast path: we know the ID, delete directly
+        await api.delete(`/applications/${applicationId}/documents/${existingId}`)
+      } else {
+        // Fallback: look up the ID (rare — only if cache was cleared)
+        const { data } = await api.get(`/applications/${applicationId}/documents`)
+        const doc = data.documents?.find(d => d.doc_type === docType)
+        if (doc) await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
+      }
+      delete uploadedDocIds.current[docType]
       setDocStatus(prev => ({
         ...prev,
         [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
@@ -594,7 +625,7 @@ export default function ApplyPage() {
                   <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>. Accepted: PDF, PNG, JPG (max 5 MB).
                 </p>
 
-                {/* ── Server wake banner — only shows when server is starting ── */}
+                {/* Wake banner — only visible while server is warming up */}
                 <WakeBanner status={serverStatus} />
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 28 }}>
