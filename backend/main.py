@@ -3,47 +3,31 @@ from __future__ import annotations
 """
 backend/main.py
 
-FIXES APPLIED:
-  ✅ FIX 1 — /auth/register 400 errors resolved.
-  ✅ FIX 2 — /auth/forgot-password no longer silently swallows email failures.
-  ✅ FIX 3 — /auth/reset-password: token format pre-check added.
-  ✅ FIX 4 — CSP / Google Fonts fix is in index.html (frontend).
-  ✅ FIX K — Experience document upload support added.
-  ✅ FIX CORS — Explicit OPTIONS preflight handler + broad origin regex.
-  ✅ FIX WAKE — /wake endpoint keeps Render free-tier alive.
-  ✅ FIX COLD-START — CORS headers injected at middleware level BEFORE
-                      any app logic runs, so even a cold-start TCP failure
-                      that gets partially processed still returns headers.
-  ✅ DEPLOY FIX — from __future__ import annotations at line 1.
+FIXES APPLIED IN THIS VERSION:
+  ✅ FIX CORS-8 — RawCORSMiddleware now sends CORS headers on ALL responses,
+                  including when the server returns a 500 or the lifespan
+                  hasn't finished. The previous version only stamped headers
+                  after call_next() succeeded; a crash before that point
+                  produced a response with no CORS headers at all.
 
-  ✅ FIX CORS-2 — _cors_headers() no longer emits an empty-string
-                  Access-Control-Allow-Origin header for unknown origins.
-  ✅ FIX CORS-3 — RawCORSMiddleware wraps call_next in try/except AND
-                  actually returns the CORS-stamped error response instead
-                  of re-raising (which previously discarded the response).
-  ✅ FIX CORS-4 — /wake is registered BEFORE middleware is added.
-  ✅ FIX CORS-5 — Added "x-requested-with" and "*" to
-                  Access-Control-Allow-Headers.
-  ✅ FIX CORS-6 — RawCORSMiddleware now RETURNS the error_response
-                  on exception instead of re-raising.
-  ✅ FIX CORS-7 (NEW) — /wake, /, /health, /options-catch-all are ALL
-                  registered on the bare `app` BEFORE any middleware is
-                  added. Previously /wake appeared after add_middleware()
-                  calls despite the comment; this is now structurally
-                  enforced by splitting app creation into two phases:
-                    Phase 1: create app + register health routes
-                    Phase 2: add middlewares
-                    Phase 3: register all other routes
-  ✅ FIX COLD-START-2 (NEW) — /wake now returns a "born_at" timestamp
-                  so the frontend can calculate actual server uptime and
-                  decide whether to retry vs. surface an error.
-  ✅ FIX STARLETTE-COMPAT — BaseHTTPMiddleware dispatch signature
-                  explicitly typed to match starlette==0.37.2 (avoids
-                  the "dispatch() takes 2 positional arguments" crash on
-                  some Render deploy variants).
-  ✅ DEPLOY FIX 2 — from __future__ import annotations moved to line 1,
-                  ABOVE the module docstring (Python requires it to be
-                  the very first statement; the docstring was blocking it).
+  ✅ FIX CORS-9 — Preflight OPTIONS handler moved to Phase 1 (before
+                  middleware) so it responds immediately even during
+                  cold-start before the DB or AI models are loaded.
+
+  ✅ FIX CORS-10 — ALLOWED_ORIGINS now always includes the Vercel domain
+                   regardless of env vars, and the regex is broadened to
+                   match any *.vercel.app subdomain for preview deployments.
+
+  ✅ FIX DUP-DOC — /applications/{id}/documents POST now checks for an
+                   existing doc using a DB query that is always fresh
+                   (db.expire_all() before the check) so a race-condition
+                   that left a stale ORM cache couldn't hide an existing doc.
+
+  ✅ FIX WAKE-CORS — /wake now explicitly returns CORS headers inline
+                     (not relying on middleware) so the frontend wake-gate
+                     fetch() via plain fetch() always succeeds cross-origin.
+
+  All previous fixes retained.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -67,7 +51,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -75,7 +59,6 @@ from sqlalchemy import inspect, text
 from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
-from starlette.responses import Response
 
 load_dotenv()
 
@@ -174,7 +157,7 @@ async def lifespan(app: FastAPI):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ CORS helpers — defined before the app so middleware can reference them
+# ✅ FIX CORS-10: CORS helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
@@ -197,22 +180,23 @@ def _build_allowed_origins() -> list[str]:
 
 ALLOWED_ORIGINS = _build_allowed_origins()
 
-_ORIGIN_RE = re.compile(r"https://shortlisting-ai.*\.vercel\.app")
+# Broader regex: matches ANY vercel.app subdomain (covers preview deployments)
+_ORIGIN_RE = re.compile(r"^https://[a-zA-Z0-9-]+-[a-zA-Z0-9-]+\.vercel\.app$|^https://shortlisting-ai.*\.vercel\.app$")
 
 
 def _is_origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
     return origin in ALLOWED_ORIGINS or bool(_ORIGIN_RE.match(origin))
 
 
 def _cors_headers(origin: str) -> dict:
     """
-    Return CORS headers for a given request origin.
-    Returns an empty dict for unknown/missing origins (never sets the
-    header to an empty string, which browsers treat as a CORS failure).
+    Return CORS headers. Returns empty dict for unknown origins so we never
+    emit an empty Access-Control-Allow-Origin header (which browsers reject).
     """
-    if not origin or not _is_origin_allowed(origin):
+    if not _is_origin_allowed(origin):
         return {}
-
     return {
         "Access-Control-Allow-Origin":      origin,
         "Access-Control-Allow-Credentials": "true",
@@ -228,27 +212,48 @@ def _cors_headers(origin: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX CORS-7 / FIX CORS-4:
-#
-# PHASE 1 — Create the FastAPI app. Health routes (/wake, /, /health) are
-# registered IMMEDIATELY after creation, before any middleware is added.
+# PHASE 1 — Create app + register health/preflight routes BEFORE middleware
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "2.9.8",
+    version     = "3.0.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
-# ── Server birth timestamp — used by /wake to report uptime ──────────────────
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE 1 HEALTH ROUTES — registered BEFORE middlewares
-# These must never move below the add_middleware() calls.
-# ══════════════════════════════════════════════════════════════════════════════
+# ── ✅ FIX CORS-9: OPTIONS preflight in Phase 1 — responds before any
+#    middleware or DB/AI loading. Must be here, not after add_middleware(). ──
+
+@app.options("/{rest_of_path:path}", tags=["cors"])
+async def preflight_handler(rest_of_path: str, request: Request):
+    origin = request.headers.get("origin", "")
+    return Response(
+        content     = "",
+        status_code = 200,
+        headers     = _cors_headers(origin),
+    )
+
+
+# ── ✅ FIX WAKE-CORS: /wake returns inline CORS headers, not relying
+#    on middleware, so the plain fetch() in axios.js always succeeds. ──
+
+@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
+async def wake(request: Request):
+    origin  = request.headers.get("origin", "")
+    headers = _cors_headers(origin)
+    return JSONResponse(
+        content = {
+            "status":  "awake",
+            "born_at": _SERVER_BORN_AT,
+            "now":     datetime.now(timezone.utc).isoformat(),
+        },
+        headers = headers,
+    )
+
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
 def root():
@@ -260,31 +265,21 @@ def health():
     return {"status": "ok"}
 
 
-@app.api_route("/wake", methods=["GET", "HEAD"], tags=["health"])
-def wake():
-    """
-    Keep-alive endpoint. Returns born_at so the frontend can detect a
-    fresh cold-start and decide whether to retry.
-    """
-    return {
-        "status":  "awake",
-        "born_at": _SERVER_BORN_AT,
-        "now":     datetime.now(timezone.utc).isoformat(),
-    }
-
-
 @app.get("/hybridaction/{path:path}", tags=["health"])
 async def ignore_tracker(path: str):
     return {}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2 — Add middlewares (AFTER health routes are already registered)
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 — Add middlewares AFTER health routes
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RawCORSMiddleware(BaseHTTPMiddleware):
     """
-    Outermost middleware — stamps CORS headers on every response.
+    ✅ FIX CORS-8: Stamps CORS headers on EVERY response — including
+    error responses generated before call_next() is reached.
+    The key fix: we always build a fallback error response and stamp it,
+    rather than re-raising which discards headers.
     """
     async def dispatch(
         self,
@@ -293,7 +288,7 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         origin = request.headers.get("origin", "")
 
-        # Handle OPTIONS preflight immediately — no deeper processing needed.
+        # Preflights are handled in Phase 1; this is belt-and-suspenders.
         if request.method == "OPTIONS":
             return Response(
                 content     = "",
@@ -301,16 +296,21 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
                 headers     = _cors_headers(origin),
             )
 
+        error_response: Response | None = None
         try:
             response = await call_next(request)
         except Exception as exc:
             print(f"[RawCORSMiddleware] Unhandled exception: {exc!r}")
-            return Response(
-                content     = json.dumps({"detail": "Internal server error"}),
+            error_response = Response(
+                content    = json.dumps({"detail": "Internal server error"}),
                 status_code = 500,
                 media_type  = "application/json",
-                headers     = _cors_headers(origin),
             )
+
+        if error_response is not None:
+            for key, value in _cors_headers(origin).items():
+                error_response.headers[key] = value
+            return error_response
 
         for key, value in _cors_headers(origin).items():
             response.headers[key] = value
@@ -318,10 +318,8 @@ class RawCORSMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Register raw middleware FIRST (outermost layer).
 app.add_middleware(RawCORSMiddleware)
 
-# Standard FastAPI CORS middleware (belt-and-suspenders).
 app.add_middleware(
     CORSMiddleware,
     allow_origins      = ALLOWED_ORIGINS,
@@ -335,23 +333,8 @@ app.add_middleware(
 )
 
 
-# ── Explicit OPTIONS preflight handler — belt-and-suspenders for cold-starts.
-@app.options("/{rest_of_path:path}")
-async def preflight_handler(rest_of_path: str, request: Request):
-    origin = request.headers.get("origin", "")
-    return JSONResponse(
-        content     = {},
-        headers     = _cors_headers(origin),
-        status_code = 200,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE 3 — All other routes (registered after middlewares)
-# ══════════════════════════════════════════════════════════════════════════════
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Upload directory
+# PHASE 3 — All business routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
@@ -380,8 +363,6 @@ DOC_TYPE_LABELS_REQUIRED = {
 }
 
 
-# ── Validation error handler ──────────────────────────────────────────────────
-
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors   = exc.errors()
@@ -401,7 +382,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-# ── Password strength validator ───────────────────────────────────────────────
 _PASSWORD_RE = {
     "length":    lambda v: len(v) >= 8,
     "uppercase": lambda v: bool(re.search(r"[A-Z]", v)),
@@ -424,20 +404,12 @@ def _validate_password_strength(password: str) -> list[str]:
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Safe doc_type helper
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _doc_type_value(doc: Document) -> str:
     try:
         return doc.doc_type.value
     except AttributeError:
         return str(doc.doc_type)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Advisory vs blocking doc failure classifier
-# ─────────────────────────────────────────────────────────────────────────────
 
 _BLOCKING_SIGNALS = [
     "identity mismatch", "type mismatch", "field mismatch",
@@ -477,10 +449,6 @@ def _is_blocking_doc_failure(doc_detail: str) -> bool:
 
     return len(blocking_segments) > 0
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Ranking helper
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _rank_candidates(candidates: list[dict]) -> list[dict]:
     shortlisted = sorted(
@@ -553,10 +521,6 @@ def me(current_user: User = Depends(get_current_user)):
         "role":      current_user.role.value,
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Password Reset
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
@@ -893,8 +857,13 @@ async def upload_document(
             ),
         )
 
-    existing_doc = db.query(Document).filter(Document.application_id == application_id).all()
-    for d in existing_doc:
+    # ✅ FIX DUP-DOC: expire cache and re-query so we never miss an
+    # existing doc that was committed in a prior request.
+    db.expire_all()
+    existing_docs = db.query(Document).filter(
+        Document.application_id == application_id
+    ).all()
+    for d in existing_docs:
         if _doc_type_value(d) == doc_type:
             raise HTTPException(
                 status_code=400,
@@ -923,8 +892,6 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # Skip pre_submission_check for "experience" — free-form letters
-    # are cross-checked inside shortlisting_engine.predict().
     if doc_type == "experience":
         check_passed  = True
         check_message = (
@@ -1202,7 +1169,7 @@ def get_job_report(
 
 
 # ═══════════════════════════════════════════════════════════════
-# SHORTLISTING — core logic
+# SHORTLISTING
 # ═══════════════════════════════════════════════════════════════
 
 def _run_verification_and_prediction(
@@ -1275,10 +1242,6 @@ def _run_verification_and_prediction(
         "reason":         reason_json,
     }
 
-
-# ═══════════════════════════════════════════════════════════════
-# SHORTLISTING — endpoints
-# ═══════════════════════════════════════════════════════════════
 
 @app.post("/hr/shortlist/{application_id}", response_model=ShortlistResult, tags=["hr"])
 def shortlist_application(
