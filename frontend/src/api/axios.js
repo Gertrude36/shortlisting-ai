@@ -129,38 +129,39 @@ export function rearmWakeGate() {
   }
 }
 
-// ── Upload serializer semaphore ────────────────────────────────────────────────
+// ── Upload concurrency semaphore ──────────────────────────────────────────────
 //
-// Only 1 document upload runs at a time.
-// Render free tier drops HTTP/2 connections under concurrent load.
-// Sequential uploads prevent ERR_HTTP2_PROTOCOL_ERROR / "CORS" errors.
+// Limits concurrent document uploads to MAX_CONCURRENT (2).
+// Render free tier drops HTTP/2 connections when too many requests fire
+// simultaneously, but 2 concurrent uploads is safe and ~2x faster than 1.
 //
-// Exported so ApplyPage can call waitForUploadSlot() BEFORE setting UI to
-// "uploading" — while waiting it shows "pending" instead of a false spinner.
-// The axios interceptor ALSO calls these, but only after the gate wait; since
-// ApplyPage already holds the slot by then the interceptor's _waitForUploadSlot
-// resolves immediately (slot is already taken and will be released by the
-// response interceptor as normal).
+// Why not more?  Render free tier has 1 worker. More than 2 concurrent
+// long-running OCR/AI requests causes the worker to queue them server-side
+// anyway, and the extra HTTP/2 streams increase drop risk.
 //
-let _uploadInFlight  = false
-const _uploadWaiters = []
+// Exported so ApplyPage can acquire a slot BEFORE setting UI to "uploading",
+// showing "pending" while waiting. The axios interceptor skips its own acquire
+// when _slotPreacquired is set (avoids deadlock).
+//
+const MAX_CONCURRENT_UPLOADS = 2
+let _inFlight    = 0
+const _waiters   = []
 
 export function waitForUploadSlot() {
-  if (!_uploadInFlight) {
-    _uploadInFlight = true
+  if (_inFlight < MAX_CONCURRENT_UPLOADS) {
+    _inFlight++
     return Promise.resolve()
   }
-  return new Promise(resolve => _uploadWaiters.push(resolve))
+  return new Promise(resolve => _waiters.push(resolve))
 }
 
 export function releaseUploadSlot() {
-  if (_uploadWaiters.length > 0) {
-    const next = _uploadWaiters.shift()
-    // Small delay between uploads — lets Render finish writing the previous
-    // file and frees the HTTP/2 stream cleanly.
-    setTimeout(next, 300)
+  const next = _waiters.shift()
+  if (next) {
+    // Tiny gap so Render's HTTP/2 mux can breathe between back-to-back uploads
+    setTimeout(next, 100)
   } else {
-    _uploadInFlight = false
+    _inFlight = Math.max(0, _inFlight - 1)
   }
 }
 

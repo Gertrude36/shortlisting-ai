@@ -436,7 +436,7 @@ export default function ApplyPage() {
     setDocStatus(prev => ({
       ...prev,
       [docType]: {
-        status: 'uploading', message: 'Uploading and verifying…',
+        status: 'uploading', message: 'Uploading…',
         fileName: file.name, isAdvisory: false, isNetwork: false,
       },
     }))
@@ -445,6 +445,15 @@ export default function ApplyPage() {
     // _waitForUploadSlot call resolves instantly (slot re-entry is safe).
     let slotReleased = false
     const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseUploadSlot() } }
+
+    // Show a "still working…" hint after 8s so the user knows it's not frozen.
+    // The AI document verification on the server can take 20–60s.
+    const slowHintTimer = setTimeout(() => {
+      setDocStatus(prev => {
+        if (prev[docType]?.status !== 'uploading') return prev
+        return { ...prev, [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' } }
+      })
+    }, 8_000)
 
     try {
       // ── Delete existing doc if we have its ID ──────────────────────────────
@@ -543,6 +552,7 @@ export default function ApplyPage() {
       toast.error(`Rejected: ${message}`, { duration: 8000 })
 
     } finally {
+      clearTimeout(slowHintTimer)
       uploadingRef.current.delete(docType)
       // Release the serializer slot we acquired above (idempotent with axios interceptor).
       releaseOnce()
@@ -923,7 +933,7 @@ export default function ApplyPage() {
                               ) : isLoading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
                                   <div className="spinner" style={{ width: 14, height: 14 }} />
-                                  Uploading and verifying…
+                                  {state.message || 'Uploading…'}
                                 </div>
 
                               ) : isQueued ? (
