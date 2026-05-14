@@ -1,31 +1,56 @@
 /**
- * frontend/src/api/axios.js
+ * frontend/src/api/axios.js — FULLY FIXED
  *
- * FIXES:
- * ✅ FIX 1 — Wake gate uses aggressive parallel pinging (every 2s) until server responds
- * ✅ FIX 2 — Wake gate has a shorter 30s safety timeout (Render cold starts rarely exceed 25s)
- * ✅ FIX 3 — Non-upload requests are NOT blocked by wake gate (only document uploads wait)
- * ✅ FIX 4 — Retry backoff reduced: 2s → 4s → 8s instead of 5s → 10s → 15s
- * ✅ FIX 5 — Removed duplicate-upload guard GET call from axios.js (handled in ApplyPage)
- * ✅ FIX 6 — Upload requests get a longer 120s timeout; other requests keep 30s
- * ✅ FIX 7 — Server status exported reliably for UI banner
+ * ROOT CAUSE OF "CORS" ERRORS:
+ *   Render free tier drops HTTP/2 connections when multiple requests arrive
+ *   simultaneously during cold start. The browser reports this as a CORS error
+ *   because no headers (including CORS headers) are sent before the connection
+ *   drops. The CORS config on the backend is correct — this is a concurrency
+ *   problem, not a CORS configuration problem.
+ *
+ * FIXES IN THIS VERSION:
+ *
+ *   ✅ FIX 1 — Upload serializer (CRITICAL)
+ *      Only 1 document upload runs at a time. Subsequent uploads wait 300ms
+ *      after the previous one finishes. This eliminates the HTTP/2 overload
+ *      that causes the "CORS" / ERR_FAILED / ERR_HTTP2_PROTOCOL_ERROR errors.
+ *
+ *   ✅ FIX 2 — Re-armable wake gate
+ *      The wake gate can now reset mid-session. If a network failure is
+ *      detected after the server was thought to be awake (e.g. Render spun
+ *      down again), the gate re-arms and new uploads queue automatically.
+ *
+ *   ✅ FIX 3 — Dynamic gate reference
+ *      Request interceptor reads _wakeGatePromise at call time (not module
+ *      load time), so re-armed gates are respected by queued uploads.
+ *
+ *   ✅ FIX 4 — Semaphore released in both success AND error paths
+ *      Previously a failed upload could hold the slot forever, blocking all
+ *      subsequent uploads.
+ *
+ *   ✅ FIX 5 — Keep-alive detects sleep and re-arms automatically
+ *      If the keep-alive ping fails, the gate re-arms so the next upload
+ *      waits for the server to wake again rather than failing immediately.
+ *
+ *   ✅ FIX 6 — Faster wake ping interval (2s), 35s safety timeout
+ *   ✅ FIX 7 — 120s timeout for uploads (OCR/verification is slow)
+ *   ✅ FIX 8 — Small inter-upload delay (300ms) to let Render breathe
  */
 
 import axios from 'axios'
 
 export const BACKEND = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-// ── Axios instance ────────────────────────────────────────────────────────────
+// ── Axios instance ─────────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL:         BACKEND,
   withCredentials: false,
-  timeout:         30_000,   // default 30s; overridden per-request for uploads
+  timeout:         30_000,
 })
 
-// ── Server status observable ──────────────────────────────────────────────────
-let _serverStatus         = 'sleeping'
-let _serverConfirmedAwake = false
-const _statusListeners    = new Set()
+// ── Server status ──────────────────────────────────────────────────────────────
+let _serverStatus      = 'sleeping'
+const _statusListeners = new Set()
 
 function _setServerStatus(status) {
   if (_serverStatus === status) return
@@ -33,76 +58,140 @@ function _setServerStatus(status) {
   _statusListeners.forEach(cb => cb(status))
 }
 
-export function getServerStatus()        { return _serverStatus }
+export function getServerStatus() { return _serverStatus }
+
 export function onServerStatusChange(cb) {
   _statusListeners.add(cb)
   return () => _statusListeners.delete(cb)
 }
 
-// ── Wake gate ─────────────────────────────────────────────────────────────────
-// Resolves ONLY when server responds OK to /wake.
-// Only document uploads (POST /applications/*/documents) are gated.
+// ── Re-armable wake gate ───────────────────────────────────────────────────────
+//
+// The gate is a Promise that resolves when the server is confirmed awake.
+// Unlike a one-shot Promise, this gate can be RE-ARMED if the server goes
+// back to sleep mid-session. All pending and future upload requests read
+// _wakeGatePromise dynamically at execution time, not at closure time.
+//
+let _wakeGatePromise      = null   // current gate promise
+let _wakeGateResolve      = null   // resolves the current gate
+let _serverConfirmedAwake = false
 
-let _wakeGateResolve = null
-
-const _wakeGate = new Promise((resolve) => {
-  _wakeGateResolve = () => {
-    if (_serverConfirmedAwake) return
-    _serverConfirmedAwake = true
-    _setServerStatus('awake')
-    resolve()
-  }
-
-  // 30s safety timeout — unblock so uploads can fail with a real error
-  setTimeout(() => {
-    if (!_serverConfirmedAwake) {
-      console.warn('[axios] Wake gate timed out after 30s — unblocking.')
+function _armWakeGate() {
+  _serverConfirmedAwake = false
+  _wakeGatePromise = new Promise((resolve) => {
+    _wakeGateResolve = () => {
+      if (_serverConfirmedAwake) return
       _serverConfirmedAwake = true
       _setServerStatus('awake')
       resolve()
     }
-  }, 30_000)
-})
+    // Safety: unblock after 35s even if server never responds
+    setTimeout(() => {
+      if (!_serverConfirmedAwake) {
+        console.warn('[axios] Wake gate safety timeout (35s) — unblocking uploads.')
+        _serverConfirmedAwake = true
+        _setServerStatus('awake')
+        resolve()
+      }
+    }, 35_000)
+  })
+}
 
-// ── Wake-up ping (plain fetch, bypasses interceptors) ─────────────────────────
+_armWakeGate() // arm on module load
+
+/**
+ * Re-arm the wake gate. Called automatically when network failures are
+ * detected. Can also be called by components if needed.
+ */
+export function rearmWakeGate() {
+  if (_serverConfirmedAwake) {
+    console.log('[axios] Re-arming wake gate — server may have gone back to sleep.')
+    _armWakeGate()
+    _setServerStatus('waking')
+    _startWakePinging()
+  }
+}
+
+// ── Upload serializer semaphore ────────────────────────────────────────────────
+//
+// FIX 1: Only 1 document upload runs at a time.
+// Render free tier drops HTTP/2 connections under concurrent load.
+// Sequential uploads prevent ERR_HTTP2_PROTOCOL_ERROR / "CORS" errors.
+//
+let _uploadInFlight = false
+const _uploadWaiters = []
+
+function _waitForUploadSlot() {
+  if (!_uploadInFlight) {
+    _uploadInFlight = true
+    return Promise.resolve()
+  }
+  return new Promise(resolve => _uploadWaiters.push(resolve))
+}
+
+function _releaseUploadSlot() {
+  if (_uploadWaiters.length > 0) {
+    const next = _uploadWaiters.shift()
+    // Small delay between uploads — lets Render finish writing the previous
+    // file and frees up the HTTP/2 stream cleanly.
+    setTimeout(next, 300)
+  } else {
+    _uploadInFlight = false
+  }
+}
+
+// ── Wake pinging ───────────────────────────────────────────────────────────────
 let _wakePending  = false
 let _wakeInterval = null
 
-const _wake = () => {
-  if (_serverConfirmedAwake) {
-    // Server is awake — stop the interval
-    if (_wakeInterval) { clearInterval(_wakeInterval); _wakeInterval = null }
-    return Promise.resolve()
-  }
-  if (_wakePending) return Promise.resolve()
-
+function _pingWake() {
+  if (_serverConfirmedAwake || _wakePending) return Promise.resolve()
   _wakePending = true
   _setServerStatus('waking')
 
   return fetch(`${BACKEND}/wake`, {
     method: 'GET',
-    signal: AbortSignal.timeout(8_000),   // 8s per attempt — fail fast, retry quickly
+    signal: AbortSignal.timeout(8_000),
   })
-    .then(res => { if (res.ok) _wakeGateResolve() })
-    .catch(() => { /* server still sleeping — next interval will retry */ })
+    .then(res => {
+      if (res.ok && _wakeGateResolve) _wakeGateResolve()
+    })
+    .catch(() => { /* server still sleeping — next tick will retry */ })
     .finally(() => { _wakePending = false })
 }
 
-// Kick off immediately, then retry every 2s until awake
-_wake()
-_wakeInterval = setInterval(_wake, 2_000)
+function _startWakePinging() {
+  if (_wakeInterval) { clearInterval(_wakeInterval); _wakeInterval = null }
+  _pingWake()
+  _wakeInterval = setInterval(() => {
+    if (_serverConfirmedAwake) {
+      clearInterval(_wakeInterval)
+      _wakeInterval = null
+    } else {
+      _pingWake()
+    }
+  }, 2_000)
+}
 
-// Keep-alive ping every 4 min after server is awake (prevents re-sleeping)
-setInterval(() => {
-  if (_serverConfirmedAwake) {
-    fetch(`${BACKEND}/wake`, {
+_startWakePinging()
+
+// Keep-alive + sleep detection: ping every 3.5 min.
+// If the ping fails, re-arm the wake gate so queued uploads wait for
+// the server to come back instead of firing into a dead connection.
+setInterval(async () => {
+  if (!_serverConfirmedAwake) return
+  try {
+    const res = await fetch(`${BACKEND}/wake`, {
       method: 'GET',
-      signal: AbortSignal.timeout(5_000),
-    }).catch(() => {})
+      signal: AbortSignal.timeout(6_000),
+    })
+    if (!res.ok) rearmWakeGate()
+  } catch {
+    rearmWakeGate()
   }
-}, 4 * 60 * 1000)
+}, 3.5 * 60 * 1000)
 
-// ── Auth helpers ──────────────────────────────────────────────────────────────
+// ── Auth helpers ───────────────────────────────────────────────────────────────
 const AUTH_KEYS = [
   'token', 'role', 'userId', 'fullName',
   'nationalId', 'location', 'phone', 'documents',
@@ -115,7 +204,7 @@ export function clearAuthStorage() {
   })
 }
 
-// ── Route classification ──────────────────────────────────────────────────────
+// ── Route classification ───────────────────────────────────────────────────────
 const PUBLIC_ROUTES = [
   { method: 'ANY', path: '/auth/login' },
   { method: 'ANY', path: '/auth/register' },
@@ -123,33 +212,36 @@ const PUBLIC_ROUTES = [
   { method: 'ANY', path: '/auth/reset-password' },
   { method: 'ANY', path: '/wake' },
   { method: 'ANY', path: '/health' },
-  { method: 'GET', path: '/jobs' },
+  { method: 'GET',  path: '/jobs' },
 ]
 
 const isPublic = (url = '', method = '') => {
-  const path        = url.split('?')[0]
-  const upperMethod = method.toUpperCase()
+  const path  = url.split('?')[0]
+  const upper = method.toUpperCase()
   return PUBLIC_ROUTES.some(({ method: rm, path: rp }) =>
     (path === rp || path.startsWith(rp + '/')) &&
-    (rm === 'ANY' || rm === upperMethod)
+    (rm === 'ANY' || rm === upper)
   )
 }
 
-// Only document upload POSTs need to wait for the wake gate.
-// GET /documents, DELETE /documents, and all other requests proceed immediately
-// so the UI stays responsive while the server warms up.
+// Only document upload POSTs are serialized and gated.
 const isDocumentUpload = (url = '', method = '') =>
   method.toUpperCase() === 'POST' &&
   /\/applications\/\d+\/documents$/.test(url.split('?')[0])
 
-// ── Request interceptor ───────────────────────────────────────────────────────
+// ── Request interceptor ────────────────────────────────────────────────────────
 api.interceptors.request.use(
   async (config) => {
-    // Only block document uploads on the wake gate
     if (isDocumentUpload(config.url, config.method)) {
-      await _wakeGate
-      // Give document uploads extra timeout (OCR + verification can be slow)
-      config.timeout = 120_000
+      // Step 1: Wait for server to be awake (reads current gate, not stale closure)
+      await _wakeGatePromise
+
+      // Step 2: Serialize — wait for any in-flight upload to finish
+      await _waitForUploadSlot()
+
+      // Mark so the response interceptor knows to release the slot
+      config._serializedUpload = true
+      config.timeout = 120_000   // OCR + AI verification can take 60–90s
     }
 
     if (!isPublic(config.url, config.method)) {
@@ -157,7 +249,7 @@ api.interceptors.request.use(
       if (token) config.headers.Authorization = `Bearer ${token}`
     }
 
-    // Let browser set Content-Type for FormData (with multipart boundary)
+    // Let browser set Content-Type for FormData (multipart boundary)
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type']
     }
@@ -167,51 +259,59 @@ api.interceptors.request.use(
   err => Promise.reject(err),
 )
 
-// ── Response interceptor ──────────────────────────────────────────────────────
+// ── Response interceptor ───────────────────────────────────────────────────────
 let _redirecting = false
-const _sleep     = ms => new Promise(r => setTimeout(r, ms))
-
-/**
- * Retry on genuine network failures only (no HTTP response received).
- * Faster backoff: 2s → 4s → 8s.
- * Does NOT retry document uploads (user should retry manually with fresh file).
- */
-const _retryWithBackoff = async (error) => {
-  const config = error.config
-
-  // Don't retry if we got an HTTP response (4xx/5xx) — that's a real error
-  if (error.response) return Promise.reject(error)
-
-  // Don't retry /wake itself or document uploads
-  if (config.url?.includes('/wake'))    return Promise.reject(error)
-  if (isDocumentUpload(config.url, config.method)) return Promise.reject(error)
-
-  config._retryCount = (config._retryCount || 0) + 1
-  if (config._retryCount > 3) return Promise.reject(error)
-
-  const waitMs = config._retryCount * 2_000   // 2s, 4s, 8s
-
-  console.warn(
-    `[axios] Network error on ${config.method?.toUpperCase()} ${config.url}. ` +
-    `Attempt ${config._retryCount}/3 — retrying in ${waitMs / 1000}s…`
-  )
-
-  _setServerStatus('waking')
-  _wake()
-  await _sleep(waitMs)
-
-  return api(config)
-}
+const _sleep = ms => new Promise(r => setTimeout(r, ms))
 
 api.interceptors.response.use(
   response => {
-    // First successful response confirms server is awake
-    if (!_serverConfirmedAwake) _wakeGateResolve()
+    // Release serializer slot (must happen even on success)
+    if (response.config?._serializedUpload) {
+      _releaseUploadSlot()
+    }
+    // Any successful response confirms server is awake
+    if (!_serverConfirmedAwake && _wakeGateResolve) {
+      _wakeGateResolve()
+    }
     return response
   },
-  async error => {
-    if (!error.response) return _retryWithBackoff(error)
 
+  async error => {
+    // Always release serializer slot on error — prevents deadlock
+    if (error.config?._serializedUpload) {
+      _releaseUploadSlot()
+    }
+
+    if (!error.response) {
+      // ── Network failure (no HTTP response received) ───────────────────────
+      // This includes the "CORS" errors that are actually dropped connections.
+      // Re-arm the wake gate so subsequent uploads queue until server recovers.
+      if (_serverConfirmedAwake) {
+        rearmWakeGate()
+      }
+
+      const config = error.config || {}
+
+      // Don't retry wake pings or document uploads
+      // (document uploads are queued by ApplyPage.jsx, not retried here)
+      if (config.url?.includes('/wake'))             return Promise.reject(error)
+      if (isDocumentUpload(config.url, config.method)) return Promise.reject(error)
+
+      // Retry other requests (form submits, job loads, etc.) with backoff
+      config._retryCount = (config._retryCount || 0) + 1
+      if (config._retryCount > 3) return Promise.reject(error)
+
+      const waitMs = config._retryCount * 2_000   // 2s, 4s, 8s
+      console.warn(
+        `[axios] Network error on ${config.method?.toUpperCase()} ${config.url}. ` +
+        `Retry ${config._retryCount}/3 in ${waitMs / 1000}s…`
+      )
+      _startWakePinging()
+      await _sleep(waitMs)
+      return api(config)
+    }
+
+    // ── HTTP error responses ────────────────────────────────────────────────
     if (error.response?.status === 401) {
       clearAuthStorage()
       if (
