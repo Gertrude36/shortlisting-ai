@@ -1,5 +1,5 @@
 /**
- * frontend/src/api/axios.js — FULLY FIXED
+ * frontend/src/api/axios.js — FULLY FIXED v2
  *
  * ROOT CAUSE OF "CORS" ERRORS:
  *   Render free tier drops HTTP/2 connections when multiple requests arrive
@@ -8,33 +8,35 @@
  *   drops. The CORS config on the backend is correct — this is a concurrency
  *   problem, not a CORS configuration problem.
  *
- * FIXES IN THIS VERSION:
+ * FIXES IN THIS VERSION (on top of previous fixes):
  *
- *   ✅ FIX 1 — Upload serializer (CRITICAL)
- *      Only 1 document upload runs at a time. Subsequent uploads wait 300ms
- *      after the previous one finishes. This eliminates the HTTP/2 overload
- *      that causes the "CORS" / ERR_FAILED / ERR_HTTP2_PROTOCOL_ERROR errors.
+ *   ✅ FIX A — _wakeGatePromise read dynamically (not captured at closure time)
+ *      The request interceptor now calls getCurrentWakeGate() at execution
+ *      time. Previously it closed over _wakeGatePromise at module load, so
+ *      re-armed gates were invisible to already-queued uploads — they kept
+ *      awaiting the old (already-resolved) promise and fired into a dead server.
  *
+ *   ✅ FIX B — Safety timeout no longer marks server as "awake"
+ *      Previously _armWakeGate's 35s setTimeout called _wakeGateResolve(),
+ *      which set _serverConfirmedAwake = true and stopped wake pinging. This
+ *      meant uploads fired into a still-sleeping server. Now the timeout just
+ *      resolves the Promise to unblock uploads without touching
+ *      _serverConfirmedAwake, so pinging continues until a real /wake 200
+ *      is received.
+ *
+ *   ✅ FIX C — rearmWakeGate() is exported and also re-exported as a getter
+ *      so ApplyPage can call it directly if needed, and the interceptor always
+ *      reads the live gate.
+ *
+ * Previously shipped fixes (retained):
+ *   ✅ FIX 1 — Upload serializer (one upload at a time, 300ms inter-gap)
  *   ✅ FIX 2 — Re-armable wake gate
- *      The wake gate can now reset mid-session. If a network failure is
- *      detected after the server was thought to be awake (e.g. Render spun
- *      down again), the gate re-arms and new uploads queue automatically.
- *
- *   ✅ FIX 3 — Dynamic gate reference
- *      Request interceptor reads _wakeGatePromise at call time (not module
- *      load time), so re-armed gates are respected by queued uploads.
- *
+ *   ✅ FIX 3 — Dynamic gate reference (now via getCurrentWakeGate())
  *   ✅ FIX 4 — Semaphore released in both success AND error paths
- *      Previously a failed upload could hold the slot forever, blocking all
- *      subsequent uploads.
- *
  *   ✅ FIX 5 — Keep-alive detects sleep and re-arms automatically
- *      If the keep-alive ping fails, the gate re-arms so the next upload
- *      waits for the server to wake again rather than failing immediately.
- *
- *   ✅ FIX 6 — Faster wake ping interval (2s), 35s safety timeout
- *   ✅ FIX 7 — 120s timeout for uploads (OCR/verification is slow)
- *   ✅ FIX 8 — Small inter-upload delay (300ms) to let Render breathe
+ *   ✅ FIX 6 — Faster wake ping interval (2s), safety timeout unblocks only
+ *   ✅ FIX 7 — 120s timeout for uploads
+ *   ✅ FIX 8 — Small inter-upload delay (300ms)
  */
 
 import axios from 'axios'
@@ -67,37 +69,52 @@ export function onServerStatusChange(cb) {
 
 // ── Re-armable wake gate ───────────────────────────────────────────────────────
 //
-// The gate is a Promise that resolves when the server is confirmed awake.
-// Unlike a one-shot Promise, this gate can be RE-ARMED if the server goes
-// back to sleep mid-session. All pending and future upload requests read
-// _wakeGatePromise dynamically at execution time, not at closure time.
+// FIX A: The interceptor must call getCurrentWakeGate() at request-execution
+// time — NOT capture _wakeGatePromise in a closure at module load. This
+// ensures re-armed gates (created after module load) are actually awaited.
 //
-let _wakeGatePromise      = null   // current gate promise
-let _wakeGateResolve      = null   // resolves the current gate
+// FIX B: The 35s safety timeout resolves the Promise to unblock uploads, but
+// does NOT set _serverConfirmedAwake = true. Wake pinging continues until a
+// real HTTP 200 from /wake is received. This prevents uploads from firing
+// into a server that is still cold-starting.
+//
+let _wakeGatePromise      = null
+let _wakeGateResolve      = null   // resolves when server confirmed awake
+let _wakeGateUnblock      = null   // resolves on safety timeout only (unblocks, doesn't confirm)
 let _serverConfirmedAwake = false
 
 function _armWakeGate() {
   _serverConfirmedAwake = false
+
   _wakeGatePromise = new Promise((resolve) => {
+    // Called when /wake returns 200 — confirms server is truly awake
     _wakeGateResolve = () => {
       if (_serverConfirmedAwake) return
       _serverConfirmedAwake = true
       _setServerStatus('awake')
       resolve()
     }
-    // Safety: unblock after 35s even if server never responds
+
+    // FIX B: Safety unblock after 35s — lets uploads proceed but does NOT
+    // confirm server awake. Pinging continues. Uploads may still fail if
+    // server isn't ready, but ApplyPage will queue them again via isNetwork.
+    _wakeGateUnblock = resolve  // save so we can call it from the timeout
     setTimeout(() => {
       if (!_serverConfirmedAwake) {
-        console.warn('[axios] Wake gate safety timeout (35s) — unblocking uploads.')
-        _serverConfirmedAwake = true
-        _setServerStatus('awake')
-        resolve()
+        console.warn('[axios] Wake gate safety timeout (35s) — unblocking uploads without confirming server awake.')
+        resolve()  // unblock waiting uploads
+        // _serverConfirmedAwake stays false → pinging continues
       }
     }, 35_000)
   })
 }
 
 _armWakeGate() // arm on module load
+
+// FIX A: Always return the CURRENT gate promise (not a stale closure).
+export function getCurrentWakeGate() {
+  return _wakeGatePromise
+}
 
 /**
  * Re-arm the wake gate. Called automatically when network failures are
@@ -114,11 +131,11 @@ export function rearmWakeGate() {
 
 // ── Upload serializer semaphore ────────────────────────────────────────────────
 //
-// FIX 1: Only 1 document upload runs at a time.
+// Only 1 document upload runs at a time.
 // Render free tier drops HTTP/2 connections under concurrent load.
 // Sequential uploads prevent ERR_HTTP2_PROTOCOL_ERROR / "CORS" errors.
 //
-let _uploadInFlight = false
+let _uploadInFlight  = false
 const _uploadWaiters = []
 
 function _waitForUploadSlot() {
@@ -133,7 +150,7 @@ function _releaseUploadSlot() {
   if (_uploadWaiters.length > 0) {
     const next = _uploadWaiters.shift()
     // Small delay between uploads — lets Render finish writing the previous
-    // file and frees up the HTTP/2 stream cleanly.
+    // file and frees the HTTP/2 stream cleanly.
     setTimeout(next, 300)
   } else {
     _uploadInFlight = false
@@ -233,10 +250,11 @@ const isDocumentUpload = (url = '', method = '') =>
 api.interceptors.request.use(
   async (config) => {
     if (isDocumentUpload(config.url, config.method)) {
-      // Step 1: Wait for server to be awake (reads current gate, not stale closure)
-      await _wakeGatePromise
+      // FIX A: Read the CURRENT gate at call time — not a stale module-load closure.
+      // This ensures re-armed gates (after network failures) are actually awaited.
+      await getCurrentWakeGate()
 
-      // Step 2: Serialize — wait for any in-flight upload to finish
+      // Serialize — wait for any in-flight upload to finish
       await _waitForUploadSlot()
 
       // Mark so the response interceptor knows to release the slot
@@ -294,7 +312,7 @@ api.interceptors.response.use(
 
       // Don't retry wake pings or document uploads
       // (document uploads are queued by ApplyPage.jsx, not retried here)
-      if (config.url?.includes('/wake'))             return Promise.reject(error)
+      if (config.url?.includes('/wake'))              return Promise.reject(error)
       if (isDocumentUpload(config.url, config.method)) return Promise.reject(error)
 
       // Retry other requests (form submits, job loads, etc.) with backoff

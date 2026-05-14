@@ -1,32 +1,38 @@
 /**
- * ApplyPage.jsx — FULLY FIXED
+ * ApplyPage.jsx — FULLY FIXED v2
  *
- * FIXES IN THIS VERSION:
+ * NEW FIXES IN THIS VERSION:
  *
- *   ✅ FIX 1 — isDuplicate 400 treated as SUCCESS (not error)
- *      When the backend returns "already been uploaded", it means the upload
- *      actually succeeded on a previous attempt but the response was dropped
- *      (Render connection died after saving the file but before responding).
- *      We now fetch the existing doc ID and show it as confirmed ✓ instead
- *      of showing an error and asking the user to retry.
+ *   ✅ FIX 3 — Queue retry guards applicationIdRef before firing
+ *      Previously, if the server woke up quickly and the onServerStatusChange
+ *      callback fired before handleCreateDraft had run, retries would call
+ *      handleUpload with applicationIdRef.current === null, silently doing
+ *      nothing (the upload was swallowed). Now each staggered retry checks
+ *      applicationIdRef.current and re-queues itself with a short delay if
+ *      the ID isn't ready yet, with a maximum wait of 30s to avoid loops.
  *
+ *   ✅ FIX 4 — handleUpload closure is never stale in onServerStatusChange
+ *      useCallback + missing-from-deps-array caused the onServerStatusChange
+ *      effect to capture the initial (empty) handleUpload closure forever.
+ *      Adding it to deps caused an infinite loop (effect re-registers on every
+ *      render). Fixed by storing handleUpload in a ref (handleUploadRef) that
+ *      is updated on every render, and calling handleUploadRef.current() in
+ *      the effect — so the effect never needs to re-register and always calls
+ *      the latest version of the function.
+ *
+ *   ✅ FIX 5 — Existing docs restored on mount / step-2 entry
+ *      If the user refreshes mid-upload (or navigates back), already-uploaded
+ *      docs showed as idle. On entering step 2 (and whenever applicationId
+ *      first becomes available), we now fetch GET /applications/:id/documents
+ *      and rehydrate docStatus + uploadedDocIds for any docs already on the
+ *      server, so the user sees the correct ✓ state and doesn't re-upload.
+ *
+ * Previously shipped fixes (retained):
+ *   ✅ FIX 1 — isDuplicate 400 treated as SUCCESS
  *   ✅ FIX 2 — Network errors always queue (never show as error)
- *      Network failures are silently queued with a "waiting for server" UI.
- *      The queue auto-retries when the server wakes (via onServerStatusChange).
- *      No misleading "Connection error" shown — users see "Queued" instead.
- *
- *   ✅ FIX 3 — Queue retries are staggered (1.2s apart)
- *      Prevents re-flooding Render when the server wakes and all queued
- *      uploads fire at once. Works with the axios serializer for extra safety.
- *
- *   ✅ FIX 4 — uploadingRef clears before queue check
- *      Previously, the retry path could be blocked by a stale uploadingRef
- *      entry from the failed attempt.
- *
- *   ✅ FIX 5 — handleUpload uses applicationIdRef throughout
- *      Closure over applicationId state caused retries to fire with null ID.
- *      All internal references use applicationIdRef.current.
- *
+ *   ✅ FIX 3 (original) — Queue retries staggered 1.2s apart
+ *   ✅ FIX 4 (original) — uploadingRef clears before queue check
+ *   ✅ FIX 5 (original) — handleUpload uses applicationIdRef throughout
  *   ✅ FIX 6 — Cancel clears retry queue AND resets to idle
  *   ✅ FIX 7 — Clearer ID rejection tip box
  *   ✅ FIX 8 — WakeBanner shows queue count accurately
@@ -37,7 +43,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
 import {
   Upload, CheckCircle, XCircle, AlertCircle,
-  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, WifiOff, RefreshCw,
+  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, RefreshCw,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
@@ -105,10 +111,10 @@ function extractErrorDetail(err) {
     return { message: 'Could not reach the server.', isNetwork: true }
   }
   const data = err.response?.data
-  if (!data)                          return { message: `Server error (${err.response.status})`, isNetwork: false }
+  if (!data)                           return { message: `Server error (${err.response.status})`, isNetwork: false }
   if (typeof data.detail === 'string') return { message: data.detail, isNetwork: false }
-  if (Array.isArray(data.detail))     return { message: data.detail.map(e => e.msg || JSON.stringify(e)).join(' · '), isNetwork: false }
-  if (typeof data === 'string')       return { message: data, isNetwork: false }
+  if (Array.isArray(data.detail))      return { message: data.detail.map(e => e.msg || JSON.stringify(e)).join(' · '), isNetwork: false }
+  if (typeof data === 'string')        return { message: data, isNetwork: false }
   return { message: 'Upload failed. Please try again.', isNetwork: false }
 }
 
@@ -221,11 +227,16 @@ export default function ApplyPage() {
   const [queuedCount,   setQueuedCount]   = useState(0)
 
   // Always-current refs
-  const applicationIdRef = useRef(null)
-  const submittedRef     = useRef(false)
-  const uploadingRef     = useRef(new Set())     // prevents concurrent same-type uploads
-  const uploadedDocIds   = useRef({})            // { [docType]: serverId }
-  const retryQueueRef    = useRef({})            // { [docType]: File } — queued for retry
+  const applicationIdRef  = useRef(null)
+  const submittedRef      = useRef(false)
+  const uploadingRef      = useRef(new Set())   // prevents concurrent same-type uploads
+  const uploadedDocIds    = useRef({})          // { [docType]: serverId }
+  const retryQueueRef     = useRef({})          // { [docType]: File } — queued for retry
+
+  // FIX 4: Store the latest handleUpload in a ref so the onServerStatusChange
+  // effect can always call the current version without ever needing to re-register
+  // (which would cause an infinite loop if handleUpload were in the deps array).
+  const handleUploadRef = useRef(null)
 
   useEffect(() => { applicationIdRef.current = applicationId }, [applicationId])
   useEffect(() => { submittedRef.current     = submitted     }, [submitted])
@@ -246,20 +257,37 @@ export default function ApplyPage() {
         // Stagger retries — don't flood the server
         keys.forEach(async (docType, idx) => {
           await sleep(idx * 1200)   // 1.2s between each queued retry
+
           const file = queued[docType]
           // Check it's still in the queue (user may have cancelled)
-          if (file && retryQueueRef.current[docType] === file) {
-            delete retryQueueRef.current[docType]
-            syncQueuedCount()
-            // Clear the uploading lock from the failed attempt
-            uploadingRef.current.delete(docType)
-            handleUpload(docType, file)
+          if (!file || retryQueueRef.current[docType] !== file) return
+
+          // FIX 3: Guard against applicationIdRef not being set yet.
+          // If the server woke before the user completed step 1, applicationId
+          // will still be null. Wait up to 30s (checking every 500ms) for it
+          // to become available, then give up gracefully.
+          let waited = 0
+          while (!applicationIdRef.current && waited < 30_000) {
+            await sleep(500)
+            waited += 500
           }
+          if (!applicationIdRef.current) {
+            console.warn(`[ApplyPage] Retry for ${docType} aborted — applicationId never became available.`)
+            return
+          }
+
+          delete retryQueueRef.current[docType]
+          syncQueuedCount()
+          // Clear the uploading lock from the failed attempt (FIX 4 original)
+          uploadingRef.current.delete(docType)
+
+          // FIX 4: Call via ref so we always use the latest closure of handleUpload
+          handleUploadRef.current?.(docType, file)
         })
       }
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, []) // deliberately empty — effect must not re-register; uses refs for freshness
 
   const [form, setForm] = useState({
     gender: '', education_level: '', field_of_study: '', graduation_year: '',
@@ -277,6 +305,48 @@ export default function ApplyPage() {
       .catch(() => toast.error('Job not found'))
       .finally(() => setLoadingJob(false))
   }, [jobId])
+
+  // ── FIX 5: Restore already-uploaded docs when applicationId is available ──
+  // This handles the case where the user refreshes mid-upload, navigates back,
+  // or where a previous session's draft is being resumed. Any docs already
+  // saved on the server are shown as ✓ rather than idle.
+  useEffect(() => {
+    if (!applicationId) return
+
+    api.get(`/applications/${applicationId}/documents`)
+      .then(({ data }) => {
+        const docs = data.documents || []
+        if (docs.length === 0) return
+
+        docs.forEach(doc => {
+          if (!doc.doc_type) return
+          // Cache the server-side ID for future re-uploads / deletes
+          uploadedDocIds.current[doc.doc_type] = doc.id
+
+          const msg        = doc.validation_message || '✓ Document already uploaded and accepted.'
+          const isAdvisory = _isAdvisory(msg)
+
+          setDocStatus(prev => {
+            // Only restore if currently idle — don't overwrite an active upload
+            if (prev[doc.doc_type]?.status !== 'idle') return prev
+            return {
+              ...prev,
+              [doc.doc_type]: {
+                status:     'success',
+                message:    msg,
+                fileName:   doc.original_name || doc.doc_type,
+                isAdvisory,
+                isNetwork:  false,
+              },
+            }
+          })
+        })
+      })
+      .catch(() => {
+        // Non-fatal — user will just need to re-upload if any were missed
+        console.warn('[ApplyPage] Could not restore existing documents.')
+      })
+  }, [applicationId])
 
   // ── Cleanup draft on unmount ───────────────────────────────────────────────
   useEffect(() => {
@@ -365,7 +435,6 @@ export default function ApplyPage() {
       }
 
       // ── Upload the new file ────────────────────────────────────────────────
-      // Note: axios.js serializes this — only 1 upload runs at a time.
       const formData = new FormData()
       formData.append('doc_type', docType)
       formData.append('file', file)
@@ -394,10 +463,6 @@ export default function ApplyPage() {
       const { message, isNetwork } = extractErrorDetail(err)
 
       // ── FIX 1: Duplicate 400 → treat as SUCCESS ────────────────────────────
-      // This means the upload succeeded on a previous attempt, but the
-      // HTTP response was dropped before the browser received it (Render
-      // connection died). The file IS saved on the server. Fetch its ID
-      // and show as confirmed rather than making the user retry.
       const isDuplicate = err.response?.status === 400 &&
         message?.toLowerCase().includes('already been uploaded')
 
@@ -407,7 +472,6 @@ export default function ApplyPage() {
           const existing = listData.documents?.find(d => d.doc_type === docType)
           if (existing?.id) {
             uploadedDocIds.current[docType] = existing.id
-            // Remove from retry queue
             delete retryQueueRef.current[docType]
             syncQueuedCount()
             setDocStatus(prev => ({
@@ -421,14 +485,12 @@ export default function ApplyPage() {
               },
             }))
             toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} confirmed ✓`)
-            return  // Don't fall through to error state
+            return
           }
         } catch { /* fall through to error */ }
       }
 
       // ── FIX 2: Network error → silently queue, never show as error ────────
-      // isNetwork is true when Render dropped the connection (shows as "CORS"
-      // in DevTools but is actually a network failure, not a real CORS error).
       if (isNetwork) {
         retryQueueRef.current[docType] = file
         syncQueuedCount()
@@ -442,7 +504,6 @@ export default function ApplyPage() {
             isNetwork:  true,
           },
         }))
-        // No toast — the WakeBanner covers it
         return
       }
 
@@ -463,6 +524,13 @@ export default function ApplyPage() {
       uploadingRef.current.delete(docType)
     }
   }, [syncQueuedCount])
+
+  // FIX 4: Keep the ref in sync with the latest handleUpload closure.
+  // The onServerStatusChange effect reads handleUploadRef.current at call time,
+  // so it always gets the version bound to the current syncQueuedCount etc.
+  useEffect(() => {
+    handleUploadRef.current = handleUpload
+  }, [handleUpload])
 
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
@@ -494,7 +562,6 @@ export default function ApplyPage() {
 
   // ── Delete successfully uploaded doc ──────────────────────────────────────
   const handleDeleteDoc = async (docType) => {
-    // Clear retry queue entry if any
     if (retryQueueRef.current[docType]) {
       delete retryQueueRef.current[docType]
       syncQueuedCount()
@@ -789,7 +856,7 @@ export default function ApplyPage() {
                               </div>
                             )}
 
-                            {/* ── Queued (network down, auto-retry pending) ── */}
+                            {/* ── Queued ── */}
                             {isQueued && (
                               <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#eff6ff', color: '#1e40af', border: '1px solid #93c5fd' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
