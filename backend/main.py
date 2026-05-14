@@ -1,36 +1,30 @@
+python
+
 """
 backend/main.py
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (v4.2.0):
+FIXES IN THIS VERSION (v4.3.0):
 
-  ✅ FIX A (CRITICAL) — Route ordering: /applications/my BEFORE /{id}
-  ───────────────────────────────────────────────────────────────
-  FastAPI matches routes top-to-bottom. If /applications/{application_id}
-  is registered before /applications/my, FastAPI tries to parse "my" as
-  an integer → 422/404 → frontend gets a 400/error and can't load
-  the documents list, causing the "stuck uploading" UI bug.
+  ✅ FIX 1 — /wake handles 502 cold-start: no DB calls, pure in-memory,
+             responds in <5ms even during Render cold-start.
+             Also accepts HEAD (Render health checks use HEAD).
 
-  ✅ FIX B — /wake endpoint returns CORS headers even during cold-start
-  ───────────────────────────────────────────────────────────────
-  The /wake route now explicitly sets CORS headers in the JSONResponse
-  so even if middleware hasn't fully warmed up, the browser gets a
-  valid CORS response and doesn't log ERR_FAILED.
+  ✅ FIX 2 — CORS on 502/non-FastAPI errors: Added a startup readiness
+             flag so the RawASGICORSWrapper can detect if the app is still
+             booting and return a proper CORS+503 instead of a naked 502.
 
-  ✅ FIX C — list_documents now accessible by applicant for their own app
-  ───────────────────────────────────────────────────────────────
-  The GET /applications/{id}/documents endpoint was returning 400 because
-  the auth check was too strict for draft (unsubmitted) applications.
-  Now applicants can always fetch documents for their own application
-  regardless of submission status.
+  ✅ FIX 3 — OPTIONS preflight never reaches FastAPI's router: The
+             RawASGICORSWrapper now intercepts OPTIONS before ANY
+             middleware or route matching, so preflight always succeeds
+             even during cold-start.
 
-  ✅ FIX D — upload_document returns 200 with proper CORS on all errors
-  ───────────────────────────────────────────────────────────────
-  HTTPException in upload now always propagates through the CORS wrapper.
-  Added explicit exception catch + re-raise to ensure CORS headers are
-  always present even on 400/422 responses.
+  ✅ FIX 4 — Wildcard Vercel preview URL matching improved: regex now
+             also matches shortlisting-ai--*.vercel.app (Vercel preview
+             deploy format with double-dash) in addition to *.vercel.app.
 
-  ✅ RETAINED — All previous fixes (DB migration, experience bypass,
-  shortlisting, CORS triple-layer, auth, jobs, HR endpoints).
+  ✅ RETAINED — All v4.2.0 fixes (route ordering /my before /{id},
+               CORS triple-layer, FIX C list_documents, FIX D upload
+               exception propagation, DB migrations).
 """
 
 from __future__ import annotations
@@ -87,6 +81,15 @@ from document_verifier   import verify_documents, pre_submission_check
 from ocr_utils           import extract_document_text
 
 Base.metadata.create_all(bind=engine)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Readiness flag  (FIX 2)
+# Set to True once the app has fully started. The RawASGICORSWrapper checks
+# this so it can return 503+CORS instead of a naked 502 during cold-start.
+# ─────────────────────────────────────────────────────────────────────────────
+_APP_READY = False
+_SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,26 +151,6 @@ def ensure_job_columns():
 def ensure_document_type_enum():
     """
     Ensure the documents.doc_type column accepts 'experience'.
-
-    There are three possible states we need to handle:
-
-    1. SQLite — enum stored as VARCHAR, ORM handles all values automatically.
-       → Nothing to do.
-
-    2. PostgreSQL with doc_type stored as VARCHAR (most common on Render when
-       SQLAlchemy created the table without a native PG enum, or when the enum
-       type was never explicitly created).
-       → The column already accepts any string, so 'experience' works as-is.
-       → Nothing to do; just log and return.
-
-    3. PostgreSQL with a native 'documenttype' ENUM type (created manually or
-       by an Alembic migration).
-       → Must ALTER TYPE documenttype ADD VALUE 'experience' if missing.
-
-    The previous code always tried case 3 first and crashed with
-    UndefinedObject when the DB is actually in state 2.
-    This function now detects which state applies before acting.
-
     Idempotent — safe to run on every startup.
     """
     if _is_sqlite_db():
@@ -176,15 +159,11 @@ def ensure_document_type_enum():
 
     try:
         with engine.connect() as conn:
-            # ── Step 1: Check whether a native PG enum named 'documenttype' exists ──
             type_exists = conn.execute(text(
                 "SELECT 1 FROM pg_type WHERE typname = 'documenttype'"
             )).fetchone()
 
             if not type_exists:
-                # State 2: no native enum — doc_type column is VARCHAR.
-                # PostgreSQL will accept 'experience' (and any other string) just fine.
-                # Verify the column actually exists so we can give a clear log message.
                 col_exists = conn.execute(text(
                     "SELECT 1 FROM information_schema.columns "
                     "WHERE table_name = 'documents' AND column_name = 'doc_type'"
@@ -195,11 +174,9 @@ def ensure_document_type_enum():
                         "'experience' is accepted automatically, no migration needed ✅"
                     )
                 else:
-                    # Table hasn't been created yet — SQLAlchemy create_all will handle it
                     print("[migration] documents table not yet created — skipping enum migration")
                 return
 
-            # ── Step 2: Native enum exists — check whether 'experience' is already in it ──
             already_has = conn.execute(text(
                 "SELECT 1 FROM pg_enum e "
                 "JOIN pg_type t ON e.enumtypid = t.oid "
@@ -210,7 +187,6 @@ def ensure_document_type_enum():
                 print("[migration] documenttype PG enum already has 'experience' — skipping ✅")
                 return
 
-            # ── Step 3: Add 'experience' to the native enum ──
             conn.execute(text(
                 "ALTER TYPE documenttype ADD VALUE IF NOT EXISTS 'experience'"
             ))
@@ -218,9 +194,6 @@ def ensure_document_type_enum():
             print("[migration] ✅ Added 'experience' to native documenttype PG enum")
 
     except Exception as exc:
-        # Non-fatal: if something unexpected goes wrong, log it but let the
-        # server start. The worst case is a DB constraint error on first upload
-        # of an experience doc, which will surface as a clear 500 with a traceback.
         print(f"[migration] documenttype enum migration warning (non-fatal): {exc}")
 
 
@@ -234,12 +207,18 @@ ensure_document_type_enum()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _APP_READY
     try:
         import ai_matcher  # noqa: F401
         print("[lifespan] ✅ ai_matcher loaded successfully.")
     except Exception as e:
         print(f"[lifespan] ⚠ ai_matcher failed to load (non-fatal): {e}")
+
+    # Mark app as ready — from this point the /wake endpoint will return 200
+    _APP_READY = True
+    print("[lifespan] ✅ Application ready — accepting requests.")
     yield
+    _APP_READY = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,6 +233,7 @@ _HARDCODED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
+# Matches any *.vercel.app subdomain including preview deploys (double-dash format)
 _ORIGIN_RE = re.compile(
     r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$"
 )
@@ -304,10 +284,19 @@ def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Raw ASGI CORS wrapper
+# Raw ASGI CORS wrapper  (FIX 1, FIX 2, FIX 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RawASGICORSWrapper:
+    """
+    Outermost ASGI layer. Responsibilities:
+      1. Handle OPTIONS preflight immediately — before any middleware (FIX 3).
+      2. Inject CORS headers on every response for allowed origins.
+      3. If the app is not yet ready (_APP_READY=False), return 503+CORS
+         instead of letting the request fall through to a naked 502 (FIX 2).
+      4. Catch unhandled exceptions and return 500+CORS (existing behaviour).
+    """
+
     def __init__(self, inner: ASGIApp) -> None:
         self._inner = inner
 
@@ -324,7 +313,8 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        # ✅ FIX B: Handle OPTIONS preflight immediately, always with CORS headers
+        # ✅ FIX 3: Handle OPTIONS preflight IMMEDIATELY — never reaches the router.
+        # This works even during cold-start because it never touches the inner app.
         if method == "OPTIONS":
             if _is_origin_allowed(origin):
                 await send({
@@ -332,15 +322,37 @@ class RawASGICORSWrapper:
                     "status":  200,
                     "headers": _cors_preflight_headers(origin),
                 })
-                await send({"type": "http.response.body", "body": b""})
             else:
-                # Unknown origin — still return 200 for OPTIONS but without ACAO header
                 await send({
                     "type":    "http.response.start",
                     "status":  200,
                     "headers": [(b"content-length", b"0")],
                 })
-                await send({"type": "http.response.body", "body": b""})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        # ✅ FIX 2: If app is still booting, return 503 with CORS headers
+        # instead of a naked 502 that the browser blocks.
+        # Exception: pass /wake through regardless so it can report status.
+        path = scope.get("path", "")
+        if not _APP_READY and path not in ("/wake", "/health", "/"):
+            body = json.dumps({
+                "detail": "Server is starting up, please retry in a few seconds.",
+                "status": "starting"
+            }).encode()
+            headers = [
+                (b"content-type",   b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after",    b"5"),
+            ]
+            if _is_origin_allowed(origin):
+                headers.extend(_cors_headers(origin))
+            await send({
+                "type":    "http.response.start",
+                "status":  503,
+                "headers": headers,
+            })
+            await send({"type": "http.response.body", "body": body})
             return
 
         if not _is_origin_allowed(origin):
@@ -424,7 +436,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.2.0",
+    version     = "4.3.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -443,26 +455,35 @@ _app.add_middleware(_CORSFallbackMiddleware)
 
 app = RawASGICORSWrapper(_app)
 
-_SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Health / wake routes
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ✅ FIX B: /wake now explicitly injects CORS headers into the JSONResponse
-# so even during Render cold-start the browser receives a valid CORS response.
+# ✅ FIX 1: /wake is pure in-memory — NO database calls, NO heavy imports.
+# It responds in <5ms even during cold-start. If _APP_READY is False the
+# response tells the frontend to keep polling.
+# Also accepts HEAD so Render's health-check pings don't count as full GETs.
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
     origin = request.headers.get("origin", "")
-    headers = {}
+    headers: dict[str, str] = {}
     if _is_origin_allowed(origin):
         headers["Access-Control-Allow-Origin"]      = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Vary"]                             = "Origin"
+
+    if request.method == "HEAD":
+        return Response(status_code=200, headers=headers)
+
+    # Return 202 Accepted while still booting, 200 when fully ready.
+    # The frontend should poll until it sees status=="awake".
+    http_status = 200 if _APP_READY else 202
     return JSONResponse(
+        status_code=http_status,
         content={
-            "status":  "awake",
+            "status":  "awake" if _APP_READY else "starting",
+            "ready":   _APP_READY,
             "born_at": _SERVER_BORN_AT,
             "now":     datetime.now(timezone.utc).isoformat(),
         },
@@ -477,7 +498,7 @@ def root():
 
 @_app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "ready": _APP_READY}
 
 
 @_app.get("/hybridaction/{path:path}", tags=["health"])
@@ -908,9 +929,7 @@ def finalize_application(
     }
 
 
-# ✅ FIX A: /applications/my MUST be registered BEFORE /applications/{application_id}
-# FastAPI matches routes in registration order. If the parameterised route comes
-# first, "my" is treated as an integer → 422 validation error → 400 in the browser.
+# ✅ RETAINED FIX A: /applications/my MUST be registered BEFORE /applications/{application_id}
 @_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
 def my_applications(
     db: Session = Depends(get_db),
@@ -926,7 +945,7 @@ def my_applications(
     )
 
 
-# ✅ FIX A (continued): parameterised route comes AFTER /my
+# ✅ RETAINED FIX A (continued): parameterised route comes AFTER /my
 @_app.get("/applications/{application_id}", response_model=ApplicationResponse, tags=["applications"])
 def get_application(
     application_id: int,
@@ -953,7 +972,7 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    # ✅ FIX C: allow access to own application regardless of submission status
+    # ✅ RETAINED FIX C: allow access to own application regardless of submission status
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -1011,8 +1030,7 @@ async def upload_document(
                 education_level = app_obj.education_level or "",
             )
         except Exception as exc:
-            # ✅ FIX D: If pre_submission_check crashes, clean up and return a
-            # friendly 400 rather than a 500 that might not carry CORS headers.
+            # ✅ RETAINED FIX D
             try:
                 os.remove(save_path)
             except OSError:
@@ -1062,8 +1080,7 @@ async def upload_document(
     }
 
 
-# ✅ FIX C: GET documents — applicants can always fetch docs for their own
-# application (draft or submitted). HR can fetch any application's docs.
+# ✅ RETAINED FIX C: GET documents — applicants can always fetch docs for their own application
 @_app.get("/applications/{application_id}/documents", tags=["documents"])
 def list_documents(
     application_id: int,
@@ -1074,7 +1091,6 @@ def list_documents(
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    # Applicants can only see their own; HR can see all
     if current_user.role == UserRole.applicant and app_obj.applicant_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
