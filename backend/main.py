@@ -148,30 +148,79 @@ def ensure_job_columns():
 def ensure_document_type_enum():
     """
     Ensure the documents.doc_type column accepts 'experience'.
-    PostgreSQL uses a native ENUM type — must be altered explicitly.
-    SQLite stores enums as VARCHAR so no migration needed.
+
+    There are three possible states we need to handle:
+
+    1. SQLite — enum stored as VARCHAR, ORM handles all values automatically.
+       → Nothing to do.
+
+    2. PostgreSQL with doc_type stored as VARCHAR (most common on Render when
+       SQLAlchemy created the table without a native PG enum, or when the enum
+       type was never explicitly created).
+       → The column already accepts any string, so 'experience' works as-is.
+       → Nothing to do; just log and return.
+
+    3. PostgreSQL with a native 'documenttype' ENUM type (created manually or
+       by an Alembic migration).
+       → Must ALTER TYPE documenttype ADD VALUE 'experience' if missing.
+
+    The previous code always tried case 3 first and crashed with
+    UndefinedObject when the DB is actually in state 2.
+    This function now detects which state applies before acting.
+
     Idempotent — safe to run on every startup.
     """
     if _is_sqlite_db():
+        print("[migration] SQLite detected — doc_type is VARCHAR, no enum migration needed")
         return
 
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(
+            # ── Step 1: Check whether a native PG enum named 'documenttype' exists ──
+            type_exists = conn.execute(text(
+                "SELECT 1 FROM pg_type WHERE typname = 'documenttype'"
+            )).fetchone()
+
+            if not type_exists:
+                # State 2: no native enum — doc_type column is VARCHAR.
+                # PostgreSQL will accept 'experience' (and any other string) just fine.
+                # Verify the column actually exists so we can give a clear log message.
+                col_exists = conn.execute(text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'documents' AND column_name = 'doc_type'"
+                )).fetchone()
+                if col_exists:
+                    print(
+                        "[migration] doc_type column is VARCHAR (no native PG enum) — "
+                        "'experience' is accepted automatically, no migration needed ✅"
+                    )
+                else:
+                    # Table hasn't been created yet — SQLAlchemy create_all will handle it
+                    print("[migration] documents table not yet created — skipping enum migration")
+                return
+
+            # ── Step 2: Native enum exists — check whether 'experience' is already in it ──
+            already_has = conn.execute(text(
                 "SELECT 1 FROM pg_enum e "
                 "JOIN pg_type t ON e.enumtypid = t.oid "
                 "WHERE t.typname = 'documenttype' AND e.enumlabel = 'experience'"
-            ))
-            if result.fetchone():
-                print("[migration] documenttype enum already has 'experience' — skipping")
+            )).fetchone()
+
+            if already_has:
+                print("[migration] documenttype PG enum already has 'experience' — skipping ✅")
                 return
 
+            # ── Step 3: Add 'experience' to the native enum ──
             conn.execute(text(
                 "ALTER TYPE documenttype ADD VALUE IF NOT EXISTS 'experience'"
             ))
             conn.commit()
-            print("[migration] ✅ Added 'experience' to documenttype enum")
+            print("[migration] ✅ Added 'experience' to native documenttype PG enum")
+
     except Exception as exc:
+        # Non-fatal: if something unexpected goes wrong, log it but let the
+        # server start. The worst case is a DB constraint error on first upload
+        # of an experience doc, which will surface as a clear 500 with a traceback.
         print(f"[migration] documenttype enum migration warning (non-fatal): {exc}")
 
 
