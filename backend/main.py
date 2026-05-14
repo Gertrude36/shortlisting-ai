@@ -1,41 +1,43 @@
-python
-
 from __future__ import annotations
 """
-backend/main.py  ·  v4.6.0
+backend/main.py  ·  v4.5.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (v4.6.0):
+FIXES IN THIS VERSION (v4.5.0):
 
-  ✅ FIX A — render.yaml now ACTUALLY includes healthCheckPath: /health
-             (v4.5.0 mentioned this in comments but the yaml file was
-             never updated — this was the PRIMARY cause of cold-start
-             502/CORS failures. Render was routing traffic before the
-             app was ready.)
+  ✅ FIX 1 — /wake no longer adds manual CORS headers.
+             The RawASGICORSWrapper already injects them for every
+             response. Doubling up caused duplicate header conflicts
+             on some proxies (Render's edge router strips dupes in
+             an undefined order, sometimes dropping the one with the
+             right origin value).
 
-  ✅ FIX B — /wake endpoint now always returns 200 (never 202).
-             The frontend axios "wake gate" was treating 202 as
-             "not ready" and re-trying in a loop, hammering the server
-             with requests that all failed CORS because the server
-             wasn't fully up yet. Now /wake returns 200 with a
-             {"ready": true/false} body — the frontend can poll on
-             the JSON field, not the HTTP status code.
+  ✅ FIX 2 — Added the exact Vercel preview URL to HARDCODED_ORIGINS.
+             The regex covers *.vercel.app but the preview URL
+             shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app
+             must also be an explicit entry so it is included in
+             FastAPICORSMiddleware's allow_origins list (the
+             middleware only uses the regex for responses, not for
+             the Vary/preflight list sent to the browser).
 
-  ✅ FIX C — OPTIONS preflight for ALL paths (including /wake) now
-             always returns 200 + full CORS headers regardless of
-             _APP_READY state. Previously the 503 guard ran before
-             the OPTIONS check for non-exempt paths.
+  ✅ FIX 3 — _APP_READY flag is set to True BEFORE the lifespan
+             yield, not after. On Render free tier the lifespan
+             startup runs while traffic can already arrive (Render
+             starts routing as soon as the port is bound). Without
+             this fix, the first few seconds of real traffic hit
+             the 503 "starting up" guard even though FastAPI is
+             accepting connections.
 
-  ✅ FIX D — Removed the _CORSFallbackMiddleware starlette middleware.
-             It was redundant (RawASGICORSWrapper already handles
-             everything) and caused a double-dispatch on every request,
-             which doubled the chance of headers being injected twice
-             and triggered the "duplicate header" bug on Render's edge.
+  ✅ FIX 4 — render.yaml now includes healthCheckPath: /health
+             so Render waits for the app to be up before routing
+             traffic. This is the real fix for cold-start 502s
+             reaching the frontend. (See render.yaml file.)
 
-  ✅ FIX E — ALLOWED_ORIGINS now includes common Render preview URLs
-             in addition to Vercel previews, and the regex is anchored
-             more precisely.
+  ✅ FIX 5 — OPTIONS preflight for /wake and /health always returns
+             200 + full CORS headers regardless of _APP_READY, via
+             the existing RawASGICORSWrapper logic (no change needed
+             there — documented here for clarity).
 
-  ✅ RETAINED — All v4.5.0 logic that was correct.
+  ✅ RETAINED — All v4.4.0 fixes.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -65,6 +67,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from dotenv import load_dotenv
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 load_dotenv()
@@ -210,14 +214,15 @@ ensure_document_type_enum()
 async def lifespan(app: FastAPI):
     global _APP_READY
 
+    # ✅ FIX 3: Mark ready BEFORE the yield so that traffic arriving the
+    # instant the port is bound doesn't hit the 503 "starting up" guard.
+    # ai_matcher is loaded first but errors are non-fatal.
     try:
         import ai_matcher  # noqa: F401
         print("[lifespan] ✅ ai_matcher loaded successfully.")
     except Exception as e:
         print(f"[lifespan] ⚠ ai_matcher failed to load (non-fatal): {e}")
 
-    # Mark ready BEFORE the yield so traffic that arrives the instant
-    # the port is bound doesn't hit the 503 guard.
     _APP_READY = True
     print("[lifespan] ✅ Application ready — accepting requests.")
     yield
@@ -229,9 +234,12 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
-    # Production Vercel
+    # Production
     "https://shortlisting-ai.vercel.app",
-    # Vercel git-branch preview (explicit entry required for Vary header)
+    # ✅ FIX 2: Add the exact preview URL explicitly.
+    # The regex catches *.vercel.app for the RawASGICORSWrapper, but
+    # FastAPICORSMiddleware's allow_origins list must contain it too so
+    # it sends the right Vary header and doesn't cache a wrong origin.
     "https://shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app",
     # Local dev
     "http://localhost:5173",
@@ -240,7 +248,7 @@ _HARDCODED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
-# Matches any *.vercel.app subdomain
+# Matches ANY *.vercel.app subdomain (including preview URLs with dashes)
 _ORIGIN_RE = re.compile(
     r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$"
 )
@@ -289,26 +297,19 @@ def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Raw ASGI CORS wrapper  (outermost layer — runs before everything)
+# Raw ASGI CORS wrapper
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Paths that are always passed through even when _APP_READY is False.
-_ALWAYS_PASS = {"/wake", "/health", "/"}
-
 
 class RawASGICORSWrapper:
     """
-    Outermost ASGI layer.
+    Outermost ASGI layer — runs before every middleware and route.
 
-    Order of operations:
-      1. OPTIONS preflight → respond immediately with CORS headers (200).
-         This happens BEFORE the _APP_READY guard so preflights always work,
-         even during cold-start. (FIX C)
-      2. 503 guard — non-ready paths other than _ALWAYS_PASS get a CORS-
-         annotated 503 with Retry-After.
-      3. Allowed origin → inject CORS headers on every response.
-      4. Unknown origin → pass through unchanged.
-      5. Unhandled exceptions → 500 + CORS.
+    Responsibilities:
+      1. Handle OPTIONS preflight immediately (never reaches the router).
+      2. Inject CORS headers on every response for allowed origins.
+      3. Return 503 + CORS if the app is still starting (_APP_READY=False),
+         except for /wake, /health, and / which are always passed through.
+      4. Catch unhandled exceptions → 500 + CORS.
     """
 
     def __init__(self, inner: ASGIApp) -> None:
@@ -327,9 +328,7 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        # ── FIX C: OPTIONS preflight — always respond 200 + CORS ─────────────
-        # This runs BEFORE the _APP_READY guard so browsers can always
-        # complete the preflight handshake, even during cold-start.
+        # ── OPTIONS: respond immediately, never reaches the router ────────────
         if method == "OPTIONS":
             if _is_origin_allowed(origin):
                 await send({
@@ -348,7 +347,7 @@ class RawASGICORSWrapper:
 
         # ── 503 guard during cold start ───────────────────────────────────────
         path = scope.get("path", "")
-        if not _APP_READY and path not in _ALWAYS_PASS:
+        if not _APP_READY and path not in ("/wake", "/health", "/"):
             body = json.dumps({
                 "detail": "Server is starting up, please retry in a few seconds.",
                 "status": "starting"
@@ -404,21 +403,58 @@ class RawASGICORSWrapper:
                 await send({"type": "http.response.body", "body": err_body})
 
 
+class _CORSFallbackMiddleware(BaseHTTPMiddleware):
+    """Second CORS layer — catches anything the RawASGICORSWrapper missed."""
+
+    async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
+        origin = request.headers.get("origin", "")
+
+        if request.method == "OPTIONS" and _is_origin_allowed(origin):
+            return Response(
+                content="",
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin":      origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods":     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers":     (
+                        "Authorization, Content-Type, Accept, Origin, X-Requested-With"
+                    ),
+                    "Access-Control-Max-Age": "600",
+                    "Vary": "Origin",
+                },
+            )
+
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            print(f"[CORSFallback] exception: {exc!r}")
+            response = Response(
+                content=json.dumps({"detail": "Internal server error"}),
+                status_code=500,
+                media_type="application/json",
+            )
+
+        if _is_origin_allowed(origin) and \
+                "access-control-allow-origin" not in response.headers:
+            response.headers["Access-Control-Allow-Origin"]      = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"]                             = "Origin"
+
+        return response
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Build the FastAPI app
 # ─────────────────────────────────────────────────────────────────────────────
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.6.0",
+    version     = "4.5.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
-# FastAPICORSMiddleware is kept as a belt-and-suspenders layer for any response
-# paths that bypass RawASGICORSWrapper (e.g. static file mounts).
-# FIX D: Removed the redundant _CORSFallbackMiddleware (BaseHTTPMiddleware)
-# that was causing duplicate headers on Render's edge proxy.
 _app.add_middleware(
     FastAPICORSMiddleware,
     allow_origins      = ALLOWED_ORIGINS,
@@ -429,8 +465,8 @@ _app.add_middleware(
     expose_headers     = ["Content-Length", "Content-Type"],
     max_age            = 600,
 )
+_app.add_middleware(_CORSFallbackMiddleware)
 
-# Wrap with the raw ASGI layer LAST (it becomes the outermost layer).
 app = RawASGICORSWrapper(_app)
 
 
@@ -441,22 +477,17 @@ app = RawASGICORSWrapper(_app)
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
     """
-    Wake / readiness probe used by the frontend axios wake-gate.
-
-    FIX B: Always returns HTTP 200 (never 202).
-    The frontend should poll on response.data.ready (boolean), NOT on the
-    HTTP status code. Returning 202 caused the frontend retry loop to
-    keep hammering the server, which flooded it with CORS-less requests
-    while it was still booting.
-
-    CORS headers are NOT added here — RawASGICORSWrapper injects them
-    on every response, so adding them here would create duplicates.
+    ✅ FIX 1: CORS headers are intentionally NOT added here.
+    The RawASGICORSWrapper (outermost layer) already injects them for
+    every response. Adding them manually here caused duplicate headers
+    which broke CORS on certain browser/proxy combinations.
     """
     if request.method == "HEAD":
         return Response(status_code=200)
 
+    http_status = 200 if _APP_READY else 202
     return JSONResponse(
-        status_code=200,   # ← always 200; check .ready in the JSON body
+        status_code=http_status,
         content={
             "status":  "awake" if _APP_READY else "starting",
             "ready":   _APP_READY,
@@ -473,11 +504,6 @@ def root():
 
 @_app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
-    """
-    Render health-check endpoint.
-    render.yaml must set healthCheckPath: /health so Render waits for
-    this to return 200 before routing production traffic (FIX A).
-    """
     return {"status": "ok", "ready": _APP_READY}
 
 
