@@ -1,3 +1,34 @@
+"""
+backend/main.py
+────────────────────────────────────────────────────────────────
+FIXES IN THIS VERSION:
+
+  ✅ FIX 1 (CRITICAL) — DB migration for 'experience' DocumentType
+  ───────────────────────────────────────────────────────────────
+  Added ensure_document_type_column() migration that alters the
+  documents.doc_type column on PostgreSQL to include 'experience'
+  in the enum. SQLite handles this automatically via the ORM.
+  Without this, uploading an experience document throws a DB
+  constraint error → 500 → "Connection error" in the frontend.
+
+  ✅ FIX 2 — experience doc bypass is now in pre_submission_check
+  ───────────────────────────────────────────────────────────────
+  The upload_document endpoint no longer needs a special-case
+  'experience' branch — pre_submission_check itself returns
+  immediately for experience docs. The special branch is kept
+  as a belt-and-suspenders fallback.
+
+  ✅ FIX 3 — Shortlisting skips experience docs from verification
+  ───────────────────────────────────────────────────────────────
+  VERIFIABLE_DOC_TYPES now explicitly excludes 'experience' so
+  experience documents are not passed to verify_documents().
+  They are still OCR-extracted and passed to predict() as doc_texts
+  so the ML model can use them for scoring.
+
+  ✅ RETAINED — All CORS, auth, job, application, HR, shortlisting
+  endpoints from the previous version.
+"""
+
 from __future__ import annotations
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -56,7 +87,7 @@ Base.metadata.create_all(bind=engine)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# One-time database migration
+# Database migrations
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_sqlite_db() -> bool:
@@ -111,7 +142,44 @@ def ensure_job_columns():
             print(f"[ensure_job_columns] Backfill warning (non-fatal): {exc}")
 
 
+def ensure_document_type_enum():
+    """
+    ✅ FIX 1: Ensure the documents.doc_type column accepts 'experience'.
+
+    PostgreSQL uses a native ENUM type. When a new value is added to
+    the Python enum, the DB type must be updated with ALTER TYPE.
+    SQLite stores enums as VARCHAR so no migration is needed there.
+
+    This is idempotent — safe to run on every startup.
+    """
+    if _is_sqlite_db():
+        # SQLite stores enum as VARCHAR — ORM handles it automatically
+        return
+
+    try:
+        with engine.connect() as conn:
+            # Check if 'experience' already exists in the pg enum
+            result = conn.execute(text(
+                "SELECT 1 FROM pg_enum e "
+                "JOIN pg_type t ON e.enumtypid = t.oid "
+                "WHERE t.typname = 'documenttype' AND e.enumlabel = 'experience'"
+            ))
+            if result.fetchone():
+                print("[migration] documenttype enum already has 'experience' — skipping")
+                return
+
+            # Add 'experience' to the PostgreSQL enum
+            conn.execute(text(
+                "ALTER TYPE documenttype ADD VALUE IF NOT EXISTS 'experience'"
+            ))
+            conn.commit()
+            print("[migration] ✅ Added 'experience' to documenttype enum")
+    except Exception as exc:
+        print(f"[migration] documenttype enum migration warning (non-fatal): {exc}")
+
+
 ensure_job_columns()
+ensure_document_type_enum()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,12 +234,10 @@ def _is_origin_allowed(origin: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Raw ASGI CORS wrapper — outermost layer, below uvicorn
+# Raw ASGI CORS wrapper
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RawASGICORSWrapper:
-    """Outermost ASGI wrapper: stamps CORS headers on every response."""
-
     def __init__(self, inner: ASGIApp) -> None:
         self._inner = inner
 
@@ -250,8 +316,6 @@ class RawASGICORSWrapper:
                 await send({"type": "http.response.body", "body": err_body})
 
 
-# ── Inner Starlette fallback (belt-and-suspenders inside the app) ─────────────
-
 class _CORSFallbackMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
         origin = request.headers.get("origin", "")
@@ -297,7 +361,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.0.0",
+    version     = "4.1.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -438,7 +502,7 @@ _BLOCKING_SIGNALS = [
     "identity mismatch", "type mismatch", "field mismatch",
     "education level mismatch", "document rejected",
     "possible use of another person", "wrong document",
-    "✗ type mismatch", "declared=", "id document rejected", "❌",
+    "✗ type mismatch", "declared=", "id document rejected",
 ]
 
 _ADVISORY_SIGNALS = [
@@ -852,6 +916,8 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
+    # ✅ FIX 2: Experience docs bypass all content checks in pre_submission_check itself.
+    # Belt-and-suspenders fast path kept here for clarity and to avoid any OCR timeout.
     if doc_type == "experience":
         check_passed  = True
         check_message = (
@@ -1133,6 +1199,9 @@ def _run_verification_and_prediction(
     doc_paths = [d.file_path        for d in docs]
     doc_types = [_doc_type_value(d) for d in docs]
 
+    # ✅ FIX 3: Exclude 'experience' from document verification.
+    # Experience docs are not structurally verifiable (no standard format),
+    # but their text is still passed to predict() for ML scoring.
     VERIFIABLE_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
     verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
     verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
@@ -1147,6 +1216,7 @@ def _run_verification_and_prediction(
 
     identity_match = "Identity: ✓" in doc_detail
 
+    # Extract text from ALL docs (including experience) for ML scoring
     doc_texts: dict[str, str] = {}
     for d in docs:
         if os.path.exists(d.file_path):
@@ -1305,7 +1375,7 @@ def reshortlist_all_for_job(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PORT binding — uvicorn receives `app` (the RawASGICORSWrapper)
+# Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

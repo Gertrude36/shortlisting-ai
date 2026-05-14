@@ -1,39 +1,32 @@
 """
 backend/document_verifier.py
 ────────────────────────────────────────────────────────────────
-WHAT WAS FIXED IN THIS VERSION:
+FIXES IN THIS VERSION (on top of the AI-powered version):
 
-  ✅ FIX 1 (CRITICAL) — Field-of-study check now uses AI
+  ✅ FIX 3 (CRITICAL) — Lowered ID card hard-reject threshold
   ───────────────────────────────────────────────────────────────
-  Previously: verify_field_of_study() used keyword scanning with
-  a dictionary of hard-coded field→keywords mappings and chains
-  of if-conditions. It missed paraphrased fields and didn't
-  actually "read" the diploma.
+  Previously: hard_reject_below = 0.60 for id_card.
+  This caused legitimate ID cards to be rejected when:
+    - The OCR slightly mangled the name (e.g. "narame" vs "name")
+    - Kinyarwanda/French field labels in Rwanda IDs are mistaken
+      for name tokens, diluting the fuzzy match score.
+    - Name order differs between account and ID (e.g. surname first)
 
-  Now: Uses sentence-transformers AI (match_field_in_diploma)
-  which encodes the full diploma text and the declared field into
-  embedding space, then checks cosine similarity. No keywords
-  needed — the AI understands meaning, not just word overlap.
+  Now: hard_reject_below = 0.44 for id_card (matches the ~44% score
+  seen in real Rwanda ID OCR). advisory_below raised to 0.65 so
+  borderline matches are flagged for HR review rather than rejected.
 
-  Examples now handled correctly:
-    "Bachelor of Information Technology" diploma → "IT" declared  ✓
-    "Nursing" diploma  → "Computer Science" declared              ✗
-    "BSc Animal Health" diploma → "Veterinary Technology"         ✓ (related)
+  The previous 0.60 threshold was too aggressive for OCR-extracted
+  text from scanned government IDs where character accuracy is ~85%.
 
-  ✅ FIX 2 (CRITICAL) — Education level detection now uses AI
+  ✅ FIX 4 — Better error message for ID rejection
   ───────────────────────────────────────────────────────────────
-  Previously: verify_education_level_from_document() searched the
-  diploma text for a list of keyword strings (e.g. "bachelor of",
-  "bsc "). This failed on many real diplomas where the exact
-  keyword wasn't present but the meaning was clear.
+  Removed the "❌" emoji prefix that was duplicated in the frontend
+  display. Message now clearly explains the mismatch cause and
+  asks the user to ensure the name on their account matches their ID.
 
-  Now: Uses classify_education_level() which encodes the diploma
-  into embedding space and classifies it against template
-  descriptions of each level (PhD / Master's / Bachelor's /
-  Diploma). This is AI classification, not keyword scanning.
-
-  ✅ RETAINED — ID card Rwanda keyword fix, OCR handling, identity
-  verification, pre-submission checks, all previous fixes.
+  ✅ RETAINED — All previous fixes (AI field/education verification,
+  multi-language OCR, Rwanda keyword map, identity verification).
 """
 
 from __future__ import annotations
@@ -53,8 +46,7 @@ from ai_matcher import (
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Document type keyword maps (weighted) — still used for doc TYPE classification
-# Field/education verification is now done by AI (not keywords)
+# Document type keyword maps (weighted) — used for doc TYPE classification only
 # ─────────────────────────────────────────────────────────────────────────────
 
 DOC_TYPE_KEYWORDS: dict[str, dict[str, int]] = {
@@ -195,21 +187,51 @@ DOC_TYPE_KEYWORDS: dict[str, dict[str, int]] = {
         "verified":                             1,
         "instructor":                           1,
     },
+
+    "experience": {
+        "employment letter":                    5,
+        "reference letter":                     5,
+        "work certificate":                     5,
+        "to whom it may concern":               5,
+        "this is to confirm":                   5,
+        "this letter confirms":                 5,
+        "has been employed":                    5,
+        "was employed":                         5,
+        "worked at":                            3,
+        "position held":                        3,
+        "job title":                            3,
+        "employer":                             3,
+        "employee":                             3,
+        "employment period":                    3,
+        "date of employment":                   3,
+        "years of service":                     3,
+        "human resources":                      3,
+        "hr department":                        3,
+        "sincerely":                            1,
+        "regards":                              1,
+        "director":                             1,
+        "manager":                              1,
+        "supervisor":                           1,
+    },
 }
 
-REQUIRED_DOC_TYPES         = {"id_card", "cv", "diploma", "certificate"}
-MIN_CLASSIFICATION_SCORE   = 1
+REQUIRED_DOC_TYPES             = {"id_card", "cv", "diploma", "certificate"}
+MIN_CLASSIFICATION_SCORE       = 1
 CLASSIFICATION_TOLERANCE_RATIO = 0.60
-CLEAR_WINNER_THRESHOLD     = 9
+CLEAR_WINNER_THRESHOLD         = 9
 
+# ✅ FIX 3: Lowered id_card hard-reject threshold from 0.60 → 0.44
+# Rwanda OCR from scanned IDs often yields 44-58% fuzzy scores due to
+# bilingual text (French/Kinyarwanda) diluting English name token matching.
+# Setting hard reject at 0.44 matches the real-world observed minimum.
 IDENTITY_SCORE_THRESHOLDS = {
-    "id_card":     (0.60, 0.75),
+    "id_card":     (0.44, 0.65),   # (hard_reject_below, advisory_below)
     "cv":          (0.50, 0.72),
     "diploma":     (0.50, 0.72),
     "certificate": None,
+    "experience":  None,
 }
 
-# Education level ordinal lookup (used for AI result comparison)
 _EDU_LEVEL_ORDER: dict[str, int] = {
     "diploma":    1,
     "bachelor's": 2,
@@ -333,7 +355,7 @@ def _fuzzy_name_in_text(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Document type classification (keyword-based — appropriate for type detection)
+# Document type classification
 # ─────────────────────────────────────────────────────────────────────────────
 
 def classify_document(text: str, declared_type: str) -> tuple[bool, str, dict]:
@@ -376,23 +398,13 @@ def classify_document(text: str, declared_type: str) -> tuple[bool, str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1 — Field-of-study cross-check (now AI-powered)
+# Field-of-study cross-check (AI-powered)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_field_of_study(
     field_of_study: str,
     diploma_text: str,
 ) -> tuple[bool, str]:
-    """
-    Verify that the declared field of study is genuinely confirmed by the
-    diploma document.
-
-    ✅ FIX: Uses AI semantic similarity (sentence-transformers) instead of
-    keyword scanning. The AI encodes both the diploma text and the declared
-    field into embedding space, then measures cosine distance.
-
-    Falls back to substring matching when AI model is not installed.
-    """
     if not diploma_text.strip():
         return (
             True,
@@ -400,7 +412,6 @@ def verify_field_of_study(
             "(OCR tools not installed). Manual review recommended."
         )
 
-    # ── AI path (sentence-transformers) ──────────────────────────────────────
     if AI_AVAILABLE:
         matched, ai_score = match_field_in_diploma(field_of_study, diploma_text)
 
@@ -411,7 +422,6 @@ def verify_field_of_study(
                 f"(AI semantic similarity: {ai_score:.0%})."
             )
 
-        # Score between 0.35–0.50 → borderline, don't hard-fail
         if ai_score >= 0.35:
             return (
                 True,
@@ -428,14 +438,12 @@ def verify_field_of_study(
             f"Please upload the correct degree certificate."
         )
 
-    # ── Fallback: substring matching (when AI model not installed) ────────────
     norm_field = _normalize(field_of_study)
     norm_text  = diploma_text.lower()
 
     if norm_field in norm_text:
         return True, f"Field of study '{field_of_study}' confirmed in diploma (text match)."
 
-    # Check individual meaningful tokens
     field_tokens = [t for t in norm_field.split() if len(t) >= 4]
     text_words   = set(re.split(r"\W+", norm_text))
     for token in field_tokens:
@@ -461,23 +469,13 @@ def verify_field_of_study(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 2 — Education level cross-check (now AI-powered)
+# Education level cross-check (AI-powered)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_education_level_from_document(
     declared_level: str,
     diploma_text: str,
 ) -> tuple[bool, str]:
-    """
-    Verify that the declared education level is confirmed by the diploma.
-
-    ✅ FIX: Uses AI classification (classify_education_level) instead of
-    keyword scanning. The AI encodes the diploma text and classifies it
-    against template descriptions of PhD / Master's / Bachelor's / Diploma
-    using cosine similarity in embedding space.
-
-    Falls back to keyword detection when AI model is not installed.
-    """
     if not diploma_text.strip():
         return (
             True,
@@ -485,7 +483,6 @@ def verify_education_level_from_document(
             "Manual review recommended."
         )
 
-    # Normalise the declared level
     norm_decl      = _normalize(declared_level)
     canonical_decl = _EDU_LEVEL_ALIASES.get(norm_decl)
     if not canonical_decl:
@@ -503,7 +500,6 @@ def verify_education_level_from_document(
 
     declared_ord = _EDU_LEVEL_ORDER.get(canonical_decl, 0)
 
-    # ── AI path (sentence-transformers) ──────────────────────────────────────
     if AI_AVAILABLE:
         detected_level, confidence = classify_education_level(diploma_text)
 
@@ -518,13 +514,6 @@ def verify_education_level_from_document(
 
         detected_ord = _EDU_LEVEL_ORDER.get(detected_level, 0)
 
-        logger.debug(
-            "verify_education_level_from_document: declared=%s (ord=%d) "
-            "AI-detected=%s (ord=%d) confidence=%.3f",
-            canonical_decl, declared_ord, detected_level, detected_ord, confidence,
-        )
-
-        # Low confidence → don't hard-fail, defer to HR
         if confidence < 0.30:
             return (
                 True,
@@ -550,7 +539,7 @@ def verify_education_level_from_document(
                 f"of '{declared_level}', or correct your declared education level."
             )
 
-    # ── Fallback: keyword detection (when AI not installed) ───────────────────
+    # Fallback keyword detection
     EDUCATION_LEVEL_KEYWORDS: dict[str, list[str]] = {
         "phd": [
             "doctor of philosophy", "ph.d", "phd", "doctorate",
@@ -571,15 +560,15 @@ def verify_education_level_from_document(
         ],
     }
 
-    norm_text = diploma_text.lower()
-    detected_level: str | None = None
-    detected_keyword: str      = ""
+    norm_text      = diploma_text.lower()
+    detected_level = None
+    detected_kw    = ""
 
     for level in ("phd", "master's", "bachelor's", "diploma"):
         for kw in EDUCATION_LEVEL_KEYWORDS[level]:
             if kw in norm_text:
-                detected_level   = level
-                detected_keyword = kw.strip()
+                detected_level = level
+                detected_kw    = kw.strip()
                 break
         if detected_level:
             break
@@ -598,7 +587,7 @@ def verify_education_level_from_document(
         return (
             True,
             f"Education level confirmed: document indicates '{detected_level}' "
-            f"(keyword: '{detected_keyword}'), which satisfies the declared "
+            f"(keyword: '{detected_kw}'), which satisfies the declared "
             f"level of '{declared_level}'."
         )
     else:
@@ -606,7 +595,7 @@ def verify_education_level_from_document(
             False,
             f"EDUCATION LEVEL MISMATCH: You declared '{declared_level}' but the "
             f"uploaded document appears to be a '{detected_level}' "
-            f"(detected keyword: '{detected_keyword}'). "
+            f"(detected keyword: '{detected_kw}'). "
             f"Please upload the certificate that matches your declared qualification "
             f"of '{declared_level}', or correct your declared education level."
         )
@@ -661,7 +650,7 @@ def verify_identity(
         )
 
     if "id_card" in readable_docs and "id_card" not in name_found_in:
-        if per_doc_scores.get("id_card", 0) < 0.5:
+        if per_doc_scores.get("id_card", 0) < 0.44:
             return (
                 False,
                 f"Identity mismatch: name '{applicant_name}' not found in ID card "
@@ -695,6 +684,14 @@ def pre_submission_check(
     field_of_study: str  = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
+    # ✅ Experience documents skip all content checks — just accept them.
+    # They are only cross-checked during AI shortlisting.
+    if declared_type == "experience":
+        return True, (
+            "✓ Experience document accepted. It will be cross-checked "
+            "against your declared experience years during shortlisting."
+        )
+
     if not os.path.exists(file_path):
         return False, "Uploaded file could not be read from disk."
 
@@ -758,14 +755,15 @@ def pre_submission_check(
         if score < hard_reject_below:
             if declared_type == "id_card":
                 return False, (
-                    f"❌ ID document rejected: your name '{applicant_name}' "
+                    f"ID document rejected: your name '{applicant_name}' "
                     f"could not be found in this document (match score: {score:.0%}). "
                     "An ID card must belong to you. "
-                    "Please upload your own valid National ID or Passport."
+                    "Please ensure your account name matches the name on your National ID or Passport exactly, "
+                    "then upload your own valid ID document."
                 )
             else:
                 return False, (
-                    f"❌ Document rejected: your name '{applicant_name}' "
+                    f"Document rejected: your name '{applicant_name}' "
                     f"could not be verified in the uploaded '{declared_type}' "
                     f"(match score: {score:.0%}). "
                     "Please ensure you are uploading your own documents."
@@ -840,8 +838,10 @@ def verify_documents(
 
         doc_texts[declared_type] = text
 
-    uploaded_types = set(doc_texts.keys()) - {"unknown"}
-    missing_types  = list(REQUIRED_DOC_TYPES - uploaded_types)
+    # For shortlisting, only require id_card, cv, diploma
+    SHORTLIST_REQUIRED = {"id_card", "cv", "diploma"}
+    uploaded_types     = set(doc_texts.keys()) - {"unknown"}
+    missing_types      = list(SHORTLIST_REQUIRED - uploaded_types)
 
     field_ok     = True
     field_detail = ""
@@ -858,10 +858,13 @@ def verify_documents(
     identity_ok     = True
     identity_detail = "Identity check skipped (insufficient readable documents)."
 
-    readable_count = sum(1 for v in doc_texts.values() if v.strip())
+    # Only check identity on verifiable doc types (not experience)
+    verifiable_texts = {k: v for k, v in doc_texts.items() if k != "experience"}
+    readable_count   = sum(1 for v in verifiable_texts.values() if v.strip())
+
     if readable_count >= 2:
-        identity_ok, identity_detail = verify_identity(applicant_name, doc_texts)
-    elif len(doc_texts) >= 2:
+        identity_ok, identity_detail = verify_identity(applicant_name, verifiable_texts)
+    elif len(verifiable_texts) >= 2:
         identity_ok     = True
         identity_detail = (
             f"Identity: ✓ (advisory — OCR unavailable, "

@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
 import {
   Upload, CheckCircle, XCircle, AlertCircle,
-  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, WifiOff,
+  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, WifiOff, RefreshCw,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
@@ -94,7 +94,7 @@ function StepBar({ current }) {
 }
 
 // ── Server wake banner ────────────────────────────────────────────────────────
-function WakeBanner({ status }) {
+function WakeBanner({ status, queuedCount }) {
   const [dots, setDots] = useState('.')
   useEffect(() => {
     if (status === 'awake') return
@@ -102,7 +102,21 @@ function WakeBanner({ status }) {
     return () => clearInterval(t)
   }, [status])
 
-  if (status === 'awake') return null
+  if (status === 'awake' && queuedCount === 0) return null
+
+  if (status === 'awake' && queuedCount > 0) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 16px', marginBottom: 16,
+        background: '#eff6ff', border: '1px solid #93c5fd',
+        borderRadius: 8, fontSize: '.85rem', color: '#1e40af', fontWeight: 600,
+      }}>
+        <RefreshCw size={14} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+        Server is ready — retrying {queuedCount} queued upload{queuedCount > 1 ? 's' : ''}…
+      </div>
+    )
+  }
 
   return (
     <div style={{
@@ -112,7 +126,9 @@ function WakeBanner({ status }) {
       borderRadius: 8, fontSize: '.85rem', color: '#78350f', fontWeight: 600,
     }}>
       <Loader size={14} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />
-      Server is starting up — uploads will begin automatically when ready{dots}
+      Server is starting up{queuedCount > 0
+        ? ` — ${queuedCount} upload${queuedCount > 1 ? 's' : ''} queued and will retry automatically`
+        : ' — uploads will begin automatically when ready'}{dots}
     </div>
   )
 }
@@ -155,6 +171,9 @@ const makeDocState = () =>
     { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
   ]))
 
+// ── Retry delay with exponential backoff ──────────────────────────────────────
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
 // ─────────────────────────────────────────────────────────────────────────────
 export default function ApplyPage() {
   const { jobId } = useParams()
@@ -173,17 +192,44 @@ export default function ApplyPage() {
   const submittedRef     = useRef(false)
 
   // Track uploaded doc IDs locally so we never need a GET before DELETE.
-  // Map: docType -> serverId (number | null)
   const uploadedDocIds = useRef({})
 
   // Prevent concurrent uploads of the same doc type
   const uploadingRef = useRef(new Set())
 
+  // ── Retry queue: stores { docType, file } for network-failed uploads ──────
+  const retryQueueRef  = useRef({})   // { [docType]: File }
+  const [queuedCount, setQueuedCount] = useState(0)
+
+  const _syncQueuedCount = () =>
+    setQueuedCount(Object.keys(retryQueueRef.current).length)
+
   useEffect(() => { applicationIdRef.current = applicationId }, [applicationId])
   useEffect(() => { submittedRef.current     = submitted     }, [submitted])
 
-  // Subscribe to server status changes for the wake banner
-  useEffect(() => onServerStatusChange(setServerStatus), [])
+  // Subscribe to server status — auto-retry queued uploads when server wakes
+  useEffect(() => {
+    return onServerStatusChange(newStatus => {
+      setServerStatus(newStatus)
+      if (newStatus === 'awake') {
+        const queued = { ...retryQueueRef.current }
+        const keys   = Object.keys(queued)
+        if (keys.length > 0) {
+          keys.forEach(async (docType, idx) => {
+            // stagger retries so we don't flood the server
+            await sleep(idx * 800)
+            const file = queued[docType]
+            if (file && retryQueueRef.current[docType]) {
+              delete retryQueueRef.current[docType]
+              _syncQueuedCount()
+              handleUpload(docType, file)
+            }
+          })
+        }
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const [form, setForm] = useState({
     gender: '', education_level: '', field_of_study: '', graduation_year: '',
@@ -262,18 +308,8 @@ export default function ApplyPage() {
   }
 
   // ── Document upload ───────────────────────────────────────────────────────
-  /**
-   * KEY PERFORMANCE FIX:
-   * We track the server-side doc ID locally in uploadedDocIds.current.
-   * On re-upload:
-   *   - If we have a cached ID → DELETE by ID directly (no GET needed)
-   *   - If no cached ID → just upload (backend will 400 only if truly duplicate)
-   *
-   * This eliminates 1 full round-trip before every upload, which was the main
-   * source of slowness (especially on cold-started Render instances).
-   */
   const handleUpload = useCallback(async (docType, file) => {
-    if (!applicationId) { toast.error('Please complete your details first'); return }
+    if (!applicationIdRef.current) { toast.error('Please complete your details first'); return }
 
     // Prevent concurrent uploads of the same doc type
     if (uploadingRef.current.has(docType)) return
@@ -285,14 +321,13 @@ export default function ApplyPage() {
     }))
 
     try {
-      // ── Step 1: If we know the existing doc ID, delete it directly ────────
-      // No GET needed — we track IDs locally after each successful upload.
+      // ── Step 1: Delete existing doc if we know its ID ─────────────────────
       const existingId = uploadedDocIds.current[docType]
       if (existingId) {
         try {
-          await api.delete(`/applications/${applicationId}/documents/${existingId}`)
+          await api.delete(`/applications/${applicationIdRef.current}/documents/${existingId}`)
         } catch {
-          // If delete fails (doc already gone), continue — upload will succeed
+          // If delete fails (doc already gone), continue
         }
         delete uploadedDocIds.current[docType]
       }
@@ -302,10 +337,19 @@ export default function ApplyPage() {
       formData.append('doc_type', docType)
       formData.append('file', file)
 
-      const { data } = await api.post(`/applications/${applicationId}/documents`, formData)
+      const { data } = await api.post(
+        `/applications/${applicationIdRef.current}/documents`,
+        formData,
+      )
 
       // Cache the server-assigned doc ID for fast re-upload / delete later
       if (data.id) uploadedDocIds.current[docType] = data.id
+
+      // Remove from retry queue on success
+      if (retryQueueRef.current[docType]) {
+        delete retryQueueRef.current[docType]
+        _syncQueuedCount()
+      }
 
       const msg        = data.validation_message || 'Document accepted ✓'
       const isAdvisory = _isAdvisory(msg)
@@ -319,18 +363,37 @@ export default function ApplyPage() {
     } catch (err) {
       const { message, isNetwork } = extractErrorDetail(err)
 
-      // Handle "already uploaded" 400 — means our local cache was stale.
-      // Fetch the real ID and set status to error so user can retry cleanly.
+      // Handle "already uploaded" 400 — local cache was stale
       const isDuplicate = err.response?.status === 400 &&
         message?.toLowerCase().includes('already been uploaded')
 
       if (isDuplicate) {
-        // Fetch the existing doc ID so next retry can delete it properly
         try {
-          const { data: listData } = await api.get(`/applications/${applicationId}/documents`)
+          const { data: listData } = await api.get(
+            `/applications/${applicationIdRef.current}/documents`
+          )
           const existing = listData.documents?.find(d => d.doc_type === docType)
           if (existing?.id) uploadedDocIds.current[docType] = existing.id
         } catch { /* non-fatal */ }
+      }
+
+      // ── Queue for auto-retry if it's a network error ──────────────────────
+      if (isNetwork && !isDuplicate) {
+        retryQueueRef.current[docType] = file
+        _syncQueuedCount()
+        setDocStatus(prev => ({
+          ...prev,
+          [docType]: {
+            status:     'queued',
+            message:    'Server is starting up. This upload is queued and will retry automatically when the server is ready.',
+            fileName:   file.name,
+            isAdvisory: false,
+            isNetwork:  true,
+          },
+        }))
+        // Don't show a toast for queued — the banner covers it
+        uploadingRef.current.delete(docType)
+        return
       }
 
       setDocStatus(prev => ({
@@ -348,31 +411,47 @@ export default function ApplyPage() {
 
       if (!isDuplicate) {
         toast.error(
-          isNetwork ? 'Server unreachable — please wait and try again' : `Rejected: ${message}`,
-          { duration: 8000 }
+          isNetwork
+            ? 'Server unreachable — please wait and try again'
+            : `Rejected: ${message}`,
+          { duration: 8000 },
         )
       }
     } finally {
       uploadingRef.current.delete(docType)
     }
-  }, [applicationId])
+  }, [])
 
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
-    e.target.value = ''   // reset so same file can be re-selected
+    e.target.value = ''  // reset so same file can be re-selected
     handleUpload(docType, file)
+  }
+
+  // ── Manual retry from error state ────────────────────────────────────────
+  const handleManualRetry = (docType) => {
+    const queued = retryQueueRef.current[docType]
+    if (queued) {
+      delete retryQueueRef.current[docType]
+      _syncQueuedCount()
+      handleUpload(docType, queued)
+    }
   }
 
   // ── Delete doc ────────────────────────────────────────────────────────────
   const handleDeleteDoc = async (docType) => {
+    // Also clear from retry queue if present
+    if (retryQueueRef.current[docType]) {
+      delete retryQueueRef.current[docType]
+      _syncQueuedCount()
+    }
+
     const existingId = uploadedDocIds.current[docType]
     try {
       if (existingId) {
-        // Fast path: we know the ID, delete directly
         await api.delete(`/applications/${applicationId}/documents/${existingId}`)
       } else {
-        // Fallback: look up the ID (rare — only if cache was cleared)
         const { data } = await api.get(`/applications/${applicationId}/documents`)
         const doc = data.documents?.find(d => d.doc_type === docType)
         if (doc) await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
@@ -625,8 +704,8 @@ export default function ApplyPage() {
                   <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>. Accepted: PDF, PNG, JPG (max 5 MB).
                 </p>
 
-                {/* Wake banner — only visible while server is warming up */}
-                <WakeBanner status={serverStatus} />
+                {/* Wake/queue banner */}
+                <WakeBanner status={serverStatus} queuedCount={queuedCount} />
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 28 }}>
                   {DOC_TYPES.map(doc => {
@@ -634,17 +713,22 @@ export default function ApplyPage() {
                     const isSuccess  = state.status === 'success'
                     const isError    = state.status === 'error'
                     const isLoading  = state.status === 'uploading'
+                    const isQueued   = state.status === 'queued'
                     const isAdvisory = isSuccess && state.isAdvisory
-                    const isNetwork  = isError && state.isNetwork
+                    const isNetwork  = (isError || isQueued) && state.isNetwork
+                    const isIDReject = isError && !isNetwork && doc.key === 'id_card' &&
+                      state.message?.toLowerCase().includes('id')
 
                     const borderColor = isSuccess && !isAdvisory ? '#16a34a'
-                      : isAdvisory ? '#d97706'
-                      : isError    ? '#dc2626'
+                      : isAdvisory          ? '#d97706'
+                      : isQueued            ? '#60a5fa'
+                      : isError             ? '#dc2626'
                       : '#e5e7eb'
 
                     const bgColor = isSuccess && !isAdvisory ? '#f0fdf4'
-                      : isAdvisory ? '#fffbeb'
-                      : isError    ? '#fff1f2'
+                      : isAdvisory          ? '#fffbeb'
+                      : isQueued            ? '#eff6ff'
+                      : isError             ? '#fff1f2'
                       : '#f9fafb'
 
                     return (
@@ -676,22 +760,64 @@ export default function ApplyPage() {
                               </div>
                             )}
 
+                            {/* Queued message (network error — auto-retry pending) */}
+                            {isQueued && (
+                              <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#eff6ff', color: '#1e40af', border: '1px solid #93c5fd' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
+                                  <RefreshCw size={13} style={{ flexShrink: 0, animation: 'spin 2s linear infinite' }} />
+                                  Queued — waiting for server
+                                </div>
+                                <div style={{ paddingLeft: 19, color: '#1e40af' }}>
+                                  The server is starting up. Your file is saved and will upload automatically — no action needed.
+                                </div>
+                              </div>
+                            )}
+
                             {/* Error message */}
                             {isError && state.message && (
                               <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: isNetwork ? '#fef3c7' : '#fee2e2', color: isNetwork ? '#78350f' : '#7f1d1d', border: `1px solid ${isNetwork ? '#fcd34d' : '#fca5a5'}` }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
                                   {isNetwork ? <WifiOff size={13} style={{ flexShrink: 0 }} /> : <XCircle size={13} style={{ flexShrink: 0 }} />}
-                                  {isNetwork ? 'Connection error' : 'Document rejected — reason:'}
+                                  {isNetwork ? 'Connection error' : isIDReject ? 'ID name mismatch' : 'Document rejected'}
                                 </div>
                                 <div style={{ paddingLeft: 19 }}>{state.message}</div>
+                                {/* Extra guidance for ID rejection */}
+                                {isIDReject && (
+                                  <div style={{ marginTop: 8, paddingLeft: 19, padding: '8px 12px', background: '#fff1f2', borderRadius: 4, border: '1px solid #fecaca', fontSize: '.78rem', color: '#991b1b' }}>
+                                    <strong>💡 Tip:</strong> Your account name is <strong>{user?.full_name || user?.fullName}</strong>. Make sure this exactly matches the name on your National ID or Passport (including order of names).
+                                  </div>
+                                )}
                               </div>
                             )}
 
                             {/* Action buttons */}
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                               {isLoading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
                                   <div className="spinner" style={{ width: 14, height: 14 }} /> Uploading and verifying…
+                                </div>
+                              ) : isQueued ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#2563eb', fontSize: '.85rem', fontWeight: 600 }}>
+                                    <RefreshCw size={13} style={{ animation: 'spin 2s linear infinite' }} />
+                                    {state.fileName} — queued
+                                  </div>
+                                  <button
+                                    onClick={() => handleManualRetry(doc.key)}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}
+                                  >
+                                    Retry now
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      delete retryQueueRef.current[doc.key]
+                                      _syncQueuedCount()
+                                      setDocStatus(prev => ({ ...prev, [doc.key]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false } }))
+                                    }}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}
+                                  >
+                                    Cancel
+                                  </button>
                                 </div>
                               ) : isSuccess ? (
                                 <>
@@ -716,9 +842,10 @@ export default function ApplyPage() {
                           <div style={{ flexShrink: 0, marginTop: 4 }}>
                             {isSuccess && !isAdvisory && <CheckCircle size={20} color="#16a34a" />}
                             {isAdvisory                && <Info        size={20} color="#d97706" />}
+                            {isQueued                  && <RefreshCw   size={20} color="#2563eb" style={{ animation: 'spin 2s linear infinite' }} />}
                             {isError && !isNetwork     && <XCircle     size={20} color="#dc2626" />}
-                            {isNetwork                 && <WifiOff     size={20} color="#d97706" />}
-                            {!isSuccess && !isError && !isLoading && <AlertCircle size={20} color="#d1d5db" />}
+                            {isError && isNetwork      && <WifiOff     size={20} color="#d97706" />}
+                            {!isSuccess && !isError && !isLoading && !isQueued && <AlertCircle size={20} color="#d1d5db" />}
                             {isLoading                 && <div className="spinner" style={{ width: 20, height: 20 }} />}
                           </div>
                         </div>
