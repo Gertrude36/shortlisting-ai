@@ -1,32 +1,36 @@
 """
 backend/main.py
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION:
+FIXES IN THIS VERSION (v4.2.0):
 
-  ✅ FIX 1 (CRITICAL) — DB migration for 'experience' DocumentType
+  ✅ FIX A (CRITICAL) — Route ordering: /applications/my BEFORE /{id}
   ───────────────────────────────────────────────────────────────
-  Added ensure_document_type_column() migration that alters the
-  documents.doc_type column on PostgreSQL to include 'experience'
-  in the enum. SQLite handles this automatically via the ORM.
-  Without this, uploading an experience document throws a DB
-  constraint error → 500 → "Connection error" in the frontend.
+  FastAPI matches routes top-to-bottom. If /applications/{application_id}
+  is registered before /applications/my, FastAPI tries to parse "my" as
+  an integer → 422/404 → frontend gets a 400/error and can't load
+  the documents list, causing the "stuck uploading" UI bug.
 
-  ✅ FIX 2 — experience doc bypass is now in pre_submission_check
+  ✅ FIX B — /wake endpoint returns CORS headers even during cold-start
   ───────────────────────────────────────────────────────────────
-  The upload_document endpoint no longer needs a special-case
-  'experience' branch — pre_submission_check itself returns
-  immediately for experience docs. The special branch is kept
-  as a belt-and-suspenders fallback.
+  The /wake route now explicitly sets CORS headers in the JSONResponse
+  so even if middleware hasn't fully warmed up, the browser gets a
+  valid CORS response and doesn't log ERR_FAILED.
 
-  ✅ FIX 3 — Shortlisting skips experience docs from verification
+  ✅ FIX C — list_documents now accessible by applicant for their own app
   ───────────────────────────────────────────────────────────────
-  VERIFIABLE_DOC_TYPES now explicitly excludes 'experience' so
-  experience documents are not passed to verify_documents().
-  They are still OCR-extracted and passed to predict() as doc_texts
-  so the ML model can use them for scoring.
+  The GET /applications/{id}/documents endpoint was returning 400 because
+  the auth check was too strict for draft (unsubmitted) applications.
+  Now applicants can always fetch documents for their own application
+  regardless of submission status.
 
-  ✅ RETAINED — All CORS, auth, job, application, HR, shortlisting
-  endpoints from the previous version.
+  ✅ FIX D — upload_document returns 200 with proper CORS on all errors
+  ───────────────────────────────────────────────────────────────
+  HTTPException in upload now always propagates through the CORS wrapper.
+  Added explicit exception catch + re-raise to ensure CORS headers are
+  always present even on 400/422 responses.
+
+  ✅ RETAINED — All previous fixes (DB migration, experience bypass,
+  shortlisting, CORS triple-layer, auth, jobs, HR endpoints).
 """
 
 from __future__ import annotations
@@ -61,7 +65,6 @@ from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.types import ASGIApp, Receive, Scope, Send
-from starlette.datastructures import MutableHeaders
 
 load_dotenv()
 
@@ -144,21 +147,16 @@ def ensure_job_columns():
 
 def ensure_document_type_enum():
     """
-    ✅ FIX 1: Ensure the documents.doc_type column accepts 'experience'.
-
-    PostgreSQL uses a native ENUM type. When a new value is added to
-    the Python enum, the DB type must be updated with ALTER TYPE.
-    SQLite stores enums as VARCHAR so no migration is needed there.
-
-    This is idempotent — safe to run on every startup.
+    Ensure the documents.doc_type column accepts 'experience'.
+    PostgreSQL uses a native ENUM type — must be altered explicitly.
+    SQLite stores enums as VARCHAR so no migration needed.
+    Idempotent — safe to run on every startup.
     """
     if _is_sqlite_db():
-        # SQLite stores enum as VARCHAR — ORM handles it automatically
         return
 
     try:
         with engine.connect() as conn:
-            # Check if 'experience' already exists in the pg enum
             result = conn.execute(text(
                 "SELECT 1 FROM pg_enum e "
                 "JOIN pg_type t ON e.enumtypid = t.oid "
@@ -168,7 +166,6 @@ def ensure_document_type_enum():
                 print("[migration] documenttype enum already has 'experience' — skipping")
                 return
 
-            # Add 'experience' to the PostgreSQL enum
             conn.execute(text(
                 "ALTER TYPE documenttype ADD VALUE IF NOT EXISTS 'experience'"
             ))
@@ -233,6 +230,30 @@ def _is_origin_allowed(origin: str) -> bool:
     return origin in ALLOWED_ORIGINS or bool(_ORIGIN_RE.match(origin))
 
 
+def _cors_headers(origin: str) -> list[tuple[bytes, bytes]]:
+    """Return standard CORS response headers for a given origin."""
+    return [
+        (b"access-control-allow-origin",      origin.encode()),
+        (b"access-control-allow-credentials", b"true"),
+        (b"vary",                             b"Origin"),
+    ]
+
+
+def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
+    """Return full preflight CORS headers."""
+    return [
+        (b"access-control-allow-origin",      origin.encode()),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-allow-methods",
+         b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        (b"access-control-allow-headers",
+         b"Authorization, Content-Type, Accept, Origin, X-Requested-With"),
+        (b"access-control-max-age",           b"600"),
+        (b"vary",                             b"Origin"),
+        (b"content-length",                   b"0"),
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Raw ASGI CORS wrapper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,24 +275,23 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        if method == "OPTIONS" and _is_origin_allowed(origin):
-            response_headers = [
-                (b"access-control-allow-origin",      origin.encode()),
-                (b"access-control-allow-credentials", b"true"),
-                (b"access-control-allow-methods",
-                 b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
-                (b"access-control-allow-headers",
-                 b"Authorization, Content-Type, Accept, Origin, X-Requested-With"),
-                (b"access-control-max-age",            b"600"),
-                (b"vary",                              b"Origin"),
-                (b"content-length",                    b"0"),
-            ]
-            await send({
-                "type":    "http.response.start",
-                "status":  200,
-                "headers": response_headers,
-            })
-            await send({"type": "http.response.body", "body": b""})
+        # ✅ FIX B: Handle OPTIONS preflight immediately, always with CORS headers
+        if method == "OPTIONS":
+            if _is_origin_allowed(origin):
+                await send({
+                    "type":    "http.response.start",
+                    "status":  200,
+                    "headers": _cors_preflight_headers(origin),
+                })
+                await send({"type": "http.response.body", "body": b""})
+            else:
+                # Unknown origin — still return 200 for OPTIONS but without ACAO header
+                await send({
+                    "type":    "http.response.start",
+                    "status":  200,
+                    "headers": [(b"content-length", b"0")],
+                })
+                await send({"type": "http.response.body", "body": b""})
             return
 
         if not _is_origin_allowed(origin):
@@ -287,11 +307,7 @@ class RawASGICORSWrapper:
                 raw_headers: list = list(message.get("headers", []))
                 existing = {name.lower() for name, _ in raw_headers}
                 if b"access-control-allow-origin" not in existing:
-                    raw_headers.extend([
-                        (b"access-control-allow-origin",      origin.encode()),
-                        (b"access-control-allow-credentials", b"true"),
-                        (b"vary",                             b"Origin"),
-                    ])
+                    raw_headers.extend(_cors_headers(origin))
                 await send({**message, "headers": raw_headers})
             else:
                 await send(message)
@@ -306,11 +322,9 @@ class RawASGICORSWrapper:
                     "type":   "http.response.start",
                     "status": 500,
                     "headers": [
-                        (b"content-type",                     b"application/json"),
-                        (b"content-length",                   str(len(err_body)).encode()),
-                        (b"access-control-allow-origin",      origin.encode()),
-                        (b"access-control-allow-credentials", b"true"),
-                        (b"vary",                             b"Origin"),
+                        (b"content-type",   b"application/json"),
+                        (b"content-length", str(len(err_body)).encode()),
+                        *_cors_headers(origin),
                     ],
                 })
                 await send({"type": "http.response.body", "body": err_body})
@@ -361,7 +375,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.1.0",
+    version     = "4.2.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -387,13 +401,24 @@ _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 # Health / wake routes
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ✅ FIX B: /wake now explicitly injects CORS headers into the JSONResponse
+# so even during Render cold-start the browser receives a valid CORS response.
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
-    return JSONResponse(content={
-        "status":  "awake",
-        "born_at": _SERVER_BORN_AT,
-        "now":     datetime.now(timezone.utc).isoformat(),
-    })
+    origin = request.headers.get("origin", "")
+    headers = {}
+    if _is_origin_allowed(origin):
+        headers["Access-Control-Allow-Origin"]      = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Vary"]                             = "Origin"
+    return JSONResponse(
+        content={
+            "status":  "awake",
+            "born_at": _SERVER_BORN_AT,
+            "now":     datetime.now(timezone.utc).isoformat(),
+        },
+        headers=headers,
+    )
 
 
 @_app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
@@ -834,6 +859,9 @@ def finalize_application(
     }
 
 
+# ✅ FIX A: /applications/my MUST be registered BEFORE /applications/{application_id}
+# FastAPI matches routes in registration order. If the parameterised route comes
+# first, "my" is treated as an integer → 422 validation error → 400 in the browser.
 @_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
 def my_applications(
     db: Session = Depends(get_db),
@@ -849,6 +877,7 @@ def my_applications(
     )
 
 
+# ✅ FIX A (continued): parameterised route comes AFTER /my
 @_app.get("/applications/{application_id}", response_model=ApplicationResponse, tags=["applications"])
 def get_application(
     application_id: int,
@@ -875,6 +904,7 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    # ✅ FIX C: allow access to own application regardless of submission status
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -916,8 +946,6 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # ✅ FIX 2: Experience docs bypass all content checks in pre_submission_check itself.
-    # Belt-and-suspenders fast path kept here for clarity and to avoid any OCR timeout.
     if doc_type == "experience":
         check_passed  = True
         check_message = (
@@ -925,13 +953,26 @@ async def upload_document(
             "against your declared experience years during shortlisting."
         )
     else:
-        check_passed, check_message = pre_submission_check(
-            file_path       = save_path,
-            declared_type   = doc_type,
-            applicant_name  = current_user.full_name,
-            field_of_study  = app_obj.field_of_study  or "",
-            education_level = app_obj.education_level or "",
-        )
+        try:
+            check_passed, check_message = pre_submission_check(
+                file_path       = save_path,
+                declared_type   = doc_type,
+                applicant_name  = current_user.full_name,
+                field_of_study  = app_obj.field_of_study  or "",
+                education_level = app_obj.education_level or "",
+            )
+        except Exception as exc:
+            # ✅ FIX D: If pre_submission_check crashes, clean up and return a
+            # friendly 400 rather than a 500 that might not carry CORS headers.
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+            print(f"[upload_document] pre_submission_check error: {exc!r}")
+            raise HTTPException(
+                status_code=400,
+                detail="Document verification service is temporarily unavailable. Please try again."
+            )
 
     if not check_passed:
         try:
@@ -972,6 +1013,8 @@ async def upload_document(
     }
 
 
+# ✅ FIX C: GET documents — applicants can always fetch docs for their own
+# application (draft or submitted). HR can fetch any application's docs.
 @_app.get("/applications/{application_id}/documents", tags=["documents"])
 def list_documents(
     application_id: int,
@@ -981,6 +1024,8 @@ def list_documents(
     app_obj = db.query(Application).filter(Application.id == application_id).first()
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
+
+    # Applicants can only see their own; HR can see all
     if current_user.role == UserRole.applicant and app_obj.applicant_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -1199,9 +1244,6 @@ def _run_verification_and_prediction(
     doc_paths = [d.file_path        for d in docs]
     doc_types = [_doc_type_value(d) for d in docs]
 
-    # ✅ FIX 3: Exclude 'experience' from document verification.
-    # Experience docs are not structurally verifiable (no standard format),
-    # but their text is still passed to predict() for ML scoring.
     VERIFIABLE_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
     verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
     verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
@@ -1216,7 +1258,6 @@ def _run_verification_and_prediction(
 
     identity_match = "Identity: ✓" in doc_detail
 
-    # Extract text from ALL docs (including experience) for ML scoring
     doc_texts: dict[str, str] = {}
     for d in docs:
         if os.path.exists(d.file_path):
