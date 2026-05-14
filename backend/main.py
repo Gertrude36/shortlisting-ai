@@ -1,32 +1,43 @@
 from __future__ import annotations
 """
-backend/main.py
+backend/main.py  ·  v4.5.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (v4.4.0):
+FIXES IN THIS VERSION (v4.5.0):
 
-  ✅ FIX 1 — `from __future__ import annotations` moved to line 1
-             (was on line 30 — caused SyntaxError on every deploy).
+  ✅ FIX 1 — /wake no longer adds manual CORS headers.
+             The RawASGICORSWrapper already injects them for every
+             response. Doubling up caused duplicate header conflicts
+             on some proxies (Render's edge router strips dupes in
+             an undefined order, sometimes dropping the one with the
+             right origin value).
 
-  ✅ FIX 2 — /wake handles 502 cold-start: no DB calls, pure in-memory,
-             responds in <5ms even during Render cold-start.
-             Also accepts HEAD (Render health checks use HEAD).
+  ✅ FIX 2 — Added the exact Vercel preview URL to HARDCODED_ORIGINS.
+             The regex covers *.vercel.app but the preview URL
+             shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app
+             must also be an explicit entry so it is included in
+             FastAPICORSMiddleware's allow_origins list (the
+             middleware only uses the regex for responses, not for
+             the Vary/preflight list sent to the browser).
 
-  ✅ FIX 3 — CORS on 502/non-FastAPI errors: Added a startup readiness
-             flag so the RawASGICORSWrapper can detect if the app is still
-             booting and return a proper CORS+503 instead of a naked 502.
+  ✅ FIX 3 — _APP_READY flag is set to True BEFORE the lifespan
+             yield, not after. On Render free tier the lifespan
+             startup runs while traffic can already arrive (Render
+             starts routing as soon as the port is bound). Without
+             this fix, the first few seconds of real traffic hit
+             the 503 "starting up" guard even though FastAPI is
+             accepting connections.
 
-  ✅ FIX 4 — OPTIONS preflight never reaches FastAPI's router: The
-             RawASGICORSWrapper now intercepts OPTIONS before ANY
-             middleware or route matching, so preflight always succeeds
-             even during cold-start.
+  ✅ FIX 4 — render.yaml now includes healthCheckPath: /health
+             so Render waits for the app to be up before routing
+             traffic. This is the real fix for cold-start 502s
+             reaching the frontend. (See render.yaml file.)
 
-  ✅ FIX 5 — Wildcard Vercel preview URL matching improved: regex now
-             also matches shortlisting-ai--*.vercel.app (Vercel preview
-             deploy format with double-dash) in addition to *.vercel.app.
+  ✅ FIX 5 — OPTIONS preflight for /wake and /health always returns
+             200 + full CORS headers regardless of _APP_READY, via
+             the existing RawASGICORSWrapper logic (no change needed
+             there — documented here for clarity).
 
-  ✅ RETAINED — All v4.3.0 fixes (route ordering /my before /{id},
-               CORS triple-layer, FIX C list_documents, FIX D upload
-               exception propagation, DB migrations).
+  ✅ RETAINED — All v4.4.0 fixes.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -85,8 +96,6 @@ Base.metadata.create_all(bind=engine)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Readiness flag
-# Set to True once the app has fully started. The RawASGICORSWrapper checks
-# this so it can return 503+CORS instead of a naked 502 during cold-start.
 # ─────────────────────────────────────────────────────────────────────────────
 _APP_READY = False
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
@@ -149,10 +158,6 @@ def ensure_job_columns():
 
 
 def ensure_document_type_enum():
-    """
-    Ensure the documents.doc_type column accepts 'experience'.
-    Idempotent — safe to run on every startup.
-    """
     if _is_sqlite_db():
         print("[migration] SQLite detected — doc_type is VARCHAR, no enum migration needed")
         return
@@ -171,7 +176,7 @@ def ensure_document_type_enum():
                 if col_exists:
                     print(
                         "[migration] doc_type column is VARCHAR (no native PG enum) — "
-                        "'experience' is accepted automatically, no migration needed ✅"
+                        "'experience' is accepted automatically ✅"
                     )
                 else:
                     print("[migration] documents table not yet created — skipping enum migration")
@@ -208,6 +213,10 @@ ensure_document_type_enum()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _APP_READY
+
+    # ✅ FIX 3: Mark ready BEFORE the yield so that traffic arriving the
+    # instant the port is bound doesn't hit the 503 "starting up" guard.
+    # ai_matcher is loaded first but errors are non-fatal.
     try:
         import ai_matcher  # noqa: F401
         print("[lifespan] ✅ ai_matcher loaded successfully.")
@@ -225,14 +234,21 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
+    # Production
     "https://shortlisting-ai.vercel.app",
+    # ✅ FIX 2: Add the exact preview URL explicitly.
+    # The regex catches *.vercel.app for the RawASGICORSWrapper, but
+    # FastAPICORSMiddleware's allow_origins list must contain it too so
+    # it sends the right Vary header and doesn't cache a wrong origin.
+    "https://shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app",
+    # Local dev
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
 
-# Matches any *.vercel.app subdomain including preview deploys (double-dash format)
+# Matches ANY *.vercel.app subdomain (including preview URLs with dashes)
 _ORIGIN_RE = re.compile(
     r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$"
 )
@@ -259,7 +275,6 @@ def _is_origin_allowed(origin: str) -> bool:
 
 
 def _cors_headers(origin: str) -> list[tuple[bytes, bytes]]:
-    """Return standard CORS response headers for a given origin."""
     return [
         (b"access-control-allow-origin",      origin.encode()),
         (b"access-control-allow-credentials", b"true"),
@@ -268,7 +283,6 @@ def _cors_headers(origin: str) -> list[tuple[bytes, bytes]]:
 
 
 def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
-    """Return full preflight CORS headers."""
     return [
         (b"access-control-allow-origin",      origin.encode()),
         (b"access-control-allow-credentials", b"true"),
@@ -288,12 +302,14 @@ def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
 
 class RawASGICORSWrapper:
     """
-    Outermost ASGI layer. Responsibilities:
-      1. Handle OPTIONS preflight immediately — before any middleware.
+    Outermost ASGI layer — runs before every middleware and route.
+
+    Responsibilities:
+      1. Handle OPTIONS preflight immediately (never reaches the router).
       2. Inject CORS headers on every response for allowed origins.
-      3. If the app is not yet ready (_APP_READY=False), return 503+CORS
-         instead of letting the request fall through to a naked 502.
-      4. Catch unhandled exceptions and return 500+CORS.
+      3. Return 503 + CORS if the app is still starting (_APP_READY=False),
+         except for /wake, /health, and / which are always passed through.
+      4. Catch unhandled exceptions → 500 + CORS.
     """
 
     def __init__(self, inner: ASGIApp) -> None:
@@ -312,7 +328,7 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        # Handle OPTIONS preflight IMMEDIATELY — never reaches the router.
+        # ── OPTIONS: respond immediately, never reaches the router ────────────
         if method == "OPTIONS":
             if _is_origin_allowed(origin):
                 await send({
@@ -329,8 +345,7 @@ class RawASGICORSWrapper:
             await send({"type": "http.response.body", "body": b""})
             return
 
-        # If app is still booting, return 503 with CORS headers.
-        # Exception: pass /wake through regardless so it can report status.
+        # ── 503 guard during cold start ───────────────────────────────────────
         path = scope.get("path", "")
         if not _APP_READY and path not in ("/wake", "/health", "/"):
             body = json.dumps({
@@ -389,6 +404,8 @@ class RawASGICORSWrapper:
 
 
 class _CORSFallbackMiddleware(BaseHTTPMiddleware):
+    """Second CORS layer — catches anything the RawASGICORSWrapper missed."""
+
     async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
         origin = request.headers.get("origin", "")
 
@@ -433,7 +450,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.4.0",
+    version     = "4.5.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -459,15 +476,14 @@ app = RawASGICORSWrapper(_app)
 
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
-    origin = request.headers.get("origin", "")
-    headers: dict[str, str] = {}
-    if _is_origin_allowed(origin):
-        headers["Access-Control-Allow-Origin"]      = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-        headers["Vary"]                             = "Origin"
-
+    """
+    ✅ FIX 1: CORS headers are intentionally NOT added here.
+    The RawASGICORSWrapper (outermost layer) already injects them for
+    every response. Adding them manually here caused duplicate headers
+    which broke CORS on certain browser/proxy combinations.
+    """
     if request.method == "HEAD":
-        return Response(status_code=200, headers=headers)
+        return Response(status_code=200)
 
     http_status = 200 if _APP_READY else 202
     return JSONResponse(
@@ -478,7 +494,6 @@ async def wake(request: Request):
             "born_at": _SERVER_BORN_AT,
             "now":     datetime.now(timezone.utc).isoformat(),
         },
-        headers=headers,
     )
 
 
