@@ -1,5 +1,3 @@
-python
-
 """
 backend/main.py
 ────────────────────────────────────────────────────────────────
@@ -27,9 +25,8 @@ FIXES IN THIS VERSION (v4.3.0):
                exception propagation, DB migrations).
 """
 
-from __future__ import annotations
-
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
+from __future__ import annotations
 import os
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
