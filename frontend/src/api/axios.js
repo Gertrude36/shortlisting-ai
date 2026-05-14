@@ -135,10 +135,17 @@ export function rearmWakeGate() {
 // Render free tier drops HTTP/2 connections under concurrent load.
 // Sequential uploads prevent ERR_HTTP2_PROTOCOL_ERROR / "CORS" errors.
 //
+// Exported so ApplyPage can call waitForUploadSlot() BEFORE setting UI to
+// "uploading" — while waiting it shows "pending" instead of a false spinner.
+// The axios interceptor ALSO calls these, but only after the gate wait; since
+// ApplyPage already holds the slot by then the interceptor's _waitForUploadSlot
+// resolves immediately (slot is already taken and will be released by the
+// response interceptor as normal).
+//
 let _uploadInFlight  = false
 const _uploadWaiters = []
 
-function _waitForUploadSlot() {
+export function waitForUploadSlot() {
   if (!_uploadInFlight) {
     _uploadInFlight = true
     return Promise.resolve()
@@ -146,7 +153,7 @@ function _waitForUploadSlot() {
   return new Promise(resolve => _uploadWaiters.push(resolve))
 }
 
-function _releaseUploadSlot() {
+export function releaseUploadSlot() {
   if (_uploadWaiters.length > 0) {
     const next = _uploadWaiters.shift()
     // Small delay between uploads — lets Render finish writing the previous
@@ -156,6 +163,10 @@ function _releaseUploadSlot() {
     _uploadInFlight = false
   }
 }
+
+// Keep internal aliases for the interceptor (unchanged call sites below)
+const _waitForUploadSlot  = waitForUploadSlot
+const _releaseUploadSlot  = releaseUploadSlot
 
 // ── Wake pinging ───────────────────────────────────────────────────────────────
 let _wakePending  = false
@@ -254,8 +265,13 @@ api.interceptors.request.use(
       // This ensures re-armed gates (after network failures) are actually awaited.
       await getCurrentWakeGate()
 
-      // Serialize — wait for any in-flight upload to finish
-      await _waitForUploadSlot()
+      // Serialize — wait for any in-flight upload to finish.
+      // If the caller (ApplyPage) set _slotPreacquired = true, it already holds
+      // the slot (acquired before showing the uploading UI), so skip re-acquiring
+      // to avoid a deadlock. The response interceptor still releases the slot.
+      if (!config._slotPreacquired) {
+        await _waitForUploadSlot()
+      }
 
       // Mark so the response interceptor knows to release the slot
       config._serializedUpload = true
@@ -283,8 +299,9 @@ const _sleep = ms => new Promise(r => setTimeout(r, ms))
 
 api.interceptors.response.use(
   response => {
-    // Release serializer slot (must happen even on success)
-    if (response.config?._serializedUpload) {
+    // Release serializer slot — but only if ApplyPage didn't pre-acquire it.
+    // When _slotPreacquired is true, ApplyPage's releaseOnce() owns the slot.
+    if (response.config?._serializedUpload && !response.config?._slotPreacquired) {
       _releaseUploadSlot()
     }
     // Any successful response confirms server is awake
@@ -295,8 +312,9 @@ api.interceptors.response.use(
   },
 
   async error => {
-    // Always release serializer slot on error — prevents deadlock
-    if (error.config?._serializedUpload) {
+    // Release serializer slot on error — but only if ApplyPage didn't pre-acquire it.
+    // When _slotPreacquired is true, ApplyPage's releaseOnce() in finally owns the slot.
+    if (error.config?._serializedUpload && !error.config?._slotPreacquired) {
       _releaseUploadSlot()
     }
 

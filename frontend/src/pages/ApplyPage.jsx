@@ -48,7 +48,7 @@ import {
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
-import api, { BACKEND, getServerStatus, onServerStatusChange } from '../api/axios'
+import api, { BACKEND, getServerStatus, onServerStatusChange, waitForUploadSlot, releaseUploadSlot, getCurrentWakeGate } from '../api/axios'
 
 const DOC_TYPES = [
   {
@@ -416,6 +416,23 @@ export default function ApplyPage() {
     if (uploadingRef.current.has(docType)) return
     uploadingRef.current.add(docType)
 
+    // Step 1: Show "pending" immediately so user sees their file was accepted.
+    // Multiple files picked at once will all show pending while they queue up.
+    setDocStatus(prev => ({
+      ...prev,
+      [docType]: {
+        status: 'pending', message: 'Waiting in queue…',
+        fileName: file.name, isAdvisory: false, isNetwork: false,
+      },
+    }))
+
+    // Step 2: Wait for server wake gate, then for the serializer slot.
+    // Only 1 upload runs at a time on Render free tier. Others wait here,
+    // showing "pending" in the UI rather than a false "uploading" spinner.
+    await getCurrentWakeGate()
+    await waitForUploadSlot()
+
+    // Step 3: Slot acquired — now actually uploading
     setDocStatus(prev => ({
       ...prev,
       [docType]: {
@@ -423,6 +440,11 @@ export default function ApplyPage() {
         fileName: file.name, isAdvisory: false, isNetwork: false,
       },
     }))
+
+    // Flag that the slot is already held so the axios interceptor's own
+    // _waitForUploadSlot call resolves instantly (slot re-entry is safe).
+    let slotReleased = false
+    const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseUploadSlot() } }
 
     try {
       // ── Delete existing doc if we have its ID ──────────────────────────────
@@ -439,7 +461,7 @@ export default function ApplyPage() {
       formData.append('doc_type', docType)
       formData.append('file', file)
 
-      const { data } = await api.post(`/applications/${appId}/documents`, formData)
+      const { data } = await api.post(`/applications/${appId}/documents`, formData, { _slotPreacquired: true })
 
       // Cache server-assigned doc ID for future re-uploads
       if (data.id) uploadedDocIds.current[docType] = data.id
@@ -522,6 +544,8 @@ export default function ApplyPage() {
 
     } finally {
       uploadingRef.current.delete(docType)
+      // Release the serializer slot we acquired above (idempotent with axios interceptor).
+      releaseOnce()
     }
   }, [syncQueuedCount])
 
@@ -811,6 +835,7 @@ export default function ApplyPage() {
                     const isError    = state.status === 'error'
                     const isLoading  = state.status === 'uploading'
                     const isQueued   = state.status === 'queued'
+                    const isPending  = state.status === 'pending'
                     const isAdvisory = isSuccess && state.isAdvisory
                     const isIDReject = isError && doc.key === 'id_card' &&
                       (state.message?.toLowerCase().includes('id') || state.message?.toLowerCase().includes('name'))
@@ -818,12 +843,14 @@ export default function ApplyPage() {
                     const borderColor = isSuccess && !isAdvisory ? '#16a34a'
                       : isAdvisory  ? '#d97706'
                       : isQueued    ? '#60a5fa'
+                      : isPending   ? '#a5b4fc'
                       : isError     ? '#dc2626'
                       : '#e5e7eb'
 
                     const bgColor = isSuccess && !isAdvisory ? '#f0fdf4'
                       : isAdvisory  ? '#fffbeb'
                       : isQueued    ? '#eff6ff'
+                      : isPending   ? '#f5f3ff'
                       : isError     ? '#fff1f2'
                       : '#f9fafb'
 
@@ -887,7 +914,13 @@ export default function ApplyPage() {
 
                             {/* ── Action buttons ── */}
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                              {isLoading ? (
+                              {isPending ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6d28d9', fontSize: '.85rem' }}>
+                                  <div className="spinner" style={{ width: 14, height: 14, borderTopColor: '#6d28d9' }} />
+                                  {state.fileName} — waiting in queue…
+                                </div>
+
+                              ) : isLoading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
                                   <div className="spinner" style={{ width: 14, height: 14 }} />
                                   Uploading and verifying…
@@ -933,8 +966,8 @@ export default function ApplyPage() {
                             {isAdvisory                && <Info        size={20} color="#d97706" />}
                             {isQueued                  && <RefreshCw   size={20} color="#2563eb" style={{ animation: 'spin 2s linear infinite' }} />}
                             {isError                   && <XCircle     size={20} color="#dc2626" />}
-                            {isLoading                 && <div className="spinner" style={{ width: 20, height: 20 }} />}
-                            {!isSuccess && !isError && !isLoading && !isQueued && <AlertCircle size={20} color="#d1d5db" />}
+                            {(isLoading || isPending)  && <div className="spinner" style={{ width: 20, height: 20, borderTopColor: isPending ? '#6d28d9' : undefined }} />}
+                            {!isSuccess && !isError && !isLoading && !isPending && !isQueued && <AlertCircle size={20} color="#d1d5db" />}
                           </div>
                         </div>
                       </div>
