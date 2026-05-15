@@ -237,15 +237,16 @@ async def lifespan(app: FastAPI):
     _APP_READY = True
     print("[lifespan] ✅ Application ready — accepting requests.")
 
-    try:
-        import ai_matcher  # noqa: F401
-        print("[lifespan] ✅ ai_matcher loaded successfully.")
-    except Exception as e:
-        print(f"[lifespan] ⚠ ai_matcher failed to load (non-fatal): {e}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _APP_READY
+
+    print("[lifespan] Starting app...")
+    _APP_READY = True
 
     yield
-    _APP_READY = False
 
+    _APP_READY = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CORS — single source of truth
@@ -485,8 +486,16 @@ _app.add_middleware(
 )
 _app.add_middleware(_CORSFallbackMiddleware)
 
-app = RawASGICORSWrapper(_app)
+_app.add_middleware(
+    FastAPICORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+app = _app
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Health / wake routes
