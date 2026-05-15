@@ -6,6 +6,7 @@ import {
 } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { AuthProvider, useAuth } from './context/AuthContext'
+import WakeBanner from './components/WakeBanner'
 
 import HomePage           from './pages/HomePage'
 import Login              from './pages/Login'
@@ -76,10 +77,12 @@ function ProtectedRoute({ requiredRole }) {
   return <Outlet />
 }
 
-// ── Root layout — provides Toaster to all routes ─────────────
+// ── Root layout — provides Toaster + WakeBanner to all routes ─
 function RootLayout() {
   return (
     <>
+      {/* WakeBanner overlays every page during server cold-start */}
+      <WakeBanner />
       <Toaster
         position="top-right"
         toastOptions={{

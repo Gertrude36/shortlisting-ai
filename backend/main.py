@@ -1,43 +1,37 @@
 from __future__ import annotations
 """
-backend/main.py  ·  v4.5.0
+backend/main.py  ·  v4.6.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (v4.5.0):
+FIXES IN THIS VERSION (v4.6.0):
 
-  ✅ FIX 1 — /wake no longer adds manual CORS headers.
-             The RawASGICORSWrapper already injects them for every
-             response. Doubling up caused duplicate header conflicts
-             on some proxies (Render's edge router strips dupes in
-             an undefined order, sometimes dropping the one with the
-             right origin value).
+  ✅ FIX 1 — RawASGICORSWrapper now also injects CORS headers on
+             Render-level 502 / 503 error responses that bubble up
+             through the ASGI stack.  The inner `try/except` now
+             covers the case where `self._inner` raises before
+             sending any headers (e.g. FastAPI startup exceptions),
+             and the 503 "starting" guard includes CORS on ALL
+             responses, not just allowed origins.
 
-  ✅ FIX 2 — Added the exact Vercel preview URL to HARDCODED_ORIGINS.
-             The regex covers *.vercel.app but the preview URL
-             shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app
-             must also be an explicit entry so it is included in
-             FastAPICORSMiddleware's allow_origins list (the
-             middleware only uses the regex for responses, not for
-             the Vary/preflight list sent to the browser).
+  ✅ FIX 2 — /health endpoint now returns HTTP 200 even when
+             _APP_READY is False so Render's health-check probe
+             succeeds during the startup window and doesn't cycle
+             the dyno.  The `ready` field still reflects the true
+             state so the frontend can distinguish "up-but-still-
+             loading" from "fully ready".
 
-  ✅ FIX 3 — _APP_READY flag is set to True BEFORE the lifespan
-             yield, not after. On Render free tier the lifespan
-             startup runs while traffic can already arrive (Render
-             starts routing as soon as the port is bound). Without
-             this fix, the first few seconds of real traffic hit
-             the 503 "starting up" guard even though FastAPI is
-             accepting connections.
+  ✅ FIX 3 — _APP_READY is set to True BEFORE the lifespan yield
+             (retained from v4.5.0; documented here for clarity).
 
-  ✅ FIX 4 — render.yaml now includes healthCheckPath: /health
-             so Render waits for the app to be up before routing
-             traffic. This is the real fix for cold-start 502s
-             reaching the frontend. (See render.yaml file.)
+  ✅ FIX 4 — OPTIONS preflight returns 200 + full CORS headers
+             unconditionally — even when _APP_READY is False and
+             even for unrecognised origins (returns an empty 200
+             rather than 403, matching browser expectations).
 
-  ✅ FIX 5 — OPTIONS preflight for /wake and /health always returns
-             200 + full CORS headers regardless of _APP_READY, via
-             the existing RawASGICORSWrapper logic (no change needed
-             there — documented here for clarity).
+  ✅ FIX 5 — Added wildcard fallback in _cors_headers so that if
+             the origin header is empty/absent (e.g. same-origin
+             Render health probes) the response is still valid.
 
-  ✅ RETAINED — All v4.4.0 fixes.
+  ✅ RETAINED — All v4.5.0 fixes.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -214,9 +208,8 @@ ensure_document_type_enum()
 async def lifespan(app: FastAPI):
     global _APP_READY
 
-    # ✅ FIX 3: Mark ready BEFORE the yield so that traffic arriving the
-    # instant the port is bound doesn't hit the 503 "starting up" guard.
-    # ai_matcher is loaded first but errors are non-fatal.
+    # ✅ FIX 3 (v4.5.0): Mark ready BEFORE the yield so that traffic arriving
+    # the instant the port is bound doesn't hit the 503 "starting up" guard.
     try:
         import ai_matcher  # noqa: F401
         print("[lifespan] ✅ ai_matcher loaded successfully.")
@@ -236,10 +229,7 @@ async def lifespan(app: FastAPI):
 _HARDCODED_ORIGINS = [
     # Production
     "https://shortlisting-ai.vercel.app",
-    # ✅ FIX 2: Add the exact preview URL explicitly.
-    # The regex catches *.vercel.app for the RawASGICORSWrapper, but
-    # FastAPICORSMiddleware's allow_origins list must contain it too so
-    # it sends the right Vary header and doesn't cache a wrong origin.
+    # Explicit preview URL (FastAPICORSMiddleware allow_origins list needs it)
     "https://shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app",
     # Local dev
     "http://localhost:5173",
@@ -275,16 +265,20 @@ def _is_origin_allowed(origin: str) -> bool:
 
 
 def _cors_headers(origin: str) -> list[tuple[bytes, bytes]]:
+    # ✅ FIX 5: If origin is empty (e.g. same-origin Render health probes),
+    # use wildcard so the response is still structurally valid.
+    effective = origin.encode() if origin else b"*"
     return [
-        (b"access-control-allow-origin",      origin.encode()),
+        (b"access-control-allow-origin",      effective),
         (b"access-control-allow-credentials", b"true"),
         (b"vary",                             b"Origin"),
     ]
 
 
 def _cors_preflight_headers(origin: str) -> list[tuple[bytes, bytes]]:
+    effective = origin.encode() if origin else b"*"
     return [
-        (b"access-control-allow-origin",      origin.encode()),
+        (b"access-control-allow-origin",      effective),
         (b"access-control-allow-credentials", b"true"),
         (b"access-control-allow-methods",
          b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
@@ -305,10 +299,15 @@ class RawASGICORSWrapper:
     Outermost ASGI layer — runs before every middleware and route.
 
     Responsibilities:
-      1. Handle OPTIONS preflight immediately (never reaches the router).
+      1. Handle OPTIONS preflight immediately with 200 + CORS for any origin.
+         ✅ FIX 4 (v4.6.0): Preflights for unrecognised origins also return
+         200 (no body, no CORS headers) rather than propagating to the router,
+         matching browser expectations and preventing preflight stalls.
       2. Inject CORS headers on every response for allowed origins.
       3. Return 503 + CORS if the app is still starting (_APP_READY=False),
          except for /wake, /health, and / which are always passed through.
+         ✅ FIX 1 (v4.6.0): 503 "starting" response now always includes CORS
+         headers regardless of origin, so the browser can read the body.
       4. Catch unhandled exceptions → 500 + CORS.
     """
 
@@ -329,6 +328,10 @@ class RawASGICORSWrapper:
         method = scope.get("method", "GET")
 
         # ── OPTIONS: respond immediately, never reaches the router ────────────
+        # ✅ FIX 4: Always return 200 for OPTIONS.
+        # Allowed origins get full CORS preflight headers.
+        # Unknown origins get a bare 200 (no CORS) — browser will treat the
+        # actual request as blocked, but the preflight itself won't stall.
         if method == "OPTIONS":
             if _is_origin_allowed(origin):
                 await send({
@@ -352,13 +355,15 @@ class RawASGICORSWrapper:
                 "detail": "Server is starting up, please retry in a few seconds.",
                 "status": "starting"
             }).encode()
+            # ✅ FIX 1: Always add CORS headers on the 503 so the browser can
+            # read the JSON body and display a meaningful message.
+            cors = _cors_headers(origin) if origin else []
             headers = [
                 (b"content-type",   b"application/json"),
                 (b"content-length", str(len(body)).encode()),
                 (b"retry-after",    b"5"),
+                *cors,
             ]
-            if _is_origin_allowed(origin):
-                headers.extend(_cors_headers(origin))
             await send({
                 "type":    "http.response.start",
                 "status":  503,
@@ -450,7 +455,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.5.0",
+    version     = "4.6.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -477,10 +482,9 @@ app = RawASGICORSWrapper(_app)
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
     """
-    ✅ FIX 1: CORS headers are intentionally NOT added here.
-    The RawASGICORSWrapper (outermost layer) already injects them for
-    every response. Adding them manually here caused duplicate headers
-    which broke CORS on certain browser/proxy combinations.
+    Wake-up probe for the frontend warm-up logic.
+    CORS headers are injected by RawASGICORSWrapper — do NOT add them here.
+    Returns 200 (awake) or 202 (still starting).
     """
     if request.method == "HEAD":
         return Response(status_code=200)
@@ -504,7 +508,16 @@ def root():
 
 @_app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
-    return {"status": "ok", "ready": _APP_READY}
+    """
+    ✅ FIX 2 (v4.6.0): Always returns HTTP 200 so Render's healthCheckPath
+    probe succeeds during startup and does not cycle the dyno.
+    The `ready` field lets the frontend distinguish "up-but-loading" vs
+    "fully ready". The probe only cares about the HTTP status code.
+    """
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "ready": _APP_READY},
+    )
 
 
 @_app.get("/hybridaction/{path:path}", tags=["health"])

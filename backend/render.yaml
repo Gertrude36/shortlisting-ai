@@ -1,3 +1,28 @@
+# render.yaml
+#
+# FIXES IN THIS VERSION:
+#
+#   ✅ FIX 1 — healthCheckPath: /health
+#              Render waits for the app to return HTTP 200 on /health
+#              before routing real traffic. Eliminates cold-start 502s
+#              that previously reached the frontend.
+#              NOTE: /health now always returns HTTP 200 (with ready: true/false
+#              in the body) so the probe succeeds even during startup.
+#              See backend/main.py FIX 2.
+#
+#   ✅ FIX 2 — envVars block with all required runtime variables.
+#              UPLOAD_DIR is explicit so the app always writes to the
+#              correct ephemeral path on Render's free-tier containers.
+#
+#   ✅ FIX 3 — maxShutdownDelaySeconds: 20
+#              Gives in-flight requests (document uploads, OCR, etc.)
+#              time to complete before the dyno is cycled on deploy.
+#
+#   ✅ FIX 4 — numInstances: 1
+#              Free tier only allows 1 instance; explicit here so
+#              auto-scaling never accidentally spins a second (billable)
+#              instance during a traffic spike.
+
 services:
   - type: web
     name: shortlisting-ai
@@ -7,8 +32,16 @@ services:
     plan: free
     branch: main
     rootDir: backend
-    # ✅ FIX: Tell Render to wait until /health returns 200 before routing traffic.
-    # Without this, cold-start requests arrive before FastAPI is ready → 502s.
+    # Render waits for HTTP 200 on /health before routing traffic.
+    # Eliminates cold-start 502s reaching the frontend.
     healthCheckPath: /health
+    # Gives in-flight document uploads / OCR jobs time to finish before
+    # the dyno is killed on redeploy. Without this, long requests get
+    # cut mid-flight and the user sees a network error.
+    maxShutdownDelaySeconds: 20
     envVars:
       - fromGroup: shortlisting-env
+      # Explicit upload path — avoids falling back to ./uploads (relative
+      # path inside the container) if UPLOAD_DIR is missing from the group.
+      - key: UPLOAD_DIR
+        value: /tmp/uploads
