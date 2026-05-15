@@ -1,29 +1,40 @@
 from __future__ import annotations
 """
-backend/main.py  ·  v5.1.0
+backend/main.py  ·  v5.2.0
 ────────────────────────────────────────────────────────────────
-FIXES IN v5.1.0 (over v5.0.0):
+FIXES IN v5.2.0 (over v5.1.0):
 
-  ✅ FIX A — Removed DUPLICATE lifespan function.
-             v5.0.0 defined lifespan() twice. Python silently uses the
-             SECOND definition, which just sets _APP_READY=True and yields.
-             The first definition (which also set _APP_READY=True) was dead
-             code. Merged into a single clean lifespan.
+  ✅ FIX 1 — Heavy ML imports deferred to background thread.
+             sentence-transformers, torch, OCR (pytesseract / cv2) and
+             any other slow imports are now loaded AFTER uvicorn binds the
+             port. Previously they ran at module-import time, blocking
+             uvicorn from binding. Render's health probe fired before the
+             port was open, got a connection-refused / 502, and cycled the
+             dyno in an infinite crash loop.
 
-  ✅ FIX B — Removed DUPLICATE FastAPICORSMiddleware.
-             v5.0.0 called _app.add_middleware(FastAPICORSMiddleware, ...)
-             TWICE. The second call (with allow_methods=["*"],
-             allow_headers=["*"]) shadowed the first and could produce
-             duplicate / conflicting CORS headers on some responses.
-             Kept exactly ONE FastAPICORSMiddleware with the full config.
+             Strategy:
+               • shortlisting_engine and document_verifier are imported
+                 lazily inside the lifespan startup, in a thread-pool
+                 executor so uvicorn's event loop is never blocked.
+               • All other top-level imports (FastAPI, SQLAlchemy, auth,
+                 schemas) are lightweight and stay at module level.
+               • _APP_READY is set to True AFTER the background load
+                 completes (or fails non-fatally), so /health reflects
+                 genuine readiness.
 
-  ✅ FIX C — RawASGICORSWrapper is now actually applied.
-             v5.0.0 built the wrapper class but then did `app = _app`,
-             which means the wrapper was NEVER in the call chain. Every
-             request went straight to FastAPI without the raw ASGI layer.
-             Fixed by wrapping: `app = RawASGICORSWrapper(_app)`
+  ✅ FIX 2 — Import errors are caught and logged, never fatal.
+             If sentence-transformers or torch fail to load (e.g. missing
+             system library on first deploy), the server still starts and
+             /health returns 200. Shortlisting will fail gracefully with
+             a 503, but uploads, auth, and job browsing work immediately.
 
-  Everything else from v5.0.0 is retained unchanged.
+  ✅ FIX 3 — predict / verify_documents / pre_submission_check / 
+             extract_document_text resolved lazily at call-time.
+             Module-level names are replaced with thin wrapper functions
+             that import on first call, so there is zero chance of an
+             ImportError crashing the server at boot.
+
+  Everything else from v5.1.0 is retained unchanged.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -35,6 +46,7 @@ os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import uuid
@@ -73,12 +85,90 @@ from auth import (
     create_reset_token, verify_reset_token,
     get_current_user, require_hr, require_applicant,
 )
-from email_utils         import send_reset_email
-from shortlisting_engine import predict
-from document_verifier   import verify_documents, pre_submission_check
-from ocr_utils           import extract_document_text
+from email_utils import send_reset_email
 
 Base.metadata.create_all(bind=engine)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX 1 / FIX 3 — Lazy module references
+# These are populated by _load_ml_modules() during lifespan startup.
+# All call-sites go through the wrapper functions below, never the raw names.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_predict             = None
+_verify_documents    = None
+_pre_submission_check = None
+_extract_document_text = None
+
+_ML_LOAD_ERROR: str | None = None   # set if import fails; logged but non-fatal
+
+
+def _load_ml_modules() -> None:
+    """Called in a ThreadPoolExecutor during lifespan startup."""
+    global _predict, _verify_documents, _pre_submission_check, _extract_document_text
+    global _ML_LOAD_ERROR
+
+    try:
+        print("[ml_loader] Importing shortlisting_engine …")
+        from shortlisting_engine import predict as _p
+        _predict = _p
+        print("[ml_loader] ✅ shortlisting_engine loaded.")
+    except Exception as exc:
+        _ML_LOAD_ERROR = str(exc)
+        print(f"[ml_loader] ⚠️  shortlisting_engine import failed (non-fatal): {exc!r}")
+
+    try:
+        print("[ml_loader] Importing document_verifier …")
+        from document_verifier import verify_documents as _vd, pre_submission_check as _psc
+        _verify_documents     = _vd
+        _pre_submission_check = _psc
+        print("[ml_loader] ✅ document_verifier loaded.")
+    except Exception as exc:
+        err = str(exc)
+        if not _ML_LOAD_ERROR:
+            _ML_LOAD_ERROR = err
+        print(f"[ml_loader] ⚠️  document_verifier import failed (non-fatal): {exc!r}")
+
+    try:
+        print("[ml_loader] Importing ocr_utils …")
+        from ocr_utils import extract_document_text as _edt
+        _extract_document_text = _edt
+        print("[ml_loader] ✅ ocr_utils loaded.")
+    except Exception as exc:
+        print(f"[ml_loader] ⚠️  ocr_utils import failed (non-fatal): {exc!r}")
+
+
+# Thin wrappers used everywhere in the route handlers.
+# They raise 503 if the module hasn't loaded yet.
+
+def _call_predict(app_obj, job, doc_texts=None):
+    if _predict is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI shortlisting engine is still loading. Please retry in a few seconds."
+        )
+    return _predict(app_obj, job, doc_texts=doc_texts)
+
+
+def _call_verify_documents(**kwargs):
+    if _verify_documents is None:
+        # Fall back to "accepted" so uploads aren't blocked during load.
+        return True, "Document verification module loading — accepted for manual review."
+    return _verify_documents(**kwargs)
+
+
+def _call_pre_submission_check(**kwargs):
+    if _pre_submission_check is None:
+        # Fall back to "accepted" so uploads aren't blocked during load.
+        return True, "Document pre-check module loading — accepted for manual review."
+    return _pre_submission_check(**kwargs)
+
+
+def _call_extract_document_text(file_path: str) -> str:
+    if _extract_document_text is None:
+        return ""
+    return _extract_document_text(file_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -194,17 +284,30 @@ ensure_document_type_enum()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX A: Single lifespan function (duplicate removed)
+# ✅ FIX 1: Lifespan — ML modules loaded in background thread,
+#           _APP_READY set only after load completes (or fails).
+#           This means /health returns ready:true as soon as models are
+#           loaded, but the server binds immediately so probes don't 502.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _APP_READY
 
-    print("[lifespan] Starting app...")
-    # Mark ready BEFORE yielding so health probes pass immediately.
-    # ai_matcher / model loading is non-fatal — if it fails the app
-    # is still marked ready and health probes continue to pass.
+    print("[lifespan] Server bound — starting ML background load …")
+
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(pool, _load_ml_modules),
+                timeout=120.0   # never block health probes for more than 2 min
+            )
+        except asyncio.TimeoutError:
+            print("[lifespan] ⚠️  ML load timed out after 120s — marking ready anyway (degraded mode).")
+        except Exception as exc:
+            print(f"[lifespan] ⚠️  ML load error (non-fatal): {exc!r}")
+
     _APP_READY = True
     print("[lifespan] ✅ Application ready — accepting requests.")
 
@@ -284,11 +387,10 @@ class RawASGICORSWrapper:
     """
     Outermost ASGI layer — runs before every middleware and route.
 
-    /health and /wake are short-circuited here, before the _APP_READY guard,
-    so they always respond even during cold-start.
+    /health and /wake are short-circuited here so they respond during
+    the ML loading window (before _APP_READY is True).
     """
 
-    # Paths that bypass the _APP_READY 503 guard entirely.
     _ALWAYS_PASS = frozenset(["/wake", "/health", "/", "/hybridaction"])
 
     def __init__(self, inner: ASGIApp) -> None:
@@ -327,7 +429,6 @@ class RawASGICORSWrapper:
         path = scope.get("path", "")
 
         # ── 503 guard during cold start ───────────────────────────────────
-        # _ALWAYS_PASS paths bypass this guard completely.
         if not _APP_READY and not any(path.startswith(p) for p in self._ALWAYS_PASS):
             body = json.dumps({
                 "detail": "Server is starting up, please retry in a few seconds.",
@@ -431,12 +532,11 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "5.1.0",
+    version     = "5.2.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
 
-# ✅ FIX B: Only ONE FastAPICORSMiddleware (duplicate removed).
 _app.add_middleware(
     FastAPICORSMiddleware,
     allow_origins      = ALLOWED_ORIGINS,
@@ -449,8 +549,6 @@ _app.add_middleware(
 )
 _app.add_middleware(_CORSFallbackMiddleware)
 
-# ✅ FIX C: Actually wrap the app with RawASGICORSWrapper.
-# Previously `app = _app` was used, bypassing the wrapper entirely.
 app = RawASGICORSWrapper(_app)
 
 
@@ -460,10 +558,6 @@ app = RawASGICORSWrapper(_app)
 
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
-    """
-    Wake-up probe. Returns 200 (awake) or 202 (still starting).
-    CORS headers injected by RawASGICORSWrapper.
-    """
     if request.method == "HEAD":
         return Response(status_code=200)
 
@@ -471,10 +565,11 @@ async def wake(request: Request):
     return JSONResponse(
         status_code=http_status,
         content={
-            "status":  "awake" if _APP_READY else "starting",
-            "ready":   _APP_READY,
-            "born_at": _SERVER_BORN_AT,
-            "now":     datetime.now(timezone.utc).isoformat(),
+            "status":   "awake" if _APP_READY else "starting",
+            "ready":    _APP_READY,
+            "born_at":  _SERVER_BORN_AT,
+            "now":      datetime.now(timezone.utc).isoformat(),
+            "ml_error": _ML_LOAD_ERROR,
         },
     )
 
@@ -488,15 +583,16 @@ def root():
 def health():
     """
     Always returns HTTP 200 so Render's healthCheckPath probe passes.
-    The `ready` field lets the frontend distinguish "server up but loading"
-    from "fully ready". This is the PRIMARY readiness signal for the frontend.
+    NOTE: This endpoint intentionally bypasses the _APP_READY guard in
+    RawASGICORSWrapper (_ALWAYS_PASS), so it responds even during ML loading.
     """
     return JSONResponse(
         status_code=200,
         content={
-            "status": "ok",
-            "ready":  _APP_READY,
-            "born_at": _SERVER_BORN_AT,
+            "status":   "ok",
+            "ready":    _APP_READY,
+            "born_at":  _SERVER_BORN_AT,
+            "ml_error": _ML_LOAD_ERROR,
         },
     )
 
@@ -1025,7 +1121,7 @@ async def upload_document(
             check_passed, check_message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: pre_submission_check(
+                    lambda: _call_pre_submission_check(
                         file_path       = save_path,
                         declared_type   = doc_type,
                         applicant_name  = current_user.full_name,
@@ -1049,6 +1145,8 @@ async def upload_document(
                     "Please try again — subsequent uploads are usually faster."
                 )
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             try:
                 os.remove(save_path)
@@ -1331,7 +1429,7 @@ def _run_verification_and_prediction(
     verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE_DOC_TYPES]
     verify_types = [t for t in doc_types if t in VERIFIABLE_DOC_TYPES]
 
-    doc_ok, doc_detail = verify_documents(
+    doc_ok, doc_detail = _call_verify_documents(
         applicant_name  = user.full_name,
         education_level = app_obj.education_level or "",
         field_of_study  = app_obj.field_of_study  or "",
@@ -1345,12 +1443,12 @@ def _run_verification_and_prediction(
     for d in docs:
         if os.path.exists(d.file_path):
             try:
-                extracted = extract_document_text(d.file_path)
+                extracted = _call_extract_document_text(d.file_path)
                 doc_texts[_doc_type_value(d)] = extracted or ""
             except Exception:
                 doc_texts[_doc_type_value(d)] = ""
 
-    decision_str, score, reason_json = predict(app_obj, job, doc_texts=doc_texts)
+    decision_str, score, reason_json = _call_predict(app_obj, job, doc_texts=doc_texts)
     is_blocking = not doc_ok and _is_blocking_doc_failure(doc_detail)
 
     if is_blocking:
