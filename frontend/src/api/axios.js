@@ -138,7 +138,7 @@ export function rearmWakeGate() {
 
 // ── Upload concurrency semaphore ───────────────────────────────────────────
 // _inFlight counts ONLY actively granted slots (not queued waiters).
-const MAX_CONCURRENT_UPLOADS = 2
+const MAX_CONCURRENT_UPLOADS = 5
 let _inFlight  = 0
 const _waiters = []
 
