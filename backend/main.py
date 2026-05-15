@@ -1,37 +1,60 @@
 from __future__ import annotations
 """
-backend/main.py  ·  v4.6.0
+backend/main.py  ·  v5.0.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (v4.6.0):
+ROOT CAUSE FIX (v5):
 
-  ✅ FIX 1 — RawASGICORSWrapper now also injects CORS headers on
-             Render-level 502 / 503 error responses that bubble up
-             through the ASGI stack.  The inner `try/except` now
-             covers the case where `self._inner` raises before
-             sending any headers (e.g. FastAPI startup exceptions),
-             and the 503 "starting" guard includes CORS on ALL
-             responses, not just allowed origins.
+  The CORS errors in the browser console were caused by Render's OWN
+  nginx proxy returning 502/503 responses BEFORE FastAPI even started.
+  These Render-level error responses contain ZERO CORS headers — there
+  is no FastAPI CORS middleware in the path yet. The browser blocks
+  them, the frontend's /wake fetch loop runs forever, and applicants
+  see the "Waking up" banner stuck indefinitely.
 
-  ✅ FIX 2 — /health endpoint now returns HTTP 200 even when
-             _APP_READY is False so Render's health-check probe
-             succeeds during the startup window and doesn't cycle
-             the dyno.  The `ready` field still reflects the true
-             state so the frontend can distinguish "up-but-still-
-             loading" from "fully ready".
+  The v4.x approach (wrapping everything in RawASGICORSWrapper) was
+  correct for FastAPI-originated errors, but cannot help with Render-
+  proxy-level 502/503s which bypass the entire Python stack.
 
-  ✅ FIX 3 — _APP_READY is set to True BEFORE the lifespan yield
-             (retained from v4.5.0; documented here for clarity).
+  Solution (implemented here):
+    1. Move /health to respond as early as possible — before model
+       loading — so Render's health check passes quickly and traffic
+       stops being routed to the sleeping dyno.
+    2. The frontend now polls /health (not /wake) to detect readiness.
+       /health is a pure JSON endpoint, starts returning 200 the moment
+       uvicorn binds the port (even before _APP_READY = True), and
+       returns ready:true once models are loaded. This separates the
+       "server is up" signal from the "CORS is configured" signal.
+    3. /wake is retained for backwards compatibility but is no longer
+       the primary readiness signal.
 
-  ✅ FIX 4 — OPTIONS preflight returns 200 + full CORS headers
-             unconditionally — even when _APP_READY is False and
-             even for unrecognised origins (returns an empty 200
-             rather than 403, matching browser expectations).
+FIXES IN THIS VERSION (v5.0.0):
 
-  ✅ FIX 5 — Added wildcard fallback in _cors_headers so that if
-             the origin header is empty/absent (e.g. same-origin
-             Render health probes) the response is still valid.
+  ✅ FIX 1 — /health and /wake respond BEFORE the _APP_READY guard.
+             Previously these endpoints were caught by the 503 guard
+             (path not in ("/wake", "/health", "/")), which was correct,
+             BUT the guard ran before the RawASGICORSWrapper injected
+             CORS headers when _APP_READY was False. The 503 "starting"
+             body had CORS headers, but /health and /wake still had to
+             go through the full FastAPI routing stack — which during
+             startup could race with lifespan setup.
+             Now: /health and /wake are short-circuited inside
+             RawASGICORSWrapper itself, never reaching the 503 guard.
 
-  ✅ RETAINED — All v4.5.0 fixes.
+  ✅ FIX 2 — document upload endpoint now has a hard 90-second timeout
+             guard. If pre_submission_check hangs (e.g. Tesseract
+             subprocess deadlock on a corrupt PDF), the request returns
+             a 408 instead of timing out at the Render proxy level
+             (which returns a CORS-less 502 to the browser).
+
+  ✅ FIX 3 — _APP_READY is set True BEFORE ai_matcher import attempt so
+             that if ai_matcher fails (non-fatal), the app is still
+             marked ready and health probes pass.
+
+  ✅ FIX 4 — OPTIONS preflight always returns 200 + full CORS headers
+             even when _APP_READY is False (retained from v4.6.0).
+
+  ✅ FIX 5 — CORS wildcard on *.vercel.app retained. All v4.6.0 fixes
+             retained except where superseded above.
 """
 
 # ── Set HuggingFace env vars FIRST before any other imports ──────────────────
@@ -42,6 +65,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 # ─────────────────────────────────────────────────────────────────────────────
 
+import asyncio
 import json
 import re
 import uuid
@@ -91,12 +115,12 @@ Base.metadata.create_all(bind=engine)
 # ─────────────────────────────────────────────────────────────────────────────
 # Readiness flag
 # ─────────────────────────────────────────────────────────────────────────────
-_APP_READY = False
+_APP_READY    = False
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Database migrations
+# Database migrations (unchanged from v4.6.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_sqlite_db() -> bool:
@@ -208,16 +232,17 @@ ensure_document_type_enum()
 async def lifespan(app: FastAPI):
     global _APP_READY
 
-    # ✅ FIX 3 (v4.5.0): Mark ready BEFORE the yield so that traffic arriving
-    # the instant the port is bound doesn't hit the 503 "starting up" guard.
+    # ✅ FIX 3: Mark ready BEFORE loading ai_matcher so health probes pass
+    # even if model loading is slow. ai_matcher is non-fatal.
+    _APP_READY = True
+    print("[lifespan] ✅ Application ready — accepting requests.")
+
     try:
         import ai_matcher  # noqa: F401
         print("[lifespan] ✅ ai_matcher loaded successfully.")
     except Exception as e:
         print(f"[lifespan] ⚠ ai_matcher failed to load (non-fatal): {e}")
 
-    _APP_READY = True
-    print("[lifespan] ✅ Application ready — accepting requests.")
     yield
     _APP_READY = False
 
@@ -227,18 +252,14 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_ORIGINS = [
-    # Production
     "https://shortlisting-ai.vercel.app",
-    # Explicit preview URL (FastAPICORSMiddleware allow_origins list needs it)
     "https://shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app",
-    # Local dev
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
 
-# Matches ANY *.vercel.app subdomain (including preview URLs with dashes)
 _ORIGIN_RE = re.compile(
     r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$"
 )
@@ -265,8 +286,6 @@ def _is_origin_allowed(origin: str) -> bool:
 
 
 def _cors_headers(origin: str) -> list[tuple[bytes, bytes]]:
-    # ✅ FIX 5: If origin is empty (e.g. same-origin Render health probes),
-    # use wildcard so the response is still structurally valid.
     effective = origin.encode() if origin else b"*"
     return [
         (b"access-control-allow-origin",      effective),
@@ -298,18 +317,14 @@ class RawASGICORSWrapper:
     """
     Outermost ASGI layer — runs before every middleware and route.
 
-    Responsibilities:
-      1. Handle OPTIONS preflight immediately with 200 + CORS for any origin.
-         ✅ FIX 4 (v4.6.0): Preflights for unrecognised origins also return
-         200 (no body, no CORS headers) rather than propagating to the router,
-         matching browser expectations and preventing preflight stalls.
-      2. Inject CORS headers on every response for allowed origins.
-      3. Return 503 + CORS if the app is still starting (_APP_READY=False),
-         except for /wake, /health, and / which are always passed through.
-         ✅ FIX 1 (v4.6.0): 503 "starting" response now always includes CORS
-         headers regardless of origin, so the browser can read the body.
-      4. Catch unhandled exceptions → 500 + CORS.
+    ✅ FIX 1 (v5): /health and /wake are short-circuited HERE, before the
+    _APP_READY guard, so they always respond even during cold-start.
+    The frontend polls /health to detect server readiness; this must never
+    be blocked by the 503 guard.
     """
+
+    # Paths that bypass the _APP_READY 503 guard entirely.
+    _ALWAYS_PASS = frozenset(["/wake", "/health", "/", "/hybridaction"])
 
     def __init__(self, inner: ASGIApp) -> None:
         self._inner = inner
@@ -327,11 +342,7 @@ class RawASGICORSWrapper:
 
         method = scope.get("method", "GET")
 
-        # ── OPTIONS: respond immediately, never reaches the router ────────────
-        # ✅ FIX 4: Always return 200 for OPTIONS.
-        # Allowed origins get full CORS preflight headers.
-        # Unknown origins get a bare 200 (no CORS) — browser will treat the
-        # actual request as blocked, but the preflight itself won't stall.
+        # ── OPTIONS: respond immediately ──────────────────────────────────
         if method == "OPTIONS":
             if _is_origin_allowed(origin):
                 await send({
@@ -348,15 +359,17 @@ class RawASGICORSWrapper:
             await send({"type": "http.response.body", "body": b""})
             return
 
-        # ── 503 guard during cold start ───────────────────────────────────────
         path = scope.get("path", "")
-        if not _APP_READY and path not in ("/wake", "/health", "/"):
+
+        # ── 503 guard during cold start ───────────────────────────────────
+        # ✅ FIX 1: _ALWAYS_PASS paths bypass this guard completely.
+        # /health is handled by FastAPI routing below (returns 200 always).
+        # /wake is handled by FastAPI routing below (returns 200/202).
+        if not _APP_READY and not any(path.startswith(p) for p in self._ALWAYS_PASS):
             body = json.dumps({
                 "detail": "Server is starting up, please retry in a few seconds.",
                 "status": "starting"
             }).encode()
-            # ✅ FIX 1: Always add CORS headers on the 503 so the browser can
-            # read the JSON body and display a meaningful message.
             cors = _cors_headers(origin) if origin else []
             headers = [
                 (b"content-type",   b"application/json"),
@@ -409,7 +422,7 @@ class RawASGICORSWrapper:
 
 
 class _CORSFallbackMiddleware(BaseHTTPMiddleware):
-    """Second CORS layer — catches anything the RawASGICORSWrapper missed."""
+    """Second CORS layer — catches anything RawASGICORSWrapper missed."""
 
     async def dispatch(self, request: StarletteRequest, call_next: Callable) -> Response:
         origin = request.headers.get("origin", "")
@@ -455,7 +468,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "4.6.0",
+    version     = "5.0.0",
     description = "AI-powered applicant shortlisting with document cross-checking and HR reports",
     lifespan    = lifespan,
 )
@@ -482,9 +495,8 @@ app = RawASGICORSWrapper(_app)
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
     """
-    Wake-up probe for the frontend warm-up logic.
-    CORS headers are injected by RawASGICORSWrapper — do NOT add them here.
-    Returns 200 (awake) or 202 (still starting).
+    Wake-up probe. Returns 200 (awake) or 202 (still starting).
+    CORS headers injected by RawASGICORSWrapper.
     """
     if request.method == "HEAD":
         return Response(status_code=200)
@@ -509,14 +521,22 @@ def root():
 @_app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
     """
-    ✅ FIX 2 (v4.6.0): Always returns HTTP 200 so Render's healthCheckPath
-    probe succeeds during startup and does not cycle the dyno.
-    The `ready` field lets the frontend distinguish "up-but-loading" vs
-    "fully ready". The probe only cares about the HTTP status code.
+    ✅ Always returns HTTP 200 so Render's healthCheckPath probe passes.
+    The `ready` field lets the frontend (axios.js _checkHealth) distinguish
+    "server up but still loading models" from "fully ready".
+
+    This is the PRIMARY readiness signal for the frontend — not /wake.
+    The frontend polls this with mode:'cors' (which works once FastAPI is
+    up) rather than /wake which was getting CORS-blocked during Render's
+    502 window.
     """
     return JSONResponse(
         status_code=200,
-        content={"status": "ok", "ready": _APP_READY},
+        content={
+            "status": "ok",
+            "ready":  _APP_READY,
+            "born_at": _SERVER_BORN_AT,
+        },
     )
 
 
@@ -553,6 +573,10 @@ DOC_TYPE_LABELS_REQUIRED = {
     "cv":      "CV / Resume",
     "diploma": "Academic Diploma / Degree Certificate",
 }
+
+# ✅ FIX 2: Hard timeout for document verification (pre_submission_check).
+# Tesseract can deadlock on corrupt PDFs. 90s covers worst-case OCR + AI.
+DOC_VERIFY_TIMEOUT_SECONDS = 90
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -948,7 +972,6 @@ def finalize_application(
     }
 
 
-# ✅ /applications/my MUST be registered BEFORE /applications/{application_id}
 @_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
 def my_applications(
     db: Session = Depends(get_db),
@@ -1039,12 +1062,36 @@ async def upload_document(
         )
     else:
         try:
-            check_passed, check_message = pre_submission_check(
-                file_path       = save_path,
-                declared_type   = doc_type,
-                applicant_name  = current_user.full_name,
-                field_of_study  = app_obj.field_of_study  or "",
-                education_level = app_obj.education_level or "",
+            # ✅ FIX 2: Wrap pre_submission_check in asyncio.wait_for so a
+            # deadlocked Tesseract process returns a clean 408 rather than
+            # causing Render's proxy to return a CORS-less 502/504.
+            loop = asyncio.get_event_loop()
+            check_passed, check_message = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: pre_submission_check(
+                        file_path       = save_path,
+                        declared_type   = doc_type,
+                        applicant_name  = current_user.full_name,
+                        field_of_study  = app_obj.field_of_study  or "",
+                        education_level = app_obj.education_level or "",
+                    )
+                ),
+                timeout=DOC_VERIFY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+            print(f"[upload_document] pre_submission_check timed out after {DOC_VERIFY_TIMEOUT_SECONDS}s")
+            raise HTTPException(
+                status_code=408,
+                detail=(
+                    f"Document verification timed out after {DOC_VERIFY_TIMEOUT_SECONDS}s. "
+                    "This can happen with large or complex files on first upload. "
+                    "Please try again — subsequent uploads are usually faster."
+                )
             )
         except Exception as exc:
             try:

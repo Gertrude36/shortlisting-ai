@@ -1,27 +1,23 @@
-# render.yaml
+# render.yaml — v5.0.0
 #
 # FIXES IN THIS VERSION:
 #
-#   ✅ FIX 1 — healthCheckPath: /health
-#              Render waits for the app to return HTTP 200 on /health
-#              before routing real traffic. Eliminates cold-start 502s
-#              that previously reached the frontend.
-#              NOTE: /health now always returns HTTP 200 (with ready: true/false
-#              in the body) so the probe succeeds even during startup.
-#              See backend/main.py FIX 2.
+#   ✅ FIX 1 — Added initialDelaySeconds: 60
+#              Render was probing /health BEFORE uvicorn was even bound to
+#              the port, causing the service to be marked unhealthy and
+#              cycled. 60s gives the app time to load ML models + bind.
 #
-#   ✅ FIX 2 — envVars block with all required runtime variables.
-#              UPLOAD_DIR is explicit so the app always writes to the
-#              correct ephemeral path on Render's free-tier containers.
+#   ✅ FIX 2 — healthCheckPath: /health (retained)
+#              /health always returns HTTP 200 with ready: true/false in body.
 #
-#   ✅ FIX 3 — maxShutdownDelaySeconds: 20
-#              Gives in-flight requests (document uploads, OCR, etc.)
-#              time to complete before the dyno is cycled on deploy.
+#   ✅ FIX 3 — maxShutdownDelaySeconds: 30
+#              Raised from 20 → 30 to cover the full OCR+AI pipeline which
+#              can take up to 25s on free tier. Prevents mid-flight cuts.
 #
-#   ✅ FIX 4 — numInstances: 1
-#              Free tier only allows 1 instance; explicit here so
-#              auto-scaling never accidentally spins a second (billable)
-#              instance during a traffic spike.
+#   ✅ FIX 4 — numInstances: 1 (retained, free tier limit)
+#
+#   ✅ FIX 5 — Removed CORS_ALLOW_ORIGINS from envVars — CORS is handled
+#              entirely in main.py and does not need a runtime env var.
 
 services:
   - type: web
@@ -32,16 +28,22 @@ services:
     plan: free
     branch: main
     rootDir: backend
-    # Render waits for HTTP 200 on /health before routing traffic.
-    # Eliminates cold-start 502s reaching the frontend.
+
+    # Probe /health — returns 200 even during startup (ready field varies).
+    # initialDelaySeconds tells Render to wait before the FIRST probe, so
+    # uvicorn has time to bind the port and load the ML models.
     healthCheckPath: /health
-    # Gives in-flight document uploads / OCR jobs time to finish before
-    # the dyno is killed on redeploy. Without this, long requests get
-    # cut mid-flight and the user sees a network error.
-    maxShutdownDelaySeconds: 20
+    initialDelaySeconds: 60
+
+    # Gives in-flight document uploads / OCR / AI jobs time to finish
+    # before the dyno is killed on redeploy.
+    maxShutdownDelaySeconds: 30
+
+    # Free tier = 1 instance only.
+    numInstances: 1
+
     envVars:
       - fromGroup: shortlisting-env
-      # Explicit upload path — avoids falling back to ./uploads (relative
-      # path inside the container) if UPLOAD_DIR is missing from the group.
+      # Explicit upload path — avoids the ./uploads relative fallback.
       - key: UPLOAD_DIR
         value: /tmp/uploads

@@ -1,38 +1,66 @@
 /**
- * frontend/src/api/axios.js — v4
+ * frontend/src/api/axios.js — v5.0.0
  *
- * FIXES IN THIS VERSION (v4):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ROOT CAUSE OF THE INFINITE CORS LOOP (now fixed):
  *
- *   ✅ FIX 1 — Safety timeout reduced from 35s to 30s to match the
- *              WakeBanner countdown UX. The banner counts down 30s,
- *              the safety unblock fires at exactly the same moment,
- *              so the UI and the gate align perfectly.
+ *   When Render's free-tier dyno is sleeping, Render's OWN nginx proxy
+ *   returns 502/503 responses. These come from Render's infrastructure —
+ *   NOT from your FastAPI app — so they carry ZERO CORS headers. The
+ *   browser therefore blocks every single /wake fetch with a CORS error,
+ *   _pingWake() never resolves, and the loop runs forever.
  *
- *   ✅ FIX 2 — _pingWake() now sends the no-cors "knock" with
- *              keepalive: true. On Chromium-based browsers, fetch()
- *              with keepalive continues even if the tab navigates
- *              away during a cold start, ensuring Render receives the
- *              wake signal even in edge cases.
+ *   The previous code used two fetches per ping cycle:
+ *     1. no-cors knock  → works (no-cors ignores CORS headers)
+ *     2. cors readiness → always CORS-blocked during sleep → never resolves
  *
- *   ✅ FIX 3 — _startWakePinging() now immediately increments the
- *              polling frequency to 1.5s (from 2s) for the first
- *              10 pings (i.e. the first ~15s), then drops back to
- *              2s. Cold-start latency on Render free tier clusters
- *              around 8–15s; denser early polling catches readiness
- *              sooner without burning extra requests over time.
+ *   Fix: use ONE no-cors ping to keep Render waking up. To detect that
+ *   the server is actually ready, poll /health with a regular cors fetch
+ *   but with a short timeout and explicit error swallowing. We consider
+ *   the server awake only when we get back a real JSON 200 response.
  *
- *   ✅ FIX 4 — Network errors on non-upload, non-wake requests now
- *              check whether the server subsequently becomes awake
- *              before retrying, via Promise.race([gate, sleep]).
- *              Previously, retries fired into a still-sleeping
- *              server and all failed together.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * FIXES IN THIS VERSION (v5):
  *
- *   ✅ FIX 5 — rearmWakeGate() now cancels any in-progress wake
- *              interval before re-arming, preventing a race where
- *              two intervals coexist after a keep-alive re-arm.
+ *   ✅ FIX 1 — Single no-cors knock replaces the dual-fetch pattern.
+ *              The "cors readiness check" fetch was always CORS-blocked
+ *              during Render's 502 window. We now fire ONE no-cors fetch
+ *              to wake the dyno, and poll /health (with mode:'cors') as a
+ *              *separate* readiness check that is independent of the knock.
+ *              /health always returns 200 once FastAPI is up.
  *
- * Previously shipped fixes (all retained):
- *   ✅ BUG 1  — no-cors knock + cors readiness check split
+ *   ✅ FIX 2 — Exponential backoff on wake pings (1.5s → 2s → 3s → 5s).
+ *              Render free-tier cold starts take 8–30s. Hammering every
+ *              1.5s produces hundreds of failed fetches and floods the
+ *              console. Exponential backoff reduces noise while still
+ *              catching readiness quickly.
+ *
+ *   ✅ FIX 3 — Wake gate resolves on /health 200, not on /wake CORS pass.
+ *              Previously the gate only resolved if the cors /wake fetch
+ *              succeeded — which required CORS headers that Render's 502
+ *              never sends. Now we check /health which has no CORS issues
+ *              (it returns 200 from FastAPI once the app is up).
+ *
+ *   ✅ FIX 4 — Safety timeout raised to 45s.
+ *              Render free-tier cold starts can take up to 40s under load.
+ *              The previous 30s timeout caused premature unblocking and
+ *              uploads firing into a still-sleeping server.
+ *
+ *   ✅ FIX 5 — rearmWakeGate() tears down the existing interval (retained
+ *              from v4 FIX 5) and resets the backoff counter.
+ *
+ *   ✅ FIX 6 — Upload timeout raised to 150s.
+ *              OCR (Tesseract on a cold CPU) + AI semantic matching
+ *              (sentence-transformers first run) can take 90–120s on
+ *              Render free tier. 120s was too tight; 150s gives headroom.
+ *
+ *   ✅ FIX 7 — Network errors on /auth/me and /jobs no longer trigger
+ *              rearmWakeGate() on their own — only genuine upload-path
+ *              network failures do. This prevents the wake banner from
+ *              flashing on every page load when the server is slow.
+ *
+ * Previously shipped fixes (all retained from v4):
+ *   ✅ BUG 1  — no-cors knock
  *   ✅ BUG 2  — single point of token injection
  *   ✅ BUG 3  — semaphore counter tracks active slots correctly
  *   ✅ BUG 4  — rearmWakeGate() unconditional
@@ -79,8 +107,8 @@ let _wakeGatePromise      = null
 let _wakeGateResolve      = null
 let _serverConfirmedAwake = _IS_LOCAL
 
-// ✅ FIX 1: Safety timeout matches the 30s WakeBanner countdown exactly.
-const WAKE_SAFETY_TIMEOUT_MS = 30_000
+// ✅ FIX 4: Raised to 45s — Render free-tier cold starts can take up to 40s.
+const WAKE_SAFETY_TIMEOUT_MS = 45_000
 
 function _armWakeGate() {
   _serverConfirmedAwake = false
@@ -93,16 +121,16 @@ function _armWakeGate() {
       resolve()
     }
 
-    // ✅ FIX 1: 30s safety unblock — aligns with WakeBanner countdown.
-    // Unblocks queued uploads but does NOT confirm server awake.
-    // Pinging continues until a real HTTP 200 is received.
+    // Safety unblock — fires if the server never confirms awake within 45s.
+    // Unblocks queued uploads but does NOT set _serverConfirmedAwake, so
+    // pinging continues in the background until a real 200 is received.
     setTimeout(() => {
       if (!_serverConfirmedAwake) {
         console.warn(
-          '[axios] Wake gate safety timeout (30s) — unblocking uploads without confirming server awake.'
+          '[axios] Wake gate safety timeout (45s) — unblocking uploads without confirming server awake.'
         )
         resolve()
-        // _serverConfirmedAwake stays false → pinging continues
+        // _serverConfirmedAwake stays false → health polling continues
       }
     }, WAKE_SAFETY_TIMEOUT_MS)
   })
@@ -119,42 +147,38 @@ export function getCurrentWakeGate() {
 }
 
 /**
- * Re-arm the wake gate.
- * ✅ FIX 5: Cancels any existing ping interval before re-arming to prevent
- * two intervals coexisting after a keep-alive re-arm.
+ * Re-arm the wake gate (called when the server appears to have gone back to sleep).
+ * ✅ FIX 5: Cancels existing ping interval and resets backoff before re-arming.
  */
 export function rearmWakeGate() {
   if (_IS_LOCAL) return
   console.log('[axios] Re-arming wake gate — server may have gone back to sleep.')
-  // FIX 5: tear down existing interval first
   if (_wakeInterval) {
     clearInterval(_wakeInterval)
     _wakeInterval = null
   }
+  _backoffIndex = 0
   _armWakeGate()
   _setServerStatus('waking')
   _startWakePinging()
 }
 
 // ── Upload concurrency semaphore ───────────────────────────────────────────
-// _inFlight counts ONLY actively granted slots (not queued waiters).
-const MAX_CONCURRENT_UPLOADS = 5
+const MAX_CONCURRENT_UPLOADS = 3   // lowered from 5 — free tier has 1 CPU
 let _inFlight  = 0
 const _waiters = []
 
 export function waitForUploadSlot() {
   if (_inFlight < MAX_CONCURRENT_UPLOADS) {
-    _inFlight++             // immediate grant
+    _inFlight++
     return Promise.resolve()
   }
-  // At capacity — queue without incrementing (slot count transfers on release)
   return new Promise(resolve => _waiters.push(resolve))
 }
 
 export function releaseUploadSlot() {
   const next = _waiters.shift()
   if (next) {
-    // Transfer slot to next waiter — counter stays the same.
     setTimeout(next, 100)
   } else {
     _inFlight = Math.max(0, _inFlight - 1)
@@ -162,93 +186,115 @@ export function releaseUploadSlot() {
 }
 
 // ── Wake pinging ───────────────────────────────────────────────────────────
+// ✅ FIX 2: Exponential backoff intervals (ms).
+// Cold starts typically resolve at 8–30s. Dense early pinging, then back off.
+const BACKOFF_INTERVALS = [1500, 1500, 2000, 2000, 3000, 3000, 5000]
+
 let _wakePending  = false
 let _wakeInterval = null
-let _pingCount    = 0  // ✅ FIX 3: track pings for adaptive interval
+let _backoffIndex = 0
 
-function _pingWake() {
-  if (_IS_LOCAL || _serverConfirmedAwake || _wakePending) return Promise.resolve()
+/**
+ * ✅ FIX 1: Single no-cors knock to wake the dyno.
+ *
+ * WHY no-cors ONLY:
+ *   While Render's dyno is sleeping, its nginx proxy returns 502/503
+ *   with NO Access-Control-Allow-Origin header. The browser blocks
+ *   mode:'cors' fetches with a CORS error before we even see the status.
+ *   mode:'no-cors' ignores CORS headers entirely, so the bytes reach
+ *   Render and kick the dyno awake — we just can't read the response.
+ *
+ * Readiness is detected separately by _checkHealth() below.
+ */
+function _knockServer() {
+  if (_IS_LOCAL || _wakePending) return
   _wakePending = true
-  _pingCount++
   _setServerStatus('waking')
 
-  // ✅ BUG 1 (retained): Split into no-cors knock + cors readiness check.
-  //
-  // Knock (no-cors, fire-and-forget):
-  //   Sends bytes to Render so it starts the dyno.
-  //   Must be no-cors — sleeping server can't send CORS headers yet.
-  //   ✅ FIX 2: keepalive: true ensures delivery even across navigations.
   fetch(`${BACKEND}/wake`, {
     method:    'GET',
-    mode:      'no-cors',
+    mode:      'no-cors',   // must be no-cors — sleeping server has no CORS headers
     cache:     'no-store',
-    keepalive: true,
-  }).catch(() => {})
-
-  // Readiness check (cors): reads the JSON and confirms readiness.
-  return fetch(`${BACKEND}/wake`, {
-    method: 'GET',
-    mode:   'cors',
-    cache:  'no-store',
-    signal: AbortSignal.timeout(8_000),
+    keepalive: true,        // survives tab navigation during cold start
   })
-    .then(res => {
-      if (res.ok && _wakeGateResolve) _wakeGateResolve()
-    })
-    .catch(() => { /* still booting — next interval retries */ })
+    .catch(() => {})        // always ignore errors — we can't read the response anyway
     .finally(() => { _wakePending = false })
+}
+
+/**
+ * ✅ FIX 3: Health check is how we detect the server is ACTUALLY ready.
+ *
+ * /health returns HTTP 200 (with ready:true/false) once FastAPI is bound.
+ * Unlike /wake, it doesn't require the app to have finished loading models,
+ * but since _APP_READY is set before the lifespan yield, it's effectively
+ * the same. Crucially, this fetch can use mode:'cors' because by the time
+ * FastAPI is up, it IS sending CORS headers.
+ */
+async function _checkHealth() {
+  if (_IS_LOCAL || _serverConfirmedAwake) return
+  try {
+    const res = await fetch(`${BACKEND}/health`, {
+      method: 'GET',
+      mode:   'cors',
+      cache:  'no-store',
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (res.ok) {
+      // Server is up and responding with CORS headers — confirm awake.
+      if (_wakeGateResolve) _wakeGateResolve()
+    }
+  } catch {
+    // Still booting or CORS not yet active — next interval will retry.
+  }
 }
 
 function _startWakePinging() {
   if (_IS_LOCAL) return
   if (_wakeInterval) { clearInterval(_wakeInterval); _wakeInterval = null }
-  _pingCount = 0
-  _pingWake()
 
-  // ✅ FIX 3: Adaptive polling — 1.5s for first 10 pings (~15s), then 2s.
-  // Cold starts cluster around 8–15s; denser early polling catches readiness
-  // sooner without burning extra requests long-term.
-  _wakeInterval = setInterval(() => {
-    if (_serverConfirmedAwake) {
-      clearInterval(_wakeInterval)
-      _wakeInterval = null
-      return
-    }
+  _backoffIndex = 0
 
-    const interval = _pingCount < 10 ? 1_500 : 2_000
+  // Immediate first knock + health check
+  _knockServer()
+  _checkHealth()
 
-    // Re-schedule at the correct interval dynamically.
-    clearInterval(_wakeInterval)
-    _pingWake()
-    _wakeInterval = setInterval(() => {
-      if (_serverConfirmedAwake) {
-        clearInterval(_wakeInterval)
-        _wakeInterval = null
-      } else {
-        _pingWake()
-      }
-    }, interval)
+  // ✅ FIX 2: Exponential backoff scheduling.
+  // Instead of a fixed-interval setInterval, we chain timeouts so each
+  // iteration can use a different delay.
+  function _scheduleNext() {
+    if (_serverConfirmedAwake) return
 
-  }, 1_500)  // initial tick at 1.5s
+    const delay = BACKOFF_INTERVALS[Math.min(_backoffIndex, BACKOFF_INTERVALS.length - 1)]
+    _backoffIndex++
+
+    _wakeInterval = setTimeout(() => {
+      if (_serverConfirmedAwake) return
+      _knockServer()
+      _checkHealth()
+      _scheduleNext()
+    }, delay)
+  }
+
+  _scheduleNext()
 }
 
 _startWakePinging()
 
-// Keep-alive: ping every 3.5 min to prevent Render from sleeping mid-session.
+// ── Keep-alive: ping every 4 min to prevent Render from sleeping mid-session ─
 setInterval(async () => {
   if (_IS_LOCAL || !_serverConfirmedAwake) return
   try {
-    const res = await fetch(`${BACKEND}/wake`, {
+    const res = await fetch(`${BACKEND}/health`, {
       method: 'GET',
       mode:   'cors',
       cache:  'no-store',
-      signal: AbortSignal.timeout(6_000),
+      signal: AbortSignal.timeout(8_000),
     })
     if (!res.ok) rearmWakeGate()
   } catch {
     rearmWakeGate()
   }
-}, 3.5 * 60 * 1_000)
+}, 4 * 60 * 1_000)
 
 // ── Auth helpers ───────────────────────────────────────────────────────────
 const AUTH_KEYS = [
@@ -287,8 +333,12 @@ const isDocumentUpload = (url = '', method = '') =>
   method.toUpperCase() === 'POST' &&
   /\/applications\/\d+\/documents$/.test(url.split('?')[0])
 
+// Routes where network errors should NOT trigger rearmWakeGate().
+// These run on every page load and would cause spurious wake banner flashes.
+const isBackgroundRoute = (url = '') =>
+  /\/(auth\/me|jobs)($|\?)/.test(url)
+
 // ── Request interceptor ────────────────────────────────────────────────────
-// ✅ BUG 2 (retained): Single point of token injection.
 api.interceptors.request.use(
   async (config) => {
     if (isDocumentUpload(config.url, config.method)) {
@@ -299,7 +349,9 @@ api.interceptors.request.use(
       }
 
       config._serializedUpload = true
-      config.timeout = 120_000   // OCR + AI verification can take 60–90s
+      // ✅ FIX 6: Raised upload timeout to 150s.
+      // OCR (Tesseract) + sentence-transformers on cold CPU = up to 120s.
+      config.timeout = 150_000
     }
 
     if (!isPublic(config.url, config.method)) {
@@ -326,6 +378,7 @@ api.interceptors.response.use(
     if (response.config?._serializedUpload && !response.config?._slotPreacquired) {
       releaseUploadSlot()
     }
+    // Any successful response means the server is alive.
     if (!_serverConfirmedAwake && _wakeGateResolve) {
       _wakeGateResolve()
     }
@@ -338,25 +391,36 @@ api.interceptors.response.use(
     }
 
     if (!error.response) {
-      // Network failure — may be CORS-blocked Render 502 during cold start.
-      rearmWakeGate()
-
+      // Network failure — server may be sleeping or restarting.
       const config = error.config || {}
 
-      if (config.url?.includes('/wake'))               return Promise.reject(error)
-      if (isDocumentUpload(config.url, config.method)) return Promise.reject(error)
+      if (config.url?.includes('/wake') || config.url?.includes('/health')) {
+        return Promise.reject(error)
+      }
+
+      // ✅ FIX 7: Don't rearm for background routes (/auth/me, /jobs)
+      // on initial page load — these fire before the server is confirmed
+      // awake and would cause the wake banner to flash unnecessarily.
+      if (!isBackgroundRoute(config.url || '')) {
+        rearmWakeGate()
+      }
+
+      if (isDocumentUpload(config.url, config.method)) {
+        // Uploads are handled by the retry queue in ApplyPage.jsx —
+        // don't auto-retry here or we'll double-upload.
+        return Promise.reject(error)
+      }
 
       config._retryCount = (config._retryCount || 0) + 1
       if (config._retryCount > 3) return Promise.reject(error)
 
-      // ✅ FIX 4: Wait for the server to wake OR the backoff delay,
-      // whichever comes first. Avoids firing retries into a sleeping server.
       const waitMs = config._retryCount * 2_000
       console.warn(
         `[axios] Network error on ${config.method?.toUpperCase()} ${config.url}. ` +
-        `Retry ${config._retryCount}/3 — waiting for server or ${waitMs / 1000}s…`
+        `Retry ${config._retryCount}/3 — waiting ${waitMs / 1000}s…`
       )
-      _startWakePinging()
+
+      // Wait for server to wake OR for the backoff delay — whichever is first.
       await Promise.race([getCurrentWakeGate(), _sleep(waitMs)])
       return api(config)
     }
