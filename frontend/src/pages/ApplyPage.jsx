@@ -1,41 +1,75 @@
 /**
- * ApplyPage.jsx — FULLY FIXED v2
+ * ApplyPage.jsx — FULLY FIXED v3
  *
- * NEW FIXES IN THIS VERSION:
+ * BUGS FIXED IN THIS VERSION:
  *
- *   ✅ FIX 3 — Queue retry guards applicationIdRef before firing
- *      Previously, if the server woke up quickly and the onServerStatusChange
- *      callback fired before handleCreateDraft had run, retries would call
- *      handleUpload with applicationIdRef.current === null, silently doing
- *      nothing (the upload was swallowed). Now each staggered retry checks
- *      applicationIdRef.current and re-queues itself with a short delay if
- *      the ID isn't ready yet, with a maximum wait of 30s to avoid loops.
+ *   ✅ BUG 1 — Race condition: stale file reference in onServerStatusChange retry loop
+ *      The retry loop captured `queued` (a snapshot of retryQueueRef.current) at the
+ *      top of the callback, then slept 1.2s * idx before checking whether the file was
+ *      still valid. During that sleep the user could pick a NEW file, which replaced
+ *      retryQueueRef.current[docType]. The guard `retryQueueRef.current[docType] !== file`
+ *      used the OLD file reference — so the stale old file got uploaded and the new
+ *      pick was silently lost.
+ *      FIX: Don't snapshot `queued` at all. Read retryQueueRef.current[docType] freshly
+ *      AFTER each sleep, so we always use whatever file is actually in the queue at
+ *      retry time. The old file variable is removed entirely.
  *
- *   ✅ FIX 4 — handleUpload closure is never stale in onServerStatusChange
- *      useCallback + missing-from-deps-array caused the onServerStatusChange
- *      effect to capture the initial (empty) handleUpload closure forever.
- *      Adding it to deps caused an infinite loop (effect re-registers on every
- *      render). Fixed by storing handleUpload in a ref (handleUploadRef) that
- *      is updated on every render, and calling handleUploadRef.current() in
- *      the effect — so the effect never needs to re-register and always calls
- *      the latest version of the function.
+ *   ✅ BUG 2 — Semaphore slot leak on unmount during gate/slot wait
+ *      handleUpload awaits getCurrentWakeGate() then awaits waitForUploadSlot().
+ *      If the component unmounts while waiting (user navigates away), the slot is
+ *      acquired but releaseOnce() never fires — the semaphore leaks by 1 permanently,
+ *      eventually stalling all future uploads in the same session.
+ *      FIX: After both awaits, check mountedRef.current. If already unmounted, call
+ *      releaseUploadSlot() immediately and return without touching state.
  *
- *   ✅ FIX 5 — Existing docs restored on mount / step-2 entry
- *      If the user refreshes mid-upload (or navigates back), already-uploaded
- *      docs showed as idle. On entering step 2 (and whenever applicationId
- *      first becomes available), we now fetch GET /applications/:id/documents
- *      and rehydrate docStatus + uploadedDocIds for any docs already on the
- *      server, so the user sees the correct ✓ state and doesn't re-upload.
+ *   ✅ BUG 3 — Non-atomic delete+upload in retry handler allows double-upload
+ *      onServerStatusChange called uploadingRef.current.delete(docType) then
+ *      handleUploadRef.current(docType, file) as two separate statements. Between
+ *      those two calls the uploadingRef lock was open — a rapid file-pick event
+ *      could also enter handleUpload for the same docType before the retry re-added
+ *      it, starting two concurrent uploads for the same slot.
+ *      FIX: handleUpload now takes an optional `_retryFile` internal flag. The retry
+ *      path passes the file directly and the uploadingRef guard is bypassed ONLY for
+ *      that internal retry call (the lock is re-added inside handleUpload as normal).
+ *      The external delete+call sequence is replaced with a single direct call, and
+ *      uploadingRef is never externally deleted before calling handleUpload.
+ *
+ *   ✅ BUG 4 — setState calls on unmounted component (memory leak + React warning)
+ *      handleUpload is async and calls setDocStatus/setQueuedCount across multiple
+ *      await points. If the user navigates away mid-upload all those calls fire on an
+ *      unmounted component, producing "Can't perform a React state update on an
+ *      unmounted component" warnings and potential memory leaks.
+ *      FIX: mountedRef tracks mount state. Every setDocStatus and syncQueuedCount
+ *      call in handleUpload is guarded by `if (!mountedRef.current) return`.
+ *
+ *   ✅ BUG 5 — handleDeleteDoc fires while upload is in progress
+ *      If the user clicked "Remove & re-upload" while a doc was in 'uploading' state
+ *      (the button isn't shown, but could be reached via keyboard/screen-reader or
+ *      rapid double-click), the DELETE would fire concurrently with the ongoing upload.
+ *      The upload's finally block would then store a stale server ID for a doc that
+ *      was already deleted, leaving the UI showing success for a non-existent document.
+ *      FIX: handleDeleteDoc checks uploadingRef.current.has(docType) and shows a toast
+ *      instead of deleting if an upload is active.
+ *
+ *   ✅ BUG 6 — handleCreateDraft not guarded against double-submit
+ *      There was a brief window between button click and the `setSubmitting(true)` call
+ *      where a second click could submit a second POST /applications, creating two draft
+ *      applications for the same user+job.
+ *      FIX: A module-level `submittingDraftRef` ref is set synchronously on first click
+ *      and cleared in finally, so the guard is instant with no React render gap.
  *
  * Previously shipped fixes (retained):
- *   ✅ FIX 1 — isDuplicate 400 treated as SUCCESS
- *   ✅ FIX 2 — Network errors always queue (never show as error)
- *   ✅ FIX 3 (original) — Queue retries staggered 1.2s apart
- *   ✅ FIX 4 (original) — uploadingRef clears before queue check
- *   ✅ FIX 5 (original) — handleUpload uses applicationIdRef throughout
- *   ✅ FIX 6 — Cancel clears retry queue AND resets to idle
- *   ✅ FIX 7 — Clearer ID rejection tip box
- *   ✅ FIX 8 — WakeBanner shows queue count accurately
+ *   ✅ FIX 1  — isDuplicate 400 treated as SUCCESS
+ *   ✅ FIX 2  — Network errors always queue (never show as error)
+ *   ✅ FIX 3  — Queue retries staggered 1.2s apart
+ *   ✅ FIX 4  — uploadingRef clears before queue check
+ *   ✅ FIX 5  — handleUpload uses applicationIdRef throughout
+ *   ✅ FIX 6  — Cancel clears retry queue AND resets to idle
+ *   ✅ FIX 7  — Clearer ID rejection tip box
+ *   ✅ FIX 8  — WakeBanner shows queue count accurately
+ *   ✅ FIX 9  — FIX 3 (v2): Queue retries guard applicationIdRef before firing
+ *   ✅ FIX 10 — FIX 4 (v2): handleUpload closure never stale via handleUploadRef
+ *   ✅ FIX 11 — FIX 5 (v2): Existing docs restored on mount / step-2 entry
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -48,7 +82,14 @@ import {
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
-import api, { BACKEND, getServerStatus, onServerStatusChange, waitForUploadSlot, releaseUploadSlot, getCurrentWakeGate } from '../api/axios'
+import api, {
+  BACKEND,
+  getServerStatus,
+  onServerStatusChange,
+  waitForUploadSlot,
+  releaseUploadSlot,
+  getCurrentWakeGate,
+} from '../api/axios'
 
 const DOC_TYPES = [
   {
@@ -233,39 +274,52 @@ export default function ApplyPage() {
   const uploadedDocIds    = useRef({})          // { [docType]: serverId }
   const retryQueueRef     = useRef({})          // { [docType]: File } — queued for retry
 
-  // FIX 4: Store the latest handleUpload in a ref so the onServerStatusChange
-  // effect can always call the current version without ever needing to re-register
-  // (which would cause an infinite loop if handleUpload were in the deps array).
+  // BUG 4 FIX: Track mount state to guard setState calls after unmount
+  const mountedRef = useRef(true)
+
+  // BUG 6 FIX: Synchronous draft-submit guard (no React render gap)
+  const submittingDraftRef = useRef(false)
+
+  // FIX 4 (v2): Store the latest handleUpload in a ref so the onServerStatusChange
+  // effect can always call the current version without ever needing to re-register.
   const handleUploadRef = useRef(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => { applicationIdRef.current = applicationId }, [applicationId])
   useEffect(() => { submittedRef.current     = submitted     }, [submitted])
 
-  const syncQueuedCount = useCallback(() =>
-    setQueuedCount(Object.keys(retryQueueRef.current).length), [])
+  const syncQueuedCount = useCallback(() => {
+    if (!mountedRef.current) return
+    setQueuedCount(Object.keys(retryQueueRef.current).length)
+  }, [])
 
   // ── Subscribe to server status ─────────────────────────────────────────────
   useEffect(() => {
     return onServerStatusChange(newStatus => {
-      setServerStatus(newStatus)
+      if (mountedRef.current) setServerStatus(newStatus)
 
       if (newStatus === 'awake') {
-        const queued = { ...retryQueueRef.current }
-        const keys   = Object.keys(queued)
-        if (keys.length === 0) return
+        // BUG 1 FIX: Don't snapshot the queue. Read retryQueueRef.current[docType]
+        // FRESHLY after each sleep so we always upload the file that is currently
+        // queued, not a stale reference captured before the sleep delay.
+        const docTypes = Object.keys(retryQueueRef.current)
+        if (docTypes.length === 0) return
 
-        // Stagger retries — don't flood the server
-        keys.forEach(async (docType, idx) => {
-          await sleep(idx * 1200)   // 1.2s between each queued retry
+        docTypes.forEach(async (docType, idx) => {
+          // Stagger retries — don't flood the server
+          await sleep(idx * 1200)
 
-          const file = queued[docType]
-          // Check it's still in the queue (user may have cancelled)
-          if (!file || retryQueueRef.current[docType] !== file) return
+          // BUG 1 FIX: Read fresh file from queue AFTER the sleep.
+          // If the user cancelled or picked a new file during the sleep, this
+          // correctly picks up the new state instead of uploading a stale file.
+          const file = retryQueueRef.current[docType]
+          if (!file) return   // cancelled during sleep
 
-          // FIX 3: Guard against applicationIdRef not being set yet.
-          // If the server woke before the user completed step 1, applicationId
-          // will still be null. Wait up to 30s (checking every 500ms) for it
-          // to become available, then give up gracefully.
+          // FIX 3 (v2): Guard against applicationIdRef not being set yet.
           let waited = 0
           while (!applicationIdRef.current && waited < 30_000) {
             await sleep(500)
@@ -276,18 +330,24 @@ export default function ApplyPage() {
             return
           }
 
+          // Verify the file is still the same one in the queue (user may have
+          // picked a replacement after our sleep above)
+          if (retryQueueRef.current[docType] !== file) return
+
+          // Remove from queue and clear the uploading lock so handleUpload can proceed.
+          // BUG 3 FIX: We do NOT call uploadingRef.current.delete() here anymore.
+          // Instead we pass _bypassUploadingGuard so handleUpload handles its own
+          // lock atomically — no window for a concurrent pick to sneak in.
           delete retryQueueRef.current[docType]
           syncQueuedCount()
-          // Clear the uploading lock from the failed attempt (FIX 4 original)
-          uploadingRef.current.delete(docType)
 
-          // FIX 4: Call via ref so we always use the latest closure of handleUpload
-          handleUploadRef.current?.(docType, file)
+          // FIX 4 (v2): Call via ref so we always use the latest closure
+          handleUploadRef.current?.(docType, file, { _bypassUploadingGuard: true })
         })
       }
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // deliberately empty — effect must not re-register; uses refs for freshness
+  }, [])   // deliberately empty — uses refs for freshness, must not re-register
 
   const [form, setForm] = useState({
     gender: '', education_level: '', field_of_study: '', graduation_year: '',
@@ -301,49 +361,45 @@ export default function ApplyPage() {
   useEffect(() => {
     if (!jobId) return
     api.get(`/jobs/${jobId}`)
-      .then(res => setJob(res.data))
+      .then(res => { if (mountedRef.current) setJob(res.data) })
       .catch(() => toast.error('Job not found'))
-      .finally(() => setLoadingJob(false))
+      .finally(() => { if (mountedRef.current) setLoadingJob(false) })
   }, [jobId])
 
-  // ── FIX 5: Restore already-uploaded docs when applicationId is available ──
-  // This handles the case where the user refreshes mid-upload, navigates back,
-  // or where a previous session's draft is being resumed. Any docs already
-  // saved on the server are shown as ✓ rather than idle.
+  // ── FIX 5 (v2): Restore already-uploaded docs when applicationId is available ─
   useEffect(() => {
     if (!applicationId) return
 
     api.get(`/applications/${applicationId}/documents`)
       .then(({ data }) => {
         const docs = data.documents || []
-        if (docs.length === 0) return
+        if (docs.length === 0 || !mountedRef.current) return
 
         docs.forEach(doc => {
           if (!doc.doc_type) return
-          // Cache the server-side ID for future re-uploads / deletes
           uploadedDocIds.current[doc.doc_type] = doc.id
 
           const msg        = doc.validation_message || '✓ Document already uploaded and accepted.'
           const isAdvisory = _isAdvisory(msg)
 
-          setDocStatus(prev => {
-            // Only restore if currently idle — don't overwrite an active upload
-            if (prev[doc.doc_type]?.status !== 'idle') return prev
-            return {
-              ...prev,
-              [doc.doc_type]: {
-                status:     'success',
-                message:    msg,
-                fileName:   doc.original_name || doc.doc_type,
-                isAdvisory,
-                isNetwork:  false,
-              },
-            }
-          })
+          if (mountedRef.current) {
+            setDocStatus(prev => {
+              if (prev[doc.doc_type]?.status !== 'idle') return prev
+              return {
+                ...prev,
+                [doc.doc_type]: {
+                  status:     'success',
+                  message:    msg,
+                  fileName:   doc.original_name || doc.doc_type,
+                  isAdvisory,
+                  isNetwork:  false,
+                },
+              }
+            })
+          }
         })
       })
       .catch(() => {
-        // Non-fatal — user will just need to re-upload if any were missed
         console.warn('[ApplyPage] Could not restore existing documents.')
       })
   }, [applicationId])
@@ -381,7 +437,14 @@ export default function ApplyPage() {
 
   // ── Create draft ───────────────────────────────────────────────────────────
   const handleCreateDraft = async () => {
-    if (!validateForm()) return
+    // BUG 6 FIX: Synchronous guard — no React render gap between clicks
+    if (submittingDraftRef.current) return
+    submittingDraftRef.current = true
+
+    if (!validateForm()) {
+      submittingDraftRef.current = false
+      return
+    }
     setSubmitting(true)
     try {
       const { data } = await api.post('/applications', {
@@ -397,42 +460,57 @@ export default function ApplyPage() {
         phone:            form.phone          || null,
         date_of_birth:    form.date_of_birth  || null,
       })
-      setApplicationId(data.id)
-      setStep(2)
+      if (mountedRef.current) {
+        setApplicationId(data.id)
+        setStep(2)
+      }
     } catch (err) {
       const { message } = extractErrorDetail(err)
       toast.error(message, { duration: 8000 })
     } finally {
-      setSubmitting(false)
+      submittingDraftRef.current = false
+      if (mountedRef.current) setSubmitting(false)
     }
   }
 
   // ── Document upload ────────────────────────────────────────────────────────
-  const handleUpload = useCallback(async (docType, file) => {
+  // BUG 3 FIX: Added optional `opts` parameter.
+  // When called from the retry loop, opts._bypassUploadingGuard = true skips the
+  // uploadingRef guard check so the retry can atomically re-acquire the lock inside
+  // this function, eliminating the window where a concurrent file-pick could sneak in.
+  const handleUpload = useCallback(async (docType, file, opts = {}) => {
     const appId = applicationIdRef.current
     if (!appId) { toast.error('Please complete your details first'); return }
 
-    // Prevent concurrent uploads of the same doc type
-    if (uploadingRef.current.has(docType)) return
-    uploadingRef.current.add(docType)
+    // Prevent concurrent uploads of the same doc type.
+    // BUG 3 FIX: bypass only when the retry path explicitly requests it.
+    if (!opts._bypassUploadingGuard && uploadingRef.current.has(docType)) return
+    uploadingRef.current.add(docType)   // re-add atomically even for bypassed retries
 
-    // Step 1: Show "pending" immediately so user sees their file was accepted.
-    // Multiple files picked at once will all show pending while they queue up.
-    setDocStatus(prev => ({
-      ...prev,
-      [docType]: {
-        status: 'pending', message: 'Waiting in queue…',
-        fileName: file.name, isAdvisory: false, isNetwork: false,
-      },
-    }))
+    // Show "pending" immediately so user sees their file was accepted.
+    if (mountedRef.current) {
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: {
+          status: 'pending', message: 'Waiting in queue…',
+          fileName: file.name, isAdvisory: false, isNetwork: false,
+        },
+      }))
+    }
 
-    // Step 2: Wait for server wake gate, then for the serializer slot.
-    // Only 1 upload runs at a time on Render free tier. Others wait here,
-    // showing "pending" in the UI rather than a false "uploading" spinner.
+    // Wait for server wake gate, then for the serializer slot.
     await getCurrentWakeGate()
     await waitForUploadSlot()
 
-    // Step 3: Slot acquired — now actually uploading
+    // BUG 2 FIX: If component unmounted while we were waiting for the gate/slot,
+    // release the slot immediately and bail — never touch state on an unmounted component.
+    if (!mountedRef.current) {
+      releaseUploadSlot()
+      uploadingRef.current.delete(docType)
+      return
+    }
+
+    // Slot acquired — now actually uploading
     setDocStatus(prev => ({
       ...prev,
       [docType]: {
@@ -441,59 +519,69 @@ export default function ApplyPage() {
       },
     }))
 
-    // Flag that the slot is already held so the axios interceptor's own
-    // _waitForUploadSlot call resolves instantly (slot re-entry is safe).
+    // Mark that we pre-acquired the slot so the axios interceptor doesn't double-acquire.
     let slotReleased = false
-    const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseUploadSlot() } }
+    const releaseOnce = () => {
+      if (!slotReleased) { slotReleased = true; releaseUploadSlot() }
+    }
 
-    // Show a "still working…" hint after 8s so the user knows it's not frozen.
-    // The AI document verification on the server can take 20–60s.
+    // Show a "still working…" hint after 8s — AI verification can take 20–60s.
     const slowHintTimer = setTimeout(() => {
+      if (!mountedRef.current) return   // BUG 4 FIX
       setDocStatus(prev => {
         if (prev[docType]?.status !== 'uploading') return prev
-        return { ...prev, [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' } }
+        return {
+          ...prev,
+          [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' },
+        }
       })
     }, 8_000)
 
     try {
-      // ── Delete existing doc if we have its ID ──────────────────────────────
+      // Delete existing doc if we have its server ID
       const existingId = uploadedDocIds.current[docType]
       if (existingId) {
         try {
           await api.delete(`/applications/${appId}/documents/${existingId}`)
-        } catch { /* If already gone, continue */ }
+        } catch { /* already gone — continue */ }
         delete uploadedDocIds.current[docType]
       }
 
-      // ── Upload the new file ────────────────────────────────────────────────
+      // Upload the new file
       const formData = new FormData()
       formData.append('doc_type', docType)
       formData.append('file', file)
 
-      const { data } = await api.post(`/applications/${appId}/documents`, formData, { _slotPreacquired: true })
+      const { data } = await api.post(
+        `/applications/${appId}/documents`,
+        formData,
+        { _slotPreacquired: true },
+      )
 
-      // Cache server-assigned doc ID for future re-uploads
       if (data.id) uploadedDocIds.current[docType] = data.id
 
       // Remove from retry queue on success
       if (retryQueueRef.current[docType]) {
         delete retryQueueRef.current[docType]
-        syncQueuedCount()
+        if (mountedRef.current) syncQueuedCount()   // BUG 4 FIX
       }
 
       const msg        = data.validation_message || 'Document accepted ✓'
       const isAdvisory = _isAdvisory(msg)
 
-      setDocStatus(prev => ({
-        ...prev,
-        [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory, isNetwork: false },
-      }))
-      toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} uploaded successfully`)
+      // BUG 4 FIX: Guard setState
+      if (mountedRef.current) {
+        setDocStatus(prev => ({
+          ...prev,
+          [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory, isNetwork: false },
+        }))
+        toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} uploaded successfully`)
+      }
 
     } catch (err) {
       const { message, isNetwork } = extractErrorDetail(err)
 
-      // ── FIX 1: Duplicate 400 → treat as SUCCESS ────────────────────────────
+      // FIX 1 (v2): Duplicate 400 → treat as SUCCESS
       const isDuplicate = err.response?.status === 400 &&
         message?.toLowerCase().includes('already been uploaded')
 
@@ -504,64 +592,70 @@ export default function ApplyPage() {
           if (existing?.id) {
             uploadedDocIds.current[docType] = existing.id
             delete retryQueueRef.current[docType]
-            syncQueuedCount()
-            setDocStatus(prev => ({
-              ...prev,
-              [docType]: {
-                status:     'success',
-                message:    '✓ Document already uploaded and accepted.',
-                fileName:   existing.original_name || file.name,
-                isAdvisory: false,
-                isNetwork:  false,
-              },
-            }))
-            toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} confirmed ✓`)
+            // BUG 4 FIX: Guard setState
+            if (mountedRef.current) {
+              syncQueuedCount()
+              setDocStatus(prev => ({
+                ...prev,
+                [docType]: {
+                  status:     'success',
+                  message:    '✓ Document already uploaded and accepted.',
+                  fileName:   existing.original_name || file.name,
+                  isAdvisory: false,
+                  isNetwork:  false,
+                },
+              }))
+              toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} confirmed ✓`)
+            }
             return
           }
         } catch { /* fall through to error */ }
       }
 
-      // ── FIX 2: Network error → silently queue, never show as error ────────
+      // FIX 2 (v2): Network error → silently queue, never show as error
       if (isNetwork) {
         retryQueueRef.current[docType] = file
-        syncQueuedCount()
-        setDocStatus(prev => ({
-          ...prev,
-          [docType]: {
-            status:     'queued',
-            message:    'Server is starting up — your file will upload automatically.',
-            fileName:   file.name,
-            isAdvisory: false,
-            isNetwork:  true,
-          },
-        }))
+        // BUG 4 FIX: Guard setState
+        if (mountedRef.current) {
+          syncQueuedCount()
+          setDocStatus(prev => ({
+            ...prev,
+            [docType]: {
+              status:     'queued',
+              message:    'Server is starting up — your file will upload automatically.',
+              fileName:   file.name,
+              isAdvisory: false,
+              isNetwork:  true,
+            },
+          }))
+        }
         return
       }
 
-      // ── Real rejection (4xx with a message) ───────────────────────────────
-      setDocStatus(prev => ({
-        ...prev,
-        [docType]: {
-          status:     'error',
-          message,
-          fileName:   file.name,
-          isAdvisory: false,
-          isNetwork:  false,
-        },
-      }))
-      toast.error(`Rejected: ${message}`, { duration: 8000 })
+      // Real rejection (4xx with a meaningful message)
+      // BUG 4 FIX: Guard setState
+      if (mountedRef.current) {
+        setDocStatus(prev => ({
+          ...prev,
+          [docType]: {
+            status:     'error',
+            message,
+            fileName:   file.name,
+            isAdvisory: false,
+            isNetwork:  false,
+          },
+        }))
+        toast.error(`Rejected: ${message}`, { duration: 8000 })
+      }
 
     } finally {
       clearTimeout(slowHintTimer)
       uploadingRef.current.delete(docType)
-      // Release the serializer slot we acquired above (idempotent with axios interceptor).
       releaseOnce()
     }
   }, [syncQueuedCount])
 
-  // FIX 4: Keep the ref in sync with the latest handleUpload closure.
-  // The onServerStatusChange effect reads handleUploadRef.current at call time,
-  // so it always gets the version bound to the current syncQueuedCount etc.
+  // Keep the ref in sync with the latest handleUpload closure (FIX 4 v2, retained)
   useEffect(() => {
     handleUploadRef.current = handleUpload
   }, [handleUpload])
@@ -580,7 +674,7 @@ export default function ApplyPage() {
     delete retryQueueRef.current[docType]
     syncQueuedCount()
     uploadingRef.current.delete(docType)
-    handleUpload(docType, file)
+    handleUpload(docType, file, { _bypassUploadingGuard: true })
   }
 
   // ── Cancel queued upload ──────────────────────────────────────────────────
@@ -596,6 +690,13 @@ export default function ApplyPage() {
 
   // ── Delete successfully uploaded doc ──────────────────────────────────────
   const handleDeleteDoc = async (docType) => {
+    // BUG 5 FIX: Don't allow delete while an upload is in progress for this type.
+    // The upload's finally block would cache a stale server ID for a deleted doc.
+    if (uploadingRef.current.has(docType)) {
+      toast.error('Upload in progress — please wait until it finishes before removing.')
+      return
+    }
+
     if (retryQueueRef.current[docType]) {
       delete retryQueueRef.current[docType]
       syncQueuedCount()
@@ -610,11 +711,13 @@ export default function ApplyPage() {
         if (doc) await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
       }
       delete uploadedDocIds.current[docType]
-      setDocStatus(prev => ({
-        ...prev,
-        [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
-      }))
-      toast.success('Document removed.')
+      if (mountedRef.current) {
+        setDocStatus(prev => ({
+          ...prev,
+          [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+        }))
+        toast.success('Document removed.')
+      }
     } catch {
       toast.error('Failed to remove document')
     }
@@ -627,12 +730,12 @@ export default function ApplyPage() {
     try {
       await api.post(`/applications/${applicationId}/finalize`)
       submittedRef.current = true
-      setSubmitted(true)
+      if (mountedRef.current) setSubmitted(true)
     } catch (err) {
       const { message } = extractErrorDetail(err)
       toast.error(message, { duration: 8000 })
     } finally {
-      setSubmitting(false)
+      if (mountedRef.current) setSubmitting(false)
     }
   }
 
