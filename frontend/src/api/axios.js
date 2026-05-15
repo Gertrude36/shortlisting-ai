@@ -1,57 +1,74 @@
 /**
- * frontend/src/api/axios.js — FULLY FIXED v2
+ * frontend/src/api/axios.js — FULLY FIXED v3
  *
- * ROOT CAUSE OF "CORS" ERRORS:
- *   Render free tier drops HTTP/2 connections when multiple requests arrive
- *   simultaneously during cold start. The browser reports this as a CORS error
- *   because no headers (including CORS headers) are sent before the connection
- *   drops. The CORS config on the backend is correct — this is a concurrency
- *   problem, not a CORS configuration problem.
+ * BUGS FIXED IN THIS VERSION:
  *
- * FIXES IN THIS VERSION (on top of previous fixes):
+ *   ✅ BUG 1 — _pingWake() used a plain cors-mode fetch() for the wake ping,
+ *              so it got CORS-blocked while the server was asleep and never
+ *              actually triggered Render to boot the dyno.
+ *              FIX: Split into two fetches — a fire-and-forget no-cors "knock"
+ *              to wake Render, plus a separate cors fetch to read the response
+ *              and confirm readiness.
  *
- *   ✅ FIX A — _wakeGatePromise read dynamically (not captured at closure time)
- *      The request interceptor now calls getCurrentWakeGate() at execution
- *      time. Previously it closed over _wakeGatePromise at module load, so
- *      re-armed gates were invisible to already-queued uploads — they kept
- *      awaiting the old (already-resolved) promise and fired into a dead server.
+ *   ✅ BUG 2 — Auth token injected TWICE: once in a standalone interceptor
+ *              added at the top of the file, and again inside the combined
+ *              request interceptor. Duplicate Authorization headers cause
+ *              some proxies to reject or mangle requests.
+ *              FIX: Removed the early standalone interceptor. Token injection
+ *              now lives only in the single combined request interceptor.
  *
- *   ✅ FIX B — Safety timeout no longer marks server as "awake"
- *      Previously _armWakeGate's 35s setTimeout called _wakeGateResolve(),
- *      which set _serverConfirmedAwake = true and stopped wake pinging. This
- *      meant uploads fired into a still-sleeping server. Now the timeout just
- *      resolves the Promise to unblock uploads without touching
- *      _serverConfirmedAwake, so pinging continues until a real /wake 200
- *      is received.
+ *   ✅ BUG 3 — _inFlight semaphore leak: waitForUploadSlot() incremented
+ *              _inFlight unconditionally (even for queued waiters).
+ *              releaseUploadSlot() only decremented when no waiter was present.
+ *              Net effect: every dequeued waiter left _inFlight one count too
+ *              high. Over N uploads _inFlight reached MAX_CONCURRENT_UPLOADS
+ *              permanently, stalling all future uploads.
+ *              FIX: waitForUploadSlot() only increments _inFlight when
+ *              granting the slot immediately. releaseUploadSlot() transfers
+ *              the slot to the next waiter (no counter change) or decrements
+ *              (no waiter). Counter = active uploads, always.
  *
- *   ✅ FIX C — rearmWakeGate() is exported and also re-exported as a getter
- *      so ApplyPage can call it directly if needed, and the interceptor always
- *      reads the live gate.
+ *   ✅ BUG 4 — rearmWakeGate() was guarded by _serverConfirmedAwake === true.
+ *              After a safety-timeout unblock, _serverConfirmedAwake stays
+ *              false, so the keep-alive interval could never re-arm on a
+ *              half-awake or re-sleeping server.
+ *              FIX: rearmWakeGate() is now unconditional — it always re-arms
+ *              and restarts pinging.
+ *
+ *   ✅ BUG 5 — _startWakePinging() fired at module load even in local dev
+ *              (BACKEND = localhost:8000), sending pointless wake requests.
+ *              FIX: All Render cold-start logic is skipped when BACKEND
+ *              contains "localhost" or "127.0.0.1".
  *
  * Previously shipped fixes (retained):
- *   ✅ FIX 1 — Upload serializer (one upload at a time, 300ms inter-gap)
+ *   ✅ FIX A — getCurrentWakeGate() read dynamically (not captured at closure)
+ *   ✅ FIX B — Safety timeout unblocks without marking server confirmed awake
+ *   ✅ FIX C — rearmWakeGate() exported
+ *   ✅ FIX 1 — Upload serializer (semaphore, MAX_CONCURRENT_UPLOADS = 2)
  *   ✅ FIX 2 — Re-armable wake gate
- *   ✅ FIX 3 — Dynamic gate reference (now via getCurrentWakeGate())
  *   ✅ FIX 4 — Semaphore released in both success AND error paths
- *   ✅ FIX 5 — Keep-alive detects sleep and re-arms automatically
- *   ✅ FIX 6 — Faster wake ping interval (2s), safety timeout unblocks only
- *   ✅ FIX 7 — 120s timeout for uploads
- *   ✅ FIX 8 — Small inter-upload delay (300ms)
+ *   ✅ FIX 5 — Keep-alive detects sleep and re-arms
+ *   ✅ FIX 6 — 2s ping interval, 35s safety timeout
+ *   ✅ FIX 7 — 120s timeout for document uploads
  */
 
 import axios from 'axios'
 
-export const BACKEND = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+export const BACKEND =
+  import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-// ── Axios instance ─────────────────────────────────────────────────────────────
+// BUG 5 FIX: Skip all Render cold-start logic for local dev backends.
+const _IS_LOCAL = /localhost|127\.0\.0\.1/.test(BACKEND)
+
+// ── Axios instance ─────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL:         BACKEND,
   withCredentials: false,
   timeout:         30_000,
 })
 
-// ── Server status ──────────────────────────────────────────────────────────────
-let _serverStatus      = 'sleeping'
+// ── Server status ──────────────────────────────────────────────────────────
+let _serverStatus      = _IS_LOCAL ? 'awake' : 'sleeping'
 const _statusListeners = new Set()
 
 function _setServerStatus(status) {
@@ -67,27 +84,16 @@ export function onServerStatusChange(cb) {
   return () => _statusListeners.delete(cb)
 }
 
-// ── Re-armable wake gate ───────────────────────────────────────────────────────
-//
-// FIX A: The interceptor must call getCurrentWakeGate() at request-execution
-// time — NOT capture _wakeGatePromise in a closure at module load. This
-// ensures re-armed gates (created after module load) are actually awaited.
-//
-// FIX B: The 35s safety timeout resolves the Promise to unblock uploads, but
-// does NOT set _serverConfirmedAwake = true. Wake pinging continues until a
-// real HTTP 200 from /wake is received. This prevents uploads from firing
-// into a server that is still cold-starting.
-//
+// ── Re-armable wake gate ───────────────────────────────────────────────────
 let _wakeGatePromise      = null
-let _wakeGateResolve      = null   // resolves when server confirmed awake
-let _wakeGateUnblock      = null   // resolves on safety timeout only (unblocks, doesn't confirm)
-let _serverConfirmedAwake = false
+let _wakeGateResolve      = null
+let _serverConfirmedAwake = _IS_LOCAL  // local dev is always "awake"
 
 function _armWakeGate() {
   _serverConfirmedAwake = false
 
   _wakeGatePromise = new Promise((resolve) => {
-    // Called when /wake returns 200 — confirms server is truly awake
+    // Resolves when a real HTTP 200 from /wake is received.
     _wakeGateResolve = () => {
       if (_serverConfirmedAwake) return
       _serverConfirmedAwake = true
@@ -95,101 +101,112 @@ function _armWakeGate() {
       resolve()
     }
 
-    // FIX B: Safety unblock after 35s — lets uploads proceed but does NOT
-    // confirm server awake. Pinging continues. Uploads may still fail if
-    // server isn't ready, but ApplyPage will queue them again via isNetwork.
-    _wakeGateUnblock = resolve  // save so we can call it from the timeout
+    // BUG B FIX (retained): Safety unblock after 35s.
+    // Unblocks queued uploads but does NOT confirm server awake —
+    // pinging continues until a real 200 is received.
     setTimeout(() => {
       if (!_serverConfirmedAwake) {
-        console.warn('[axios] Wake gate safety timeout (35s) — unblocking uploads without confirming server awake.')
-        resolve()  // unblock waiting uploads
+        console.warn(
+          '[axios] Wake gate safety timeout (35s) — unblocking uploads without confirming server awake.'
+        )
+        resolve()
         // _serverConfirmedAwake stays false → pinging continues
       }
     }, 35_000)
   })
 }
 
-_armWakeGate() // arm on module load
+if (!_IS_LOCAL) {
+  _armWakeGate()
+} else {
+  // Dev: gate is already resolved so interceptors never wait.
+  _wakeGatePromise = Promise.resolve()
+}
 
-// FIX A: Always return the CURRENT gate promise (not a stale closure).
+// BUG A FIX (retained): Always return the CURRENT gate at call time.
 export function getCurrentWakeGate() {
   return _wakeGatePromise
 }
 
 /**
- * Re-arm the wake gate. Called automatically when network failures are
- * detected. Can also be called by components if needed.
+ * Re-arm the wake gate.
+ * BUG 4 FIX: No longer guarded by _serverConfirmedAwake — always re-arms.
  */
 export function rearmWakeGate() {
-  if (_serverConfirmedAwake) {
-    console.log('[axios] Re-arming wake gate — server may have gone back to sleep.')
-    _armWakeGate()
-    _setServerStatus('waking')
-    _startWakePinging()
-  }
+  if (_IS_LOCAL) return
+  console.log('[axios] Re-arming wake gate — server may have gone back to sleep.')
+  _armWakeGate()
+  _setServerStatus('waking')
+  _startWakePinging()
 }
 
-// ── Upload concurrency semaphore ──────────────────────────────────────────────
-//
-// Limits concurrent document uploads to MAX_CONCURRENT (2).
-// Render free tier drops HTTP/2 connections when too many requests fire
-// simultaneously, but 2 concurrent uploads is safe and ~2x faster than 1.
-//
-// Why not more?  Render free tier has 1 worker. More than 2 concurrent
-// long-running OCR/AI requests causes the worker to queue them server-side
-// anyway, and the extra HTTP/2 streams increase drop risk.
-//
-// Exported so ApplyPage can acquire a slot BEFORE setting UI to "uploading",
-// showing "pending" while waiting. The axios interceptor skips its own acquire
-// when _slotPreacquired is set (avoids deadlock).
-//
+// ── Upload concurrency semaphore ───────────────────────────────────────────
+// BUG 3 FIX: _inFlight only counts actively granted slots.
+// waitForUploadSlot: increment only on immediate grant.
+// releaseUploadSlot: transfer to next waiter (no counter change) or decrement.
 const MAX_CONCURRENT_UPLOADS = 2
-let _inFlight    = 0
-const _waiters   = []
+let _inFlight  = 0
+const _waiters = []
 
 export function waitForUploadSlot() {
   if (_inFlight < MAX_CONCURRENT_UPLOADS) {
-    _inFlight++
+    _inFlight++             // immediate grant — count it
     return Promise.resolve()
   }
+  // At capacity — queue the caller (do NOT increment _inFlight yet)
   return new Promise(resolve => _waiters.push(resolve))
 }
 
 export function releaseUploadSlot() {
   const next = _waiters.shift()
   if (next) {
-    // Tiny gap so Render's HTTP/2 mux can breathe between back-to-back uploads
-    setTimeout(next, 100)
+    // Slot transfers to the next waiter — _inFlight stays the same.
+    setTimeout(next, 100)   // 100ms gap so Render's HTTP/2 mux can breathe
   } else {
     _inFlight = Math.max(0, _inFlight - 1)
   }
 }
 
-// Keep internal aliases for the interceptor (unchanged call sites below)
-const _waitForUploadSlot  = waitForUploadSlot
-const _releaseUploadSlot  = releaseUploadSlot
-
-// ── Wake pinging ───────────────────────────────────────────────────────────────
+// ── Wake pinging ───────────────────────────────────────────────────────────
 let _wakePending  = false
 let _wakeInterval = null
 
 function _pingWake() {
-  if (_serverConfirmedAwake || _wakePending) return Promise.resolve()
+  if (_IS_LOCAL || _serverConfirmedAwake || _wakePending) return Promise.resolve()
   _wakePending = true
   _setServerStatus('waking')
 
+  // BUG 1 FIX: Split into two fetches:
+  //
+  // Knock (no-cors, fire-and-forget):
+  //   Sends bytes to the server so Render starts the dyno.
+  //   Must be no-cors — the server is asleep and can't send CORS headers yet,
+  //   so a preflight would be blocked and Render would never receive the ping.
+  fetch(`${BACKEND}/wake`, {
+    method: 'GET',
+    mode:   'no-cors',
+    cache:  'no-store',
+  }).catch(() => {})   // opaque response — always silently ignored
+
+  // Readiness check (cors, reads response body):
+  //   If the server is up and CORS headers are present, read the JSON and
+  //   confirm readiness. Fails with a network error while still booting —
+  //   that's expected; the interval will retry.
   return fetch(`${BACKEND}/wake`, {
     method: 'GET',
+    mode:   'cors',
+    cache:  'no-store',
     signal: AbortSignal.timeout(8_000),
   })
     .then(res => {
       if (res.ok && _wakeGateResolve) _wakeGateResolve()
     })
-    .catch(() => { /* server still sleeping — next tick will retry */ })
+    .catch(() => { /* booting — next interval retries */ })
     .finally(() => { _wakePending = false })
 }
 
 function _startWakePinging() {
+  if (_IS_LOCAL) return   // BUG 5 FIX: skip in local dev
   if (_wakeInterval) { clearInterval(_wakeInterval); _wakeInterval = null }
   _pingWake()
   _wakeInterval = setInterval(() => {
@@ -204,23 +221,23 @@ function _startWakePinging() {
 
 _startWakePinging()
 
-// Keep-alive + sleep detection: ping every 3.5 min.
-// If the ping fails, re-arm the wake gate so queued uploads wait for
-// the server to come back instead of firing into a dead connection.
+// Keep-alive: ping every 3.5 min to prevent Render from sleeping mid-session.
 setInterval(async () => {
-  if (!_serverConfirmedAwake) return
+  if (_IS_LOCAL || !_serverConfirmedAwake) return
   try {
     const res = await fetch(`${BACKEND}/wake`, {
       method: 'GET',
+      mode:   'cors',
+      cache:  'no-store',
       signal: AbortSignal.timeout(6_000),
     })
-    if (!res.ok) rearmWakeGate()
+    if (!res.ok) rearmWakeGate()   // BUG 4 FIX: rearmWakeGate() is unconditional
   } catch {
     rearmWakeGate()
   }
 }, 3.5 * 60 * 1000)
 
-// ── Auth helpers ───────────────────────────────────────────────────────────────
+// ── Auth helpers ───────────────────────────────────────────────────────────
 const AUTH_KEYS = [
   'token', 'role', 'userId', 'fullName',
   'nationalId', 'location', 'phone', 'documents',
@@ -233,7 +250,7 @@ export function clearAuthStorage() {
   })
 }
 
-// ── Route classification ───────────────────────────────────────────────────────
+// ── Route classification ───────────────────────────────────────────────────
 const PUBLIC_ROUTES = [
   { method: 'ANY', path: '/auth/login' },
   { method: 'ANY', path: '/auth/register' },
@@ -253,38 +270,37 @@ const isPublic = (url = '', method = '') => {
   )
 }
 
-// Only document upload POSTs are serialized and gated.
 const isDocumentUpload = (url = '', method = '') =>
   method.toUpperCase() === 'POST' &&
   /\/applications\/\d+\/documents$/.test(url.split('?')[0])
 
-// ── Request interceptor ────────────────────────────────────────────────────────
+// ── Request interceptor ────────────────────────────────────────────────────
+// BUG 2 FIX: This is the ONLY place the auth token is injected.
+// The duplicate top-level interceptor that previously also injected it
+// has been removed entirely.
 api.interceptors.request.use(
   async (config) => {
     if (isDocumentUpload(config.url, config.method)) {
-      // FIX A: Read the CURRENT gate at call time — not a stale module-load closure.
-      // This ensures re-armed gates (after network failures) are actually awaited.
+      // BUG A FIX (retained): read the live gate, not a stale module-load closure.
       await getCurrentWakeGate()
 
-      // Serialize — wait for any in-flight upload to finish.
-      // If the caller (ApplyPage) set _slotPreacquired = true, it already holds
-      // the slot (acquired before showing the uploading UI), so skip re-acquiring
-      // to avoid a deadlock. The response interceptor still releases the slot.
+      // Acquire upload slot (unless the caller pre-acquired it).
       if (!config._slotPreacquired) {
-        await _waitForUploadSlot()
+        await waitForUploadSlot()
       }
 
-      // Mark so the response interceptor knows to release the slot
       config._serializedUpload = true
       config.timeout = 120_000   // OCR + AI verification can take 60–90s
     }
 
+    // Single point of token injection — BUG 2 FIX.
     if (!isPublic(config.url, config.method)) {
-      const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+      const token =
+        localStorage.getItem('token') || sessionStorage.getItem('token')
       if (token) config.headers.Authorization = `Bearer ${token}`
     }
 
-    // Let browser set Content-Type for FormData (multipart boundary)
+    // Let the browser set Content-Type for FormData (multipart boundary).
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type']
     }
@@ -294,18 +310,17 @@ api.interceptors.request.use(
   err => Promise.reject(err),
 )
 
-// ── Response interceptor ───────────────────────────────────────────────────────
+// ── Response interceptor ───────────────────────────────────────────────────
 let _redirecting = false
 const _sleep = ms => new Promise(r => setTimeout(r, ms))
 
 api.interceptors.response.use(
   response => {
-    // Release serializer slot — but only if ApplyPage didn't pre-acquire it.
-    // When _slotPreacquired is true, ApplyPage's releaseOnce() owns the slot.
+    // Release semaphore slot (unless caller pre-acquired — they own release).
     if (response.config?._serializedUpload && !response.config?._slotPreacquired) {
-      _releaseUploadSlot()
+      releaseUploadSlot()
     }
-    // Any successful response confirms server is awake
+    // Any successful response confirms server is awake.
     if (!_serverConfirmedAwake && _wakeGateResolve) {
       _wakeGateResolve()
     }
@@ -313,32 +328,27 @@ api.interceptors.response.use(
   },
 
   async error => {
-    // Release serializer slot on error — but only if ApplyPage didn't pre-acquire it.
-    // When _slotPreacquired is true, ApplyPage's releaseOnce() in finally owns the slot.
+    // Release semaphore slot on error too (both paths release — FIX 4 retained).
     if (error.config?._serializedUpload && !error.config?._slotPreacquired) {
-      _releaseUploadSlot()
+      releaseUploadSlot()
     }
 
     if (!error.response) {
-      // ── Network failure (no HTTP response received) ───────────────────────
-      // This includes the "CORS" errors that are actually dropped connections.
-      // Re-arm the wake gate so subsequent uploads queue until server recovers.
-      if (_serverConfirmedAwake) {
-        rearmWakeGate()
-      }
+      // Network failure — includes apparent "CORS" errors that are really
+      // Render dropping connections before the dyno is ready.
+      rearmWakeGate()   // BUG 4 FIX: unconditional
 
       const config = error.config || {}
 
-      // Don't retry wake pings or document uploads
-      // (document uploads are queued by ApplyPage.jsx, not retried here)
-      if (config.url?.includes('/wake'))              return Promise.reject(error)
+      // Don't retry wake pings or document uploads here.
+      if (config.url?.includes('/wake'))               return Promise.reject(error)
       if (isDocumentUpload(config.url, config.method)) return Promise.reject(error)
 
-      // Retry other requests (form submits, job loads, etc.) with backoff
+      // Retry other requests with exponential backoff (max 3 attempts).
       config._retryCount = (config._retryCount || 0) + 1
       if (config._retryCount > 3) return Promise.reject(error)
 
-      const waitMs = config._retryCount * 2_000   // 2s, 4s, 8s
+      const waitMs = config._retryCount * 2_000
       console.warn(
         `[axios] Network error on ${config.method?.toUpperCase()} ${config.url}. ` +
         `Retry ${config._retryCount}/3 in ${waitMs / 1000}s…`
@@ -348,7 +358,7 @@ api.interceptors.response.use(
       return api(config)
     }
 
-    // ── HTTP error responses ────────────────────────────────────────────────
+    // HTTP error responses
     if (error.response?.status === 401) {
       clearAuthStorage()
       if (

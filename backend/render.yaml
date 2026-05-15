@@ -7,5 +7,8 @@ services:
     plan: free
     branch: main
     rootDir: backend
+    # ✅ FIX: Tell Render to wait until /health returns 200 before routing traffic.
+    # Without this, cold-start requests arrive before FastAPI is ready → 502s.
+    healthCheckPath: /health
     envVars:
       - fromGroup: shortlisting-env
