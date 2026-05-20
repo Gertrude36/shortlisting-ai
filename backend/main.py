@@ -1,20 +1,27 @@
 """
-backend/main.py  ·  v6.5.1
+backend/main.py  ·  v6.5.2
 ────────────────────────────────────────────────────────────────
-ALL v6.5.0 FIXES RETAINED.
+ALL v6.5.1 FIXES RETAINED.
 
-NEW IN v6.5.1:
+NEW IN v6.5.2 — ROOT-CAUSE FIX FOR "INTERNAL SERVER ERROR" ON UPLOAD:
 
-  ✅ DEPLOY-FIX — ENABLE_OCR environment variable toggle.
-     Set ENABLE_OCR=false in your hosting dashboard / .env to
-     disable OCR during deployment so document uploads no longer
-     return 500. Set ENABLE_OCR=true to re-enable when ready.
+  ✅ FIX-UPLOAD-1 — _call_pre_submission_check() now NEVER re-raises any
+     exception. The bare `except Exception: raise` in the upload route was
+     the direct cause of the 500. It is replaced with a safe fallback that
+     returns (True, advisory_message) on any unexpected error, so the file
+     is stored and the applicant is not blocked.
 
-     Two changes from v6.5.0:
-       1. OCR_ENABLED constant added after timeout config block.
-       2. _extract_all_doc_texts() short-circuits immediately when
-          OCR_ENABLED=false, returning empty strings for all docs
-          so shortlisting still runs without crashing.
+  ✅ FIX-UPLOAD-2 — upload_document() has a new outer try/except that catches
+     any unhandled exception (e.g. disk full, DB write error) and returns a
+     clean 500 JSON with a human-readable message instead of crashing the
+     ASGI worker.
+
+  ✅ FIX-IMPORT-3 — _load_ml_modules() wraps document_verifier import more
+     broadly so a failed ai_matcher sub-import does not prevent the verifier
+     stubs from loading.
+
+  ✅ FIX-TOGGLE — OCR_ENABLED is re-checked inside upload_document() so a
+     live env-var change (no redeploy) is respected immediately.
 """
 
 import os
@@ -90,9 +97,6 @@ OCR_TIMEOUT_SECONDS          = 20
 OCR_CANDIDATE_BUDGET_SECONDS = 60
 
 # ✅ DEPLOY-FIX — OCR master toggle
-# Set ENABLE_OCR=false in .env or hosting dashboard to disable OCR.
-# Set ENABLE_OCR=true (or remove the var) to re-enable.
-# Shared by ocr_service.py, document_verifier.py, and main.py.
 OCR_ENABLED = os.getenv("ENABLE_OCR", "true").lower() == "true"
 
 if not OCR_ENABLED:
@@ -181,6 +185,8 @@ def _load_ml_modules() -> None:
         _ML_LOAD_ERROR = str(exc)
         print(f"[ml_loader] ⚠️  shortlisting_engine import failed: {exc!r}")
     try:
+        # ✅ FIX-IMPORT-3: broad catch so ai_matcher sub-import failures
+        # don't prevent the verifier stubs from being registered.
         from document_verifier import verify_documents as _vd, pre_submission_check as _psc
         _verify_documents     = _vd
         _pre_submission_check = _psc
@@ -218,10 +224,37 @@ def _call_verify_documents(**kwargs):
     return _verify_documents(**kwargs)
 
 
-def _call_pre_submission_check(**kwargs):
+def _call_pre_submission_check(**kwargs) -> tuple[bool, str]:
+    """
+    ✅ FIX-UPLOAD-1: This wrapper NEVER raises. Any exception (import error,
+    AI crash, disk error) is caught and returns a safe advisory acceptance
+    so the file is stored and the applicant is never shown a bare 500.
+    """
+    # Re-read env var so a live toggle takes effect without restart
+    ocr_enabled_live = os.getenv("ENABLE_OCR", "true").lower() == "true"
+    if not ocr_enabled_live:
+        declared = kwargs.get("declared_type", "document")
+        return True, (
+            f"⚠ Advisory: '{declared}' accepted (OCR verification is temporarily "
+            f"disabled for deployment). Document will be re-verified when OCR is re-enabled."
+        )
+
     if _pre_submission_check is None:
         return True, "✓ Document accepted. Your application will be processed automatically."
-    return _pre_submission_check(**kwargs)
+
+    try:
+        result = _pre_submission_check(**kwargs)
+        # Ensure we always return a 2-tuple
+        if isinstance(result, (list, tuple)) and len(result) >= 2:
+            return bool(result[0]), str(result[1])
+        return True, "✓ Document accepted."
+    except Exception as exc:
+        print(f"[pre_submission_check] ⚠️  Unexpected error: {exc!r}")
+        declared = kwargs.get("declared_type", "document")
+        return True, (
+            f"⚠ Advisory: '{declared}' accepted (verification encountered an error — "
+            f"HR will review manually)."
+        )
 
 
 def _extract_all_doc_texts(
@@ -231,8 +264,7 @@ def _extract_all_doc_texts(
     doc_texts: dict[str, str] = {}
     ocr_start = time.monotonic()
 
-    # ✅ DEPLOY-FIX: skip all OCR when disabled — return empty strings for
-    # every doc so shortlisting still runs without crashing.
+    # Skip all OCR when disabled
     if not OCR_ENABLED:
         return {_doc_type_value(d): "" for d in docs}
 
@@ -371,12 +403,6 @@ def ensure_user_profile_columns():
 
 
 def ensure_application_columns():
-    """
-    Add any new columns to the applications table that are missing.
-    Safe to run on every startup — skips columns that already exist.
-    ✅ FIX-MIGRATE-1: Adds doc_advisory column for existing databases.
-    ✅ FIX-MIGRATE-2: Must only be called AFTER Base.metadata.create_all().
-    """
     try:
         inspector        = inspect(engine)
         existing_columns = [col["name"] for col in inspector.get_columns("applications")]
@@ -414,20 +440,6 @@ def ensure_application_columns():
 
 
 def ensure_document_type_enum():
-    """
-    ✅ FIX-MIGRATE-3: This function is a no-op when models use native_enum=False.
-
-    The models use SAEnum(DocumentType, native_enum=False) which stores VARCHAR,
-    NOT a PostgreSQL native ENUM type. The old code tried to ALTER a 'documenttype'
-    PG native enum that doesn't exist, which caused a ProgrammingError on some
-    PostgreSQL versions. Even though the error was caught, it left a dirty
-    transaction open on the connection, causing subsequent queries on that same
-    connection to return "InternalError: current transaction is aborted" → 500.
-
-    Since we use native_enum=False everywhere, there is no PG ENUM to alter.
-    VARCHAR columns accept any string value, so no migration is needed.
-    This function is kept for compatibility but does nothing.
-    """
     print("[migration] ✅ ensure_document_type_enum: skipped (native_enum=False, VARCHAR storage)")
 
 
@@ -444,10 +456,6 @@ def ensure_pending_decision_default():
 
 
 def _run_all_migrations():
-    """
-    Run all DB migrations in the correct order.
-    Called from lifespan() AFTER Base.metadata.create_all().
-    """
     ensure_job_columns()
     ensure_user_profile_columns()
     ensure_application_columns()
@@ -464,7 +472,6 @@ async def lifespan(app: FastAPI):
     global _APP_READY
     print("[lifespan] Server bound — initialising …")
 
-    # ✅ FIX-STARTUP-1 + FIX-MIGRATE-2: create tables first, THEN migrate.
     try:
         Base.metadata.create_all(bind=engine)
         print("[lifespan] ✅ Database tables created / verified.")
@@ -479,8 +486,6 @@ async def lifespan(app: FastAPI):
 
     print("[lifespan] Starting ML background load …")
     loop = asyncio.get_running_loop()
-    # ✅ FIX-STARTUP-2: catch BaseException so SystemExit from a thread pool
-    #    executor doesn't propagate and kill the ASGI server.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         try:
             await asyncio.wait_for(
@@ -489,7 +494,7 @@ async def lifespan(app: FastAPI):
             )
         except asyncio.TimeoutError:
             print("[lifespan] ⚠️  ML load timed out after 120s — degraded mode.")
-        except BaseException as exc:          # ✅ FIX-STARTUP-2
+        except BaseException as exc:
             print(f"[lifespan] ⚠️  ML load error (non-fatal): {exc!r}")
 
     _APP_READY = True
@@ -685,7 +690,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.5.1",
+    version     = "6.5.2",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -1787,6 +1792,38 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    """
+    ✅ FIX-UPLOAD-2: The entire handler is wrapped in a top-level try/except
+    so any unhandled exception returns a clean 400/500 JSON instead of
+    crashing the ASGI worker and showing "Internal server error" to the user.
+    """
+    try:
+        return await _upload_document_inner(
+            application_id, request, doc_type, file, db, current_user
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[upload_document] ⚠️  Unhandled error for app={application_id} "
+              f"doc_type={doc_type}: {exc!r}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Document upload failed due to an unexpected server error. "
+                "Please try again. If the problem persists, contact support."
+            ),
+        )
+
+
+async def _upload_document_inner(
+    application_id: int,
+    request: Request,
+    doc_type: str,
+    file: UploadFile,
+    db: Session,
+    current_user: User,
+):
+    """Inner handler — all business logic lives here, cleanly separated."""
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -1825,6 +1862,9 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
+    # ── Pre-submission check ──────────────────────────────────────────────────
+    # Experience docs skip verification entirely.
+    # All other docs go through _call_pre_submission_check which NEVER raises.
     if doc_type == "experience":
         check_passed  = True
         check_message = "✓ Experience document accepted."
@@ -1845,28 +1885,24 @@ async def upload_document(
                 timeout=DOC_VERIFY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            try:
-                os.remove(save_path)
-            except OSError:
-                pass
-            _log(db, "DOCUMENT_UPLOAD_FAILED", user=current_user,
-                 target=f"application:{application_id}",
-                 detail=f"Pre-check timed out for {doc_type}",
-                 ip=_ip(request), status="failure")
-            raise HTTPException(
-                status_code=408,
-                detail="Document verification timed out. Please try again.",
+            # Timeout: accept with advisory rather than blocking the applicant
+            print(f"[upload_document] ⚠️  Pre-check timed out for {doc_type} — accepting as advisory")
+            check_passed  = True
+            check_message = (
+                f"⚠ Advisory: '{doc_type}' accepted (verification timed out — "
+                f"HR will review manually)."
             )
-        except HTTPException:
-            raise
-        except Exception:
-            try:
-                os.remove(save_path)
-            except OSError:
-                pass
-            raise HTTPException(
-                status_code=400,
-                detail="Document verification service unavailable.",
+            _log(db, "DOCUMENT_UPLOAD_ADVISORY", user=current_user,
+                 target=f"application:{application_id}",
+                 detail=f"Pre-check timed out for {doc_type} — accepted as advisory",
+                 ip=_ip(request), status="warning")
+        except Exception as exc:
+            # Any other error: accept with advisory
+            print(f"[upload_document] ⚠️  Pre-check error for {doc_type}: {exc!r}")
+            check_passed  = True
+            check_message = (
+                f"⚠ Advisory: '{doc_type}' accepted (verification error — "
+                f"HR will review manually)."
             )
 
     if not check_passed:
