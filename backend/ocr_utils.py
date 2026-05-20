@@ -1,16 +1,22 @@
 """
-backend/ocr_utils.py  ·  v9.1.0
+backend/ocr_utils.py  ·  v9.2.0
 ────────────────────────────────────────────────────────────────
-ROOT-CAUSE FIX IN THIS VERSION:
+CHANGES IN v9.2.0 — FIXES 500 ERRORS ON /applications ROUTES:
 
-  ✅ FIX CRITICAL — `from __future__ import annotations` moved to line 1.
-     In v9.0.0 it was placed at line 41 (after other imports and code),
-     causing a SyntaxError on Python 3.10+ which prevented the entire
-     module from loading. This cascaded to break document_verifier,
-     shortlisting_engine, and every shortlist call (503 Service Unavailable).
+  ✅ FIX-500-1 — ENABLE_OCR environment variable added.
+     Set ENABLE_OCR=false in your Render environment variables to
+     disable all OCR processing. extract_document_text() and
+     extract_documents_batch() will return "" immediately (no crash,
+     no 500). Applicants can upload and submit documents normally.
+     Set ENABLE_OCR=true when Tesseract is properly installed.
 
-All v9.0.0 performance fixes retained:
-  🚀 FIX PERF-1 — bilateralFilter instead of fastNlMeansDenoising (20-60× faster)
+  ✅ FIX-500-2 — All OCR imports are now fully guarded.
+     If pytesseract/PIL/PyMuPDF/pdfplumber are missing and
+     ENABLE_OCR=false, the module loads cleanly without ImportError.
+
+All v9.1.0 fixes retained:
+  ✅ FIX CRITICAL — `from __future__ import annotations` at line 1.
+  🚀 FIX PERF-1 — bilateralFilter instead of fastNlMeansDenoising
   🚀 FIX PERF-2 — PyMuPDF render DPI 2.5× (was 4.0×)
   🚀 FIX PERF-3 — min_width 1200 (was 1600)
   🚀 FIX PERF-4 — Early-exit threshold 400 chars (was 800)
@@ -23,65 +29,97 @@ All v9.0.0 performance fixes retained:
 from __future__ import annotations
 
 import concurrent.futures
-import io
 import logging
 import os
 import threading
-import warnings
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optional OpenCV
+# ✅ FIX-500-1 — Master OCR toggle
+# Add ENABLE_OCR=false to your Render environment variables to stop all
+# OCR processing. extract_document_text() returns "" immediately — no crash,
+# no 500, applicants can still upload and submit their documents.
 # ─────────────────────────────────────────────────────────────────────────────
+
+OCR_ENABLED = os.getenv("ENABLE_OCR", "true").strip().lower() == "true"
+
+if not OCR_ENABLED:
+    logger.warning(
+        "⚠ OCR is DISABLED via ENABLE_OCR=false. "
+        "All extract_document_text() calls will return '' immediately. "
+        "Set ENABLE_OCR=true once Tesseract is installed on the server."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX-500-2 — Guard every OCR import so missing binaries don't crash startup
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Optional OpenCV
 try:
     import cv2
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    logger.warning("⚠ opencv-python not installed — advanced preprocessing disabled. "
-                   "Run: pip install opencv-python")
+    if OCR_ENABLED:
+        logger.warning("⚠ opencv-python not installed — advanced preprocessing disabled. "
+                       "Run: pip install opencv-python")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Capability flags
-# ─────────────────────────────────────────────────────────────────────────────
+# pytesseract + Pillow
+OCR_AVAILABLE = False
+PILImage = None  # will be set below if available
 
-try:
-    import pytesseract
-    from PIL import Image as PILImage, ImageEnhance, ImageFilter, ImageOps
+if OCR_ENABLED:
+    try:
+        import pytesseract
+        from PIL import Image as _PILImage, ImageEnhance, ImageFilter, ImageOps
+        PILImage = _PILImage
 
-    _win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(_win_path):
-        pytesseract.pytesseract.tesseract_cmd = _win_path
+        _win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(_win_path):
+            pytesseract.pytesseract.tesseract_cmd = _win_path
 
-    pytesseract.get_tesseract_version()
-    OCR_AVAILABLE = True
-    logger.info("✓ pytesseract OCR available")
-except Exception as _e:
-    OCR_AVAILABLE = False
-    logger.warning(
-        "⚠ pytesseract not available (%s). "
-        "Install Tesseract binary + 'pip install pytesseract pillow'. "
-        "Scanned documents will be accepted.", _e
-    )
+        pytesseract.get_tesseract_version()
+        OCR_AVAILABLE = True
+        logger.info("✓ pytesseract OCR available")
+    except Exception as _e:
+        OCR_AVAILABLE = False
+        logger.warning(
+            "⚠ pytesseract not available (%s). "
+            "Install Tesseract binary + 'pip install pytesseract pillow'. "
+            "Scanned documents will be accepted without text extraction.", _e
+        )
+else:
+    # Still try to import PIL for non-OCR uses (e.g. image validation)
+    try:
+        from PIL import Image as _PILImage, ImageEnhance, ImageFilter, ImageOps
+        PILImage = _PILImage
+    except ImportError:
+        pass
 
+# pdfplumber
 try:
     import pdfplumber
     PDFPLUMBER_AVAILABLE = True
-    logger.info("✓ pdfplumber available")
+    if OCR_ENABLED:
+        logger.info("✓ pdfplumber available")
 except ImportError:
     PDFPLUMBER_AVAILABLE = False
-    logger.warning("⚠ pdfplumber not installed. Run: pip install pdfplumber")
+    if OCR_ENABLED:
+        logger.warning("⚠ pdfplumber not installed. Run: pip install pdfplumber")
 
+# PyMuPDF
 try:
     import fitz
     PYMUPDF_AVAILABLE = True
-    logger.info("✓ PyMuPDF (fitz) available")
+    if OCR_ENABLED:
+        logger.info("✓ PyMuPDF (fitz) available")
 except ImportError:
     PYMUPDF_AVAILABLE = False
-    logger.warning("⚠ PyMuPDF not installed. Run: pip install pymupdf")
+    if OCR_ENABLED:
+        logger.warning("⚠ PyMuPDF not installed. Run: pip install pymupdf")
 
 POPPLER_AVAILABLE = PYMUPDF_AVAILABLE
 
@@ -101,11 +139,12 @@ def _check_ocr_service() -> bool:
 try:
     import requests as _requests_mod
     _REQUESTS_AVAILABLE = True
-    OCR_SERVICE_AVAILABLE = _check_ocr_service()
-    if OCR_SERVICE_AVAILABLE:
-        logger.info("✓ OCR microservice detected at %s", OCR_SERVICE_URL)
-    else:
-        logger.info("○ OCR microservice not running — using local OCR pipeline")
+    if OCR_ENABLED:
+        OCR_SERVICE_AVAILABLE = _check_ocr_service()
+        if OCR_SERVICE_AVAILABLE:
+            logger.info("✓ OCR microservice detected at %s", OCR_SERVICE_URL)
+        else:
+            logger.info("○ OCR microservice not running — using local OCR pipeline")
 except ImportError:
     _REQUESTS_AVAILABLE = False
 
@@ -173,18 +212,19 @@ def _get_ocr_languages() -> str:
 
 
 _OCR_LANG = _get_ocr_languages() if OCR_AVAILABLE else "eng"
-logger.info("OCR language string: %s", _OCR_LANG)
+if OCR_ENABLED:
+    logger.info("OCR language string: %s", _OCR_LANG)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenCV preprocessing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _pil_to_cv2(img: PILImage.Image) -> np.ndarray:
+def _pil_to_cv2(img):
     return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 
-def _cv2_to_pil(arr: np.ndarray) -> PILImage.Image:
+def _cv2_to_pil(arr):
     if len(arr.shape) == 2:
         return PILImage.fromarray(arr)
     return PILImage.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
@@ -284,16 +324,9 @@ def _sharpen(grey: np.ndarray) -> np.ndarray:
 # 🚀 FIX PERF-7: 3 primary strategies (A, B, E). C+D are last-resort only.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_preprocessing_variants(img: PILImage.Image) -> list[PILImage.Image]:
-    """
-    3 primary preprocessed versions (fast path):
-      A. CLAHE + adaptive threshold  → uneven lighting / phone photos (best)
-      B. CLAHE + Otsu                → clean scans
-      E. PIL greyscale + contrast    → fallback (no OpenCV needed)
-    """
-    variants: list[PILImage.Image] = []
+def _build_preprocessing_variants(img) -> list:
+    variants: list = []
 
-    # Strategy E: PIL-only fallback (always available)
     try:
         pil_grey = img.convert("L")
         pil_grey = ImageOps.autocontrast(pil_grey, cutoff=2)
@@ -339,11 +372,8 @@ def _build_preprocessing_variants(img: PILImage.Image) -> list[PILImage.Image]:
     return variants or [img]
 
 
-def _build_last_resort_variants(img: PILImage.Image) -> list[PILImage.Image]:
-    """
-    Strategies C and D — only tried when primary strategies yield < 50 chars.
-    """
-    variants: list[PILImage.Image] = []
+def _build_last_resort_variants(img) -> list:
+    variants: list = []
     if not CV2_AVAILABLE:
         return variants
     try:
@@ -383,7 +413,7 @@ _PSM_MODES = (11, 6, 3)
 _EARLY_EXIT_CHARS = 400
 
 
-def _ocr_one_image(img: PILImage.Image, lang: str | None = None) -> str:
+def _ocr_one_image(img, lang: str | None = None) -> str:
     ocr_lang = lang or _OCR_LANG
     best     = ""
     for psm in _PSM_MODES:
@@ -403,12 +433,7 @@ def _ocr_one_image(img: PILImage.Image, lang: str | None = None) -> str:
     return best
 
 
-def _ocr_best_strategy(img: PILImage.Image) -> str:
-    """
-    Try primary preprocessing strategies; return best result.
-    If still poor (< 50 chars), try last-resort strategies.
-    Early-exit when any strategy yields >= _EARLY_EXIT_CHARS chars.
-    """
+def _ocr_best_strategy(img) -> str:
     variants = _build_preprocessing_variants(img)
     best     = ""
     for i, variant in enumerate(variants):
@@ -422,7 +447,6 @@ def _ocr_best_strategy(img: PILImage.Image) -> str:
                 logger.debug("Early exit after strategy %d (%d chars)", i, usable)
                 return best
 
-    # 🚀 FIX PERF-7: Only run last-resort strategies if primary result is very poor
     best_usable = len(best.replace(" ", "").replace("\n", ""))
     if best_usable < 50:
         for i, variant in enumerate(_build_last_resort_variants(img)):
@@ -442,11 +466,7 @@ def _ocr_best_strategy(img: PILImage.Image) -> str:
 # Rotation attempts for landscape / upside-down scans
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ocr_with_rotation(img: PILImage.Image) -> str:
-    """
-    Try OCR at 0°, 90°, 180°, 270° rotations.
-    Only triggered when the normal pipeline returns < 50 usable chars.
-    """
+def _ocr_with_rotation(img) -> str:
     best = ""
     for angle in (0, 90, 180, 270):
         try:
@@ -488,7 +508,6 @@ def _extract_via_service(file_path: str) -> str:
 
 
 def _pdfplumber_text(file_path: str) -> str:
-    """Also tries tight-tolerance extraction for dense PDFs."""
     if not PDFPLUMBER_AVAILABLE:
         return ""
     try:
@@ -529,7 +548,6 @@ def _pymupdf_ocr(file_path: str) -> str:
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             img = PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
             text = _ocr_best_strategy(img)
-            # Rotation fallback if result is tiny
             if len(text.replace(" ", "").replace("\n", "")) < 50:
                 logger.debug("Page %d of %s: low char count, trying rotations",
                              page_num + 1, os.path.basename(file_path))
@@ -559,7 +577,6 @@ def _image_ocr(file_path: str) -> str:
     try:
         img    = PILImage.open(file_path).convert("RGB")
         result = _ocr_best_strategy(img)
-        # Rotation fallback if result is tiny
         if len(result.replace(" ", "").replace("\n", "")) < 50:
             logger.debug("%s: low char count, trying rotations",
                          os.path.basename(file_path))
@@ -585,27 +602,40 @@ def extract_document_text(file_path: str) -> str:
     Extract text from a document using the best available local method.
     NEVER raises. Always returns str (possibly "").
 
+    ✅ FIX-500: Returns "" immediately when ENABLE_OCR=false.
+    This prevents 500 errors on /applications routes when Tesseract
+    is not installed on the server.
+
     Cache: results keyed by (path, mtime, size).
 
     Pipeline for PDFs:
-      1. Cache lookup (instant)
-      2. Remote OCR microservice (if running)
-      3. pdfplumber  — text-layer PDFs (fast)
-      4. PyMuPDF + multi-strategy OCR @ 2.5× DPI — scanned / image PDFs
+      1. ENABLE_OCR check — return "" immediately if disabled
+      2. Cache lookup (instant)
+      3. Remote OCR microservice (if running)
+      4. pdfplumber  — text-layer PDFs (fast)
+      5. PyMuPDF + multi-strategy OCR @ 2.5× DPI — scanned / image PDFs
 
     Pipeline for images:
-      1. Cache lookup (instant)
-      2. Remote OCR microservice (if running)
-      3. Multi-strategy OpenCV preprocessing + multi-PSM with early exit
-      4. Rotation fallback if < 50 chars extracted
+      1. ENABLE_OCR check — return "" immediately if disabled
+      2. Cache lookup (instant)
+      3. Remote OCR microservice (if running)
+      4. Multi-strategy OpenCV preprocessing + multi-PSM with early exit
+      5. Rotation fallback if < 50 chars extracted
     """
+    # ✅ FIX-500-1: Bail out immediately — no processing, no crash, no 500.
+    if not OCR_ENABLED:
+        logger.debug("OCR disabled (ENABLE_OCR=false) — skipping extraction for %s",
+                     file_path)
+        return ""
+
     if not file_path or not os.path.exists(file_path):
         logger.debug("extract_document_text: file not found: %s", file_path)
         return ""
 
     cached = _cache_get(file_path)
     if cached is not None:
-        logger.debug("OCR cache HIT for %s (%d chars)", os.path.basename(file_path), len(cached))
+        logger.debug("OCR cache HIT for %s (%d chars)",
+                     os.path.basename(file_path), len(cached))
         return cached
 
     ext = os.path.splitext(file_path)[1].lower()
@@ -652,10 +682,17 @@ def extract_documents_batch(
     """
     🚀 FIX PERF-6: Extract text from multiple files IN PARALLEL.
     Returns {file_path: text} dict.
-    Wall-clock time = max(individual_times) instead of sum(individual_times).
+
+    ✅ FIX-500: Returns {"path": ""} for all files when ENABLE_OCR=false.
     """
     if not file_paths:
         return {}
+
+    # ✅ FIX-500-1: Fast-path when OCR is disabled — return empty strings for all
+    if not OCR_ENABLED:
+        logger.debug("OCR disabled — batch extraction returning empty strings for %d files",
+                     len(file_paths))
+        return {fp: "" for fp in file_paths}
 
     results: dict[str, str] = {}
     uncached: list[str] = []
@@ -683,33 +720,4 @@ def extract_documents_batch(
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Startup diagnostics
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _print_ocr_status() -> None:
-    fra_installed = "fra" in _OCR_LANG if OCR_AVAILABLE else False
-    lines = [
-        "",
-        "── OCR Status (v9.1.0) ────────────────────────────────────────────────",
-        f"  pytesseract (image OCR)    : {'✓ available' if OCR_AVAILABLE else '✗ NOT FOUND'}",
-        f"  OpenCV preprocessing       : {'✓ available (3 primary + 2 last-resort strategies)' if CV2_AVAILABLE else '⚠ not installed — pip install opencv-python'}",
-        f"  OCR language(s)            : {_OCR_LANG}" + (" ✓ French ready" if fra_installed else " ⚠ French not installed"),
-        f"  pdfplumber  (text PDFs)    : {'✓ available' if PDFPLUMBER_AVAILABLE else '✗ NOT FOUND — pip install pdfplumber'}",
-        f"  PyMuPDF     (scanned PDFs) : {'✓ available' if PYMUPDF_AVAILABLE else '✗ NOT FOUND — pip install pymupdf'}",
-        f"  OCR microservice           : {'✓ running at ' + OCR_SERVICE_URL if OCR_SERVICE_AVAILABLE else '○ not running (optional)'}",
-        f"  🚀 OCR result cache        : ✓ active (max {_OCR_CACHE_MAX} entries)",
-        f"  🚀 PSM modes               : {_PSM_MODES}",
-        f"  🚀 PDF render DPI          : 2.5×",
-        f"  🚀 Denoiser                : bilateralFilter (20-60× faster than NLM)",
-        f"  🚀 Preprocessing           : A(CLAHE+adaptive) B(CLAHE+Otsu) E(PIL) [C+D last-resort]",
-        f"  🚀 Early-exit threshold    : {_EARLY_EXIT_CHARS} chars",
-        f"  🚀 Batch extraction        : ✓ parallel (up to 4 workers)",
-        f"  ✅ __future__ import       : ✓ FIXED (line 1)",
-        "───────────────────────────────────────────────────────────────────────",
-        "",
-    ]
-    print("\n".join(lines))
-
-
-_print_ocr_status()
+# ─────────────────────────────────────────────────────────
