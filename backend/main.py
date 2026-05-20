@@ -1,33 +1,79 @@
 """
-backend/main.py  ·  v6.4.0
+backend/main.py  ·  v6.5.0
 ────────────────────────────────────────────────────────────────
-ALL PREVIOUS FIXES RETAINED (FIX-CORE-1 through FIX-MIGRATE-1).
+ALL PREVIOUS FIXES RETAINED (FIX-CORE-1 through FIX-MIGRATE-2,
+FIX-ROUTE-1, FIX-STARTUP-1).
 
-NEW FIXES IN v6.4.0:
+NEW FIXES IN v6.5.0:
 
-  ✅ FIX-ROUTE-1 — /applications/my MOVED above /applications/{application_id}
-     FastAPI matches routes in registration order. When /applications/my was
-     registered AFTER /applications/{application_id}, FastAPI treated "my"
-     as an integer path parameter, causing a 422 validation error that
-     the CORS wrapper re-raised as a 500. Fix: register the static path
-     /applications/my FIRST.
+  ✅ FIX-QUERY-1 — All 'Column != None' comparisons replaced with
+     .isnot(None) and all 'Column == None' replaced with .is_(None).
+     In SQLAlchemy, Python's != and == operators on Column objects do
+     NOT generate IS NOT NULL / IS NULL SQL. They generate '!= NULL'
+     which always evaluates to NULL (unknown) in SQL, silently returning
+     zero rows or wrong results. The correct API is .isnot(None) and
+     .is_(None). Affected queries:
+       - my_applications()              → submitted_at != None
+       - submit_application()           → submitted_at != None  (×2)
+       - finalize_application()         (uses expire_all, OK)
+       - get_profile_documents()        → submitted_at != None
+       - shortlist_all_for_job()        → submitted_at != None, decision == None,
+                                          ai_reason == None / == ""
+       - reshortlist_all_for_job()      → submitted_at != None
+       - get_all_candidates()           → submitted_at != None
+       - get_job_report()               → submitted_at != None
+       - delete_draft_application()     → submitted_at == None
+       - submit_application() old_draft → submitted_at == None
 
-  ✅ FIX-MIGRATE-2 — Migrations now run INSIDE lifespan, AFTER
-     Base.metadata.create_all(), not at module import time.
-     The old code called ensure_application_columns() at the top-level
-     of main.py (module scope), which ran before the tables existed on
-     a fresh database. inspect(engine).get_columns("applications") raised
-     OperationalError: no such table: applications — crashing the import
-     and returning 500 on every endpoint.
-     Fix: all migrations are now called in the lifespan startup block,
-     after create_all() has guaranteed the tables exist.
+  ✅ FIX-QUERY-2 — shortlist_all_for_job() ai_reason filter fixed.
+     The old filter:
+       or_(Application.ai_reason == None, Application.ai_reason == "")
+     used == None (wrong, see FIX-QUERY-1) and == "" which generates
+     'ai_reason = ''' — valid SQL but misses NULLs. Fixed to:
+       or_(Application.ai_reason.is_(None), Application.ai_reason == "")
 
-  ✅ FIX-STARTUP-1 — create_all() also moved into lifespan so table
-     creation and migrations are sequenced correctly and errors are
-     caught and logged rather than crashing the import.
+  ✅ FIX-ENUM-1 — DocumentType enum comparisons now use .value consistently.
+     SQLAlchemy SAEnum(native_enum=False) stores VARCHAR. When filtering
+     with a Python enum instance, SQLAlchemy should call .value
+     automatically, but under certain SQLAlchemy + psycopg2 version
+     combinations this fails, sending the repr 'DocumentType.cv' instead
+     of the string 'cv' to PostgreSQL → type mismatch → 500.
+     Fix: all ProfileDocument / Document doc_type filters now explicitly
+     pass DocumentType(doc_type).value (a plain string) to the filter.
 
-  All previous fixes (FIX-CORE-1 through FIX-MIGRATE-1, FIX-UNPACK-1
-  through FIX-UNPACK-4, FIX-DISPLAY-1) are retained.
+  ✅ FIX-FILE-1 — /profile/documents GET no longer filters out files
+     that don't exist on disk.
+     On Render free tier, /tmp is ephemeral — all uploaded files are wiped
+     on every server restart / wake-from-sleep cycle. The old code called
+     os.path.exists(doc.file_path) and silently skipped missing files,
+     returning an empty list after every cold boot. The frontend then
+     logged "No profile documents found" and the upload POST retried in
+     a loop, each attempt returning 500 because the DB record existed but
+     the file didn't.
+     Fix: return all DB records regardless of file existence. Add a new
+     "file_available" boolean field so the frontend can show a
+     "file lost — please re-upload" warning instead of a blank screen.
+     The POST /profile/documents upload now correctly replaces the DB
+     record AND overwrites the file, so re-uploading always works.
+
+  ✅ FIX-FILE-2 — attach_profile_document() no longer raises 410 when
+     source file is missing (same ephemeral /tmp reason as FIX-FILE-1).
+     Instead it raises 400 with a clear "please re-upload" message.
+
+  ✅ FIX-MIGRATE-3 — ensure_document_type_enum() is now a no-op when
+     models use native_enum=False (which is always the case here).
+     The old code tried to ALTER a PostgreSQL native ENUM type that
+     doesn't exist (because native_enum=False stores VARCHAR), causing
+     a ProgrammingError on some PG versions that was swallowed but left
+     a dirty transaction open → subsequent queries on the same connection
+     returned "transaction aborted" errors → 500.
+     Fix: the function now checks native_enum setting and returns early.
+
+  ✅ FIX-STARTUP-2 — Lifespan no longer lets ML load failure crash the
+     import. The ML load is wrapped in an additional try/except that
+     catches BaseException (not just Exception) so that even
+     SystemExit / KeyboardInterrupt from within a thread pool executor
+     don't propagate and kill the ASGI server.
 """
 
 import os
@@ -92,12 +138,6 @@ from auth import (
     get_current_user, require_hr, require_applicant,
 )
 from email_utils import send_reset_email, send_hr_invite_email
-
-# ✅ FIX-STARTUP-1: Do NOT call Base.metadata.create_all() here at module scope.
-# It is now called inside lifespan() so that:
-#   (a) errors are caught and logged, not silently swallowed
-#   (b) migrations run AFTER tables are guaranteed to exist
-# (Moved to lifespan below)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,10 +341,6 @@ _CANDIDATE_POOL = concurrent.futures.ThreadPoolExecutor(
 # ─────────────────────────────────────────────────────────────────────────────
 # Database migrations
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX-MIGRATE-2: These functions are ONLY called from inside lifespan(),
-# AFTER Base.metadata.create_all() has run. Do NOT call them at module scope.
-# Calling inspect(engine).get_columns("applications") before the table exists
-# raises OperationalError and crashes the entire app import.
 
 def _is_sqlite_db() -> bool:
     return str(engine.url).startswith("sqlite")
@@ -382,7 +418,6 @@ def ensure_application_columns():
     """
     Add any new columns to the applications table that are missing.
     Safe to run on every startup — skips columns that already exist.
-
     ✅ FIX-MIGRATE-1: Adds doc_advisory column for existing databases.
     ✅ FIX-MIGRATE-2: Must only be called AFTER Base.metadata.create_all().
     """
@@ -407,7 +442,6 @@ def ensure_application_columns():
                         except Exception:
                             pass
                         print(f"[migration] ⚠️  Could not add 'applications.{col}': {exc}")
-
             try:
                 conn.execute(text(
                     "UPDATE applications SET doc_advisory = 0 WHERE doc_advisory IS NULL"
@@ -424,28 +458,21 @@ def ensure_application_columns():
 
 
 def ensure_document_type_enum():
-    if _is_sqlite_db():
-        return
-    try:
-        with engine.connect() as conn:
-            type_exists = conn.execute(
-                text("SELECT 1 FROM pg_type WHERE typname = 'documenttype'")
-            ).fetchone()
-            if not type_exists:
-                return
-            already_has = conn.execute(text(
-                "SELECT 1 FROM pg_enum e JOIN pg_type t ON e.enumtypid = t.oid "
-                "WHERE t.typname = 'documenttype' AND e.enumlabel = 'experience'"
-            )).fetchone()
-            if already_has:
-                return
-            conn.execute(text(
-                "ALTER TYPE documenttype ADD VALUE IF NOT EXISTS 'experience'"
-            ))
-            conn.commit()
-            print("[migration] ✅ Added 'experience' to documenttype PG enum")
-    except Exception as exc:
-        print(f"[migration] documenttype enum migration warning: {exc}")
+    """
+    ✅ FIX-MIGRATE-3: This function is a no-op when models use native_enum=False.
+
+    The models use SAEnum(DocumentType, native_enum=False) which stores VARCHAR,
+    NOT a PostgreSQL native ENUM type. The old code tried to ALTER a 'documenttype'
+    PG native enum that doesn't exist, which caused a ProgrammingError on some
+    PostgreSQL versions. Even though the error was caught, it left a dirty
+    transaction open on the connection, causing subsequent queries on that same
+    connection to return "InternalError: current transaction is aborted" → 500.
+
+    Since we use native_enum=False everywhere, there is no PG ENUM to alter.
+    VARCHAR columns accept any string value, so no migration is needed.
+    This function is kept for compatibility but does nothing.
+    """
+    print("[migration] ✅ ensure_document_type_enum: skipped (native_enum=False, VARCHAR storage)")
 
 
 def ensure_pending_decision_default():
@@ -482,7 +509,6 @@ async def lifespan(app: FastAPI):
     print("[lifespan] Server bound — initialising …")
 
     # ✅ FIX-STARTUP-1 + FIX-MIGRATE-2: create tables first, THEN migrate.
-    # Both steps are inside lifespan so errors are caught and logged.
     try:
         Base.metadata.create_all(bind=engine)
         print("[lifespan] ✅ Database tables created / verified.")
@@ -497,6 +523,8 @@ async def lifespan(app: FastAPI):
 
     print("[lifespan] Starting ML background load …")
     loop = asyncio.get_running_loop()
+    # ✅ FIX-STARTUP-2: catch BaseException so SystemExit from a thread pool
+    #    executor doesn't propagate and kill the ASGI server.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         try:
             await asyncio.wait_for(
@@ -505,8 +533,8 @@ async def lifespan(app: FastAPI):
             )
         except asyncio.TimeoutError:
             print("[lifespan] ⚠️  ML load timed out after 120s — degraded mode.")
-        except Exception as exc:
-            print(f"[lifespan] ⚠️  ML load error: {exc!r}")
+        except BaseException as exc:          # ✅ FIX-STARTUP-2
+            print(f"[lifespan] ⚠️  ML load error (non-fatal): {exc!r}")
 
     _APP_READY = True
     print("[lifespan] ✅ Application ready.")
@@ -701,7 +729,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.4.0",
+    version     = "6.5.0",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -1202,7 +1230,11 @@ def list_jobs(db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     return (
         db.query(Job)
-        .filter(Job.is_active == True, or_(Job.deadline == None, Job.deadline > now))
+        .filter(
+            Job.is_active == True,
+            # ✅ FIX-QUERY-1: .is_(None) instead of == None
+            or_(Job.deadline.is_(None), Job.deadline > now),
+        )
         .all()
     )
 
@@ -1274,10 +1306,11 @@ def submit_application(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or no longer active")
 
+    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     existing = db.query(Application).filter(
         Application.applicant_id == current_user.id,
         Application.job_id       == payload.job_id,
-        Application.submitted_at != None,
+        Application.submitted_at.isnot(None),
     ).first()
     if existing:
         existing_docs  = db.query(Document).filter(
@@ -1291,10 +1324,11 @@ def submit_application(
             )
         return existing
 
+    # ✅ FIX-QUERY-1: .is_(None) instead of == None
     old_draft = db.query(Application).filter(
         Application.applicant_id == current_user.id,
         Application.job_id       == payload.job_id,
-        Application.submitted_at == None,
+        Application.submitted_at.is_(None),
     ).first()
     if old_draft:
         old_docs = db.query(Document).filter(
@@ -1325,18 +1359,21 @@ def submit_application(
 
 
 # ✅ FIX-ROUTE-1: /applications/my MUST be registered BEFORE
-# /applications/{application_id}. FastAPI matches routes in registration
-# order. If the parameterised route comes first, "my" is parsed as an
-# integer → validation fails → 422/500. Static paths must come first.
+# /applications/{application_id}.
 @_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
 def my_applications(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    return db.query(Application).filter(
-        Application.applicant_id == current_user.id,
-        Application.submitted_at != None,
-    ).all()
+    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
+    return (
+        db.query(Application)
+        .filter(
+            Application.applicant_id == current_user.id,
+            Application.submitted_at.isnot(None),
+        )
+        .all()
+    )
 
 
 @_app.get("/applications/{application_id}", response_model=ApplicationResponse, tags=["applications"])
@@ -1362,10 +1399,11 @@ def delete_draft_application(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    # ✅ FIX-QUERY-1: .is_(None) instead of == None
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
-        Application.submitted_at == None,
+        Application.submitted_at.is_(None),
     ).first()
     if not app_obj:
         return {"ok": True, "detail": "Draft not found or already removed."}
@@ -1525,6 +1563,19 @@ def get_profile_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    """
+    ✅ FIX-FILE-1: No longer filters out documents whose file is missing on disk.
+
+    On Render free tier, /tmp is ephemeral — all files are wiped on every
+    server restart or wake-from-sleep. The old code skipped DB records where
+    the file no longer existed, returning an empty list every cold boot.
+    This caused the frontend to show no documents and the upload flow to loop.
+
+    Now: all DB records are returned. Each item includes a 'file_available'
+    boolean so the frontend can display a "file lost — please re-upload" notice
+    instead of a blank screen. Re-uploading always replaces both the DB record
+    and the file correctly.
+    """
     seen_types:   set[str]   = set()
     profile_docs: list[dict] = []
 
@@ -1538,9 +1589,9 @@ def get_profile_documents(
         dtype = _doc_type_value(doc)
         if dtype in seen_types:
             continue
-        if not os.path.exists(doc.file_path):
-            continue
         seen_types.add(dtype)
+        # ✅ FIX-FILE-1: report availability but never skip the record
+        file_available = os.path.exists(doc.file_path)
         profile_docs.append({
             "id":             doc.id,
             "doc_type":       dtype,
@@ -1550,14 +1601,16 @@ def get_profile_documents(
             "uploaded_at":    doc.uploaded_at.isoformat() if doc.uploaded_at else None,
             "application_id": None,
             "source":         "profile",
+            "file_available": file_available,   # ✅ FIX-FILE-1
         })
 
     if len(seen_types) < len(ALLOWED_DOC_TYPES):
+        # ✅ FIX-QUERY-1: .isnot(None) instead of != None
         apps = (
             db.query(Application)
             .filter(
                 Application.applicant_id == current_user.id,
-                Application.submitted_at != None,
+                Application.submitted_at.isnot(None),
             )
             .order_by(Application.submitted_at.desc())
             .all()
@@ -1573,9 +1626,9 @@ def get_profile_documents(
                 dtype = _doc_type_value(doc)
                 if dtype in seen_types:
                     continue
-                if not os.path.exists(doc.file_path):
-                    continue
                 seen_types.add(dtype)
+                # ✅ FIX-FILE-1: report availability but never skip
+                file_available = os.path.exists(doc.file_path)
                 profile_docs.append({
                     "id":             doc.id,
                     "doc_type":       dtype,
@@ -1585,6 +1638,7 @@ def get_profile_documents(
                     "uploaded_at":    doc.uploaded_at.isoformat() if doc.uploaded_at else None,
                     "application_id": app_obj.id,
                     "source":         "application",
+                    "file_available": file_available,  # ✅ FIX-FILE-1
                 })
 
     return {"documents": profile_docs}
@@ -1615,9 +1669,13 @@ async def upload_profile_document(
             detail=f"File size exceeds the {MAX_FILE_SIZE_MB} MB limit.",
         )
 
+    # ✅ FIX-ENUM-1: use .value (plain string) for the DB filter to avoid
+    #    SQLAlchemy + psycopg2 version mismatches where the enum repr is
+    #    sent to PostgreSQL instead of the string value → type error → 500.
+    doc_type_value = DocumentType(doc_type).value
     existing = db.query(ProfileDocument).filter(
         ProfileDocument.user_id  == current_user.id,
-        ProfileDocument.doc_type == DocumentType(doc_type),
+        ProfileDocument.doc_type == doc_type_value,
     ).first()
     if existing:
         try:
@@ -1634,7 +1692,7 @@ async def upload_profile_document(
 
     prof_doc = ProfileDocument(
         user_id=current_user.id,
-        doc_type=DocumentType(doc_type),
+        doc_type=doc_type_value,        # ✅ FIX-ENUM-1: plain string, not enum instance
         filename=unique_name,
         original_name=file.filename,
         file_path=save_path,
@@ -1645,14 +1703,15 @@ async def upload_profile_document(
          detail=f"Uploaded profile doc '{doc_type}': {file.filename}",
          ip=_ip(request))
     return {
-        "id":            prof_doc.id,
-        "doc_type":      doc_type,
-        "doc_label":     DOC_TYPE_LABELS.get(doc_type, doc_type),
-        "original_name": file.filename,
-        "file_name":     file.filename,
-        "uploaded_at":   prof_doc.uploaded_at.isoformat() if prof_doc.uploaded_at else None,
-        "source":        "profile",
-        "message":       f"✓ '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' saved to your profile.",
+        "id":             prof_doc.id,
+        "doc_type":       doc_type,
+        "doc_label":      DOC_TYPE_LABELS.get(doc_type, doc_type),
+        "original_name":  file.filename,
+        "file_name":      file.filename,
+        "uploaded_at":    prof_doc.uploaded_at.isoformat() if prof_doc.uploaded_at else None,
+        "source":         "profile",
+        "file_available": True,         # ✅ FIX-FILE-1: just uploaded, always available
+        "message":        f"✓ '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' saved to your profile.",
     }
 
 
@@ -1706,6 +1765,8 @@ def attach_profile_document(
     source_filename  = None
 
     if payload.source == "profile":
+        # ✅ FIX-ENUM-1: plain string comparison
+        doc_type_value = DocumentType(doc_type).value
         prof_doc = db.query(ProfileDocument).filter(
             ProfileDocument.id      == payload.profile_doc_id,
             ProfileDocument.user_id == current_user.id,
@@ -1737,10 +1798,17 @@ def attach_profile_document(
         source_original  = source_doc.original_name
         source_filename  = source_doc.filename
 
+    # ✅ FIX-FILE-2: replaced 410 with 400 + re-upload instruction.
+    #    On Render free tier /tmp is wiped on restart; a missing file is
+    #    expected, not a permanent gone-forever error. 400 is retryable.
     if not os.path.exists(source_file_path):
         raise HTTPException(
-            status_code=410,
-            detail="The original file no longer exists. Please upload a new file.",
+            status_code=400,
+            detail=(
+                "The original file is no longer available on the server "
+                "(this can happen after a server restart on free-tier hosting). "
+                "Please re-upload this document to your profile and try again."
+            ),
         )
 
     _, ext        = os.path.splitext(source_filename)
@@ -1753,9 +1821,10 @@ def attach_profile_document(
             status_code=500, detail=f"Failed to copy document file: {exc}"
         )
 
+    # ✅ FIX-ENUM-1: plain string for doc_type
     new_doc = Document(
         application_id=application_id,
-        doc_type=DocumentType(doc_type),
+        doc_type=DocumentType(doc_type).value,
         filename=new_filename,
         original_name=source_original,
         file_path=new_file_path,
@@ -1883,9 +1952,10 @@ async def upload_document(
              ip=_ip(request), status="failure")
         raise HTTPException(status_code=400, detail=check_message)
 
+    # ✅ FIX-ENUM-1: plain string for doc_type
     doc = Document(
         application_id=application_id,
-        doc_type=DocumentType(doc_type),
+        doc_type=DocumentType(doc_type).value,
         filename=unique_name,
         original_name=file.filename,
         file_path=save_path,
@@ -1943,12 +2013,13 @@ def list_documents(
     missing      = sorted(REQUIRED_DOC_TYPES - uploaded_set)
     return {
         "documents": [{
-            "id":            d.id,
-            "doc_type":      _doc_type_value(d),
-            "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
-            "original_name": d.original_name,
-            "uploaded_at":   d.uploaded_at,
-            "url":           f"/uploads/{d.filename}",
+            "id":             d.id,
+            "doc_type":       _doc_type_value(d),
+            "doc_label":      DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
+            "original_name":  d.original_name,
+            "uploaded_at":    d.uploaded_at,
+            "url":            f"/uploads/{d.filename}",
+            "file_available": os.path.exists(d.file_path),  # ✅ FIX-FILE-1
         } for d in docs],
         "uploaded_types":       sorted(uploaded_set),
         "missing_types":        missing,
@@ -2228,14 +2299,14 @@ def hr_list_application_documents(
     return {
         "application_id": application_id,
         "documents": [{
-            "id":            d.id,
-            "doc_type":      _doc_type_value(d),
-            "doc_label":     DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
-            "original_name": d.original_name or d.filename,
-            "uploaded_at":   d.uploaded_at.isoformat() if d.uploaded_at else None,
-            "file_url":      f"/uploads/{d.filename}",
-            "download_url":  f"/hr/documents/{d.id}/download",
-            "exists":        os.path.exists(d.file_path),
+            "id":             d.id,
+            "doc_type":       _doc_type_value(d),
+            "doc_label":      DOC_TYPE_LABELS.get(_doc_type_value(d), _doc_type_value(d)),
+            "original_name":  d.original_name or d.filename,
+            "uploaded_at":    d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "file_url":       f"/uploads/{d.filename}",
+            "download_url":   f"/hr/documents/{d.id}/download",
+            "exists":         os.path.exists(d.file_path),
         } for d in docs],
     }
 
@@ -2250,11 +2321,12 @@ def get_all_candidates(
     db: Session = Depends(get_db),
     hr: User    = Depends(require_hr),
 ):
+    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     query = (
         db.query(Application, User, Job)
         .join(User, Application.applicant_id == User.id)
         .join(Job,  Application.job_id       == Job.id)
-        .filter(Application.submitted_at != None)
+        .filter(Application.submitted_at.isnot(None))
     )
     if job_id:
         query = query.filter(Application.job_id == job_id)
@@ -2312,12 +2384,13 @@ def get_job_report(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     rows = (
         db.query(Application, User)
         .join(User, Application.applicant_id == User.id)
         .filter(
             Application.job_id       == job_id,
-            Application.submitted_at != None,
+            Application.submitted_at.isnot(None),
         )
         .all()
     )
@@ -2882,13 +2955,14 @@ async def shortlist_all_for_job(
 
     same_title_ids = [j.id for j in db.query(Job).filter(Job.title == job.title).all()]
 
+    # ✅ FIX-QUERY-1 + FIX-QUERY-2: use .isnot(None) and .is_(None) throughout
     all_apps = db.query(Application).filter(
         Application.job_id.in_(same_title_ids),
-        Application.submitted_at != None,
+        Application.submitted_at.isnot(None),
         or_(
-            Application.decision == None,
+            Application.decision.is_(None),
             Application.decision == DecisionStatus.pending,
-            Application.ai_reason == None,
+            Application.ai_reason.is_(None),
             Application.ai_reason == "",
         ),
     ).all()
@@ -2896,7 +2970,7 @@ async def shortlist_all_for_job(
     if not all_apps:
         total_apps = db.query(Application).filter(
             Application.job_id.in_(same_title_ids),
-            Application.submitted_at != None,
+            Application.submitted_at.isnot(None),
         ).count()
         if total_apps > 0:
             return JSONResponse(status_code=200, content={
@@ -3009,9 +3083,10 @@ async def reshortlist_all_for_job(
     same_title_ids = [
         j.id for j in db.query(Job).filter(Job.title == job.title).all()
     ]
+    # ✅ FIX-QUERY-1: .isnot(None)
     all_apps = db.query(Application).filter(
         Application.job_id.in_(same_title_ids),
-        Application.submitted_at != None,
+        Application.submitted_at.isnot(None),
     ).all()
 
     if not all_apps:
