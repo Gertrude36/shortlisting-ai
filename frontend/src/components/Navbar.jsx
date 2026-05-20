@@ -1,59 +1,70 @@
 /**
- * frontend/src/components/Navbar.jsx
+ * frontend/src/components/Navbar.jsx  ·  v5.9.0
  *
- * FIXES APPLIED:
+ * FIXES in v5.9.0:
  *
- * ✅ FIX 1 — "NOT AUTHENTICATED" BADGE FOR HR USERS
- * ─────────────────────────────────────────────────────────────────
- * The screenshot showed "Not authenticated" in the top-right corner
- * while an HR user was on the Job Create page.
+ *  ✅ FIX A — ProfileModal.handleSave() now calls updateProfile() with the
+ *     correct shape: { fullName, national_id, address, phone, documents }.
+ *     AuthContext v2.0.0 persists all of those fields, so the profile gate
+ *     in ApplyPage re-evaluates immediately after a save — no extra fetches,
+ *     no stale state, no repeated modals.
  *
- * Root cause: `profileComplete` was computed as:
- *   user.nationalId && user.location && user.documents?.length > 0
+ *  ✅ FIX B — Document uploads inside the modal happen BEFORE updateProfile()
+ *     is called, so `documents` in the payload is always the final server
+ *     list (not a mix of File objects and server docs).
  *
- * HR users never fill nationalId / location / documents — those fields
- * are for applicants only. So `profileComplete` was always false for HR,
- * causing the amber warning dot and "Not authenticated" tooltip to appear.
+ *  ✅ FIX C — profileComplete and `missing` in the Navbar dropdown now check
+ *     user.national_id correctly (AuthContext v2.0.0 always populates it).
  *
- * Fix: HR users are considered "profile complete" by default.
- * Only applicant users are checked for the profile fields.
+ *  ✅ FIX D — After a successful save the modal auto-closes (700 ms delay so
+ *     the user sees the "Profile Saved!" confirmation), and the
+ *     'profile-updated' event is fired exactly once so ApplyPage can react.
  *
- * ✅ FIX 2 — PROFILE MODAL HIDDEN FOR HR USERS
- * ─────────────────────────────────────────────────────────────────
- * HR users don't have a profile to fill (no nationalId, no documents).
- * Clicking their avatar opened the applicant ProfileModal, which was
- * confusing and showed empty required fields.
+ *  ✅ FIX E — ProfileModal no longer requires documents to be uploaded before
+ *     saving if the user already has serverDocs for all required slots.
+ *     This prevents "re-upload everything" friction for returning users.
  *
- * Fix: the "View & Edit Profile" button and ProfileModal only render
- * for applicant users. HR users only see their name/role and Log Out.
- *
- * ✅ FIX 3 — DROPDOWN INFO ROWS HIDDEN FOR HR USERS
- * ─────────────────────────────────────────────────────────────────
- * The dropdown showed nationalId / location / phone / documents rows
- * for HR users, all showing "Not set". Removed for HR role.
+ * All fixes from v5.8.2 (FIX 6 field-name alignment) are retained.
  */
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Link, useNavigate }           from 'react-router-dom'
 import {
   LogOut, LayoutDashboard, Briefcase,
   Upload, X, User, MapPin, CreditCard,
   Phone, FileText, CheckCircle, AlertCircle,
   GraduationCap, ScrollText, Award, Eye,
-  Trash2, RefreshCw, Pencil, Save,
+  Trash2, RefreshCw, Pencil, Save, Briefcase as BriefcaseIcon,
 } from 'lucide-react'
 import toast       from 'react-hot-toast'
 import { useAuth } from '../context/AuthContext'
+import api         from '../api/axios'
 
 const DOC_SLOTS = [
-  { key: 'id',           label: 'National ID Copy',      hint: 'Front & back scan or photo', icon: CreditCard,    color: '#1a56db', bg: '#deeaff', border: '#93b4ff', required: true },
-  { key: 'cv',           label: 'Curriculum Vitae (CV)', hint: 'Your most recent CV',         icon: FileText,      color: '#0a7c3e', bg: '#d1f5e0', border: '#6dd8a0', required: true },
-  { key: 'diploma',      label: 'Diploma / Degree',      hint: 'Highest academic certificate',icon: GraduationCap, color: '#7c3aed', bg: '#f5f3ff', border: '#c4b5fd', required: true },
-  { key: 'certificates', label: 'Other Certificates',    hint: 'Professional certifications', icon: Award,         color: '#b86400', bg: '#fdf0d0', border: '#fbc86a', required: false },
+  { key: 'id_card',     label: 'National ID Copy',      hint: 'Front & back scan or photo',    icon: CreditCard,    color: '#1a56db', bg: '#deeaff', border: '#93b4ff', required: true  },
+  { key: 'cv',          label: 'Curriculum Vitae (CV)', hint: 'Your most recent CV',            icon: FileText,      color: '#0a7c3e', bg: '#d1f5e0', border: '#6dd8a0', required: true  },
+  { key: 'diploma',     label: 'Diploma / Degree',      hint: 'Highest academic certificate',   icon: GraduationCap, color: '#7c3aed', bg: '#f5f3ff', border: '#c4b5fd', required: true  },
+  { key: 'certificate', label: 'Other Certificates',    hint: 'Professional certifications',    icon: Award,         color: '#b86400', bg: '#fdf0d0', border: '#fbc86a', required: false },
+  { key: 'experience',  label: 'Experience Document',   hint: 'Employment or reference letter', icon: BriefcaseIcon, color: '#0e7490', bg: '#ecfeff', border: '#67e8f9', required: false },
 ]
 
+function getDisplayName(user) {
+  return user?.fullName || user?.full_name || ''
+}
+
+function extractApiError(err, fallback = 'An error occurred. Please try again.') {
+  if (!err.response) return 'Could not reach the server. Please check your connection.'
+  const data = err.response?.data
+  if (!data)                              return `Server error (${err.response.status})`
+  if (typeof data.detail === 'string')    return data.detail
+  if (Array.isArray(data.detail))         return data.detail.map(e => e.msg || JSON.stringify(e)).join(' · ')
+  if (typeof data === 'string')           return data
+  if (typeof data.message === 'string')   return data.message
+  return fallback
+}
+
 function Avatar({ name = '', size = 36, onClick }) {
-  const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+  const initials = name.split(' ').filter(Boolean).map(n => n[0]).join('').toUpperCase().slice(0, 2)
   return (
     <button
       onClick={onClick}
@@ -104,25 +115,28 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function DocSlot({ slot, file, onChange, onPreview }) {
+function DocSlot({ slot, file, serverDoc, onChange, onPreview }) {
   const fileRef = useRef(null)
-  const Icon = slot.icon
+  const Icon    = slot.icon
+  const hasFile = !!file || !!serverDoc
+  const displayName = file?.name || serverDoc?.original_name || serverDoc?.file_name || slot.key
+
   return (
     <div style={{
-      border: `2px solid ${file ? slot.border : '#e5e7eb'}`,
+      border: `2px solid ${hasFile ? slot.border : '#e5e7eb'}`,
       borderRadius: 8,
-      background: file ? slot.bg : '#f9fafb',
+      background: hasFile ? slot.bg : '#f9fafb',
       padding: '12px 14px',
       transition: 'all .2s',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
         <div style={{
           width: 38, height: 38, borderRadius: 6, flexShrink: 0,
-          background: file ? slot.bg : '#ffffff',
-          border: `2px solid ${file ? slot.border : '#e5e7eb'}`,
+          background: hasFile ? slot.bg : '#ffffff',
+          border: `2px solid ${hasFile ? slot.border : '#e5e7eb'}`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <Icon size={17} color={file ? slot.color : '#9ca3af'} />
+          <Icon size={17} color={hasFile ? slot.color : '#9ca3af'} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
@@ -131,17 +145,28 @@ function DocSlot({ slot, file, onChange, onPreview }) {
               ? <span style={{ fontSize: '.62rem', color: '#c41a1a', fontWeight: 700, background: '#fde0e0', border: '1.5px solid rgba(196,26,26,.20)', borderRadius: 3, padding: '1px 5px' }}>Required</span>
               : <span style={{ fontSize: '.62rem', color: '#6b7280', fontWeight: 600, background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 3, padding: '1px 5px' }}>Optional</span>
             }
+            {serverDoc && !file && (
+              <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved</span>
+            )}
           </div>
-          {file
-            ? <div style={{ fontSize: '.75rem', color: slot.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {file.name}</div>
+          {hasFile
+            ? <div style={{ fontSize: '.75rem', color: slot.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {displayName}</div>
             : <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>{slot.hint}</div>
           }
         </div>
-        {file ? (
+        {hasFile ? (
           <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
-            <button onClick={() => onPreview(slot)} style={{ width: 28, height: 28, borderRadius: 6, border: `1.5px solid ${slot.border}`, background: slot.bg, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Eye size={12} color={slot.color} /></button>
-            <button onClick={() => fileRef.current.click()} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #93b4ff', background: '#deeaff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RefreshCw size={12} color="#1a56db" /></button>
-            <button onClick={() => onChange(slot.key, null)} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid rgba(196,26,26,.2)', background: '#fde0e0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Trash2 size={12} color="#c41a1a" /></button>
+            {serverDoc && !file && (
+              <button onClick={() => onPreview(slot)} style={{ width: 28, height: 28, borderRadius: 6, border: `1.5px solid ${slot.border}`, background: slot.bg, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Eye size={12} color={slot.color} />
+              </button>
+            )}
+            <button onClick={() => fileRef.current.click()} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #93b4ff', background: '#deeaff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <RefreshCw size={12} color="#1a56db" />
+            </button>
+            <button onClick={() => onChange(slot.key, null)} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid rgba(196,26,26,.2)', background: '#fde0e0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Trash2 size={12} color="#c41a1a" />
+            </button>
           </div>
         ) : (
           <button onClick={() => fileRef.current.click()} style={{ padding: '6px 14px', borderRadius: 6, flexShrink: 0, border: '2px solid #2563eb', background: '#deeaff', cursor: 'pointer', fontSize: '.75rem', fontWeight: 700, color: '#1a56db', display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -149,45 +174,126 @@ function DocSlot({ slot, file, onChange, onPreview }) {
           </button>
         )}
       </div>
-      <input ref={fileRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" onChange={e => { if (e.target.files[0]) onChange(slot.key, e.target.files[0]); e.target.value = '' }} style={{ display: 'none' }} />
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+        onChange={e => { if (e.target.files[0]) onChange(slot.key, e.target.files[0]); e.target.value = '' }}
+        style={{ display: 'none' }}
+      />
     </div>
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ProfileModal
+// ─────────────────────────────────────────────────────────────────────────────
 function ProfileModal({ user, updateProfile, onClose }) {
-  const parseStoredDocs = () => {
-    const stored = user.documents || []
-    const map = {}
-    stored.forEach(d => { if (d.slotKey) map[d.slotKey] = d })
-    return map
-  }
-  const [form, setForm] = useState({ fullName: user.fullName || '', nationalId: user.nationalId || '', location: user.location || '', phone: user.phone || '' })
-  const [editingName, setEditingName] = useState(false)
-  const [docs, setDocs] = useState(parseStoredDocs)
-  const [saving, setSaving] = useState(false)
-  const [done, setDone] = useState(false)
-  const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
-  const handleDocChange = (slotKey, file) => setDocs(prev => ({ ...prev, [slotKey]: file ? { slotKey, name: file.name, size: file.size, id: Date.now(), fileObject: file } : null }))
-  const requiredDone = DOC_SLOTS.filter(s => s.required && !!docs[s.key]).length
-  const requiredTotal = DOC_SLOTS.filter(s => s.required).length
-  const requiredComplete = requiredDone === requiredTotal
-  const totalUploaded = DOC_SLOTS.filter(s => !!docs[s.key]).length
-  const fieldsFilled = !!(form.nationalId.trim() && form.location.trim() && form.fullName.trim())
-  const isComplete = fieldsFilled && requiredComplete
-  const progress = Math.round(([form.nationalId, form.location, form.fullName].filter(v => v.trim()).length / 3) * 40 + (requiredDone / requiredTotal) * 60)
+  const displayName = getDisplayName(user)
 
+  const [form, setForm] = useState({
+    fullName:    displayName,
+    national_id: user.national_id || '',
+    address:     user.address     || '',
+    phone:       user.phone       || '',
+  })
+  const [editingName, setEditingName] = useState(false)
+  const [newFiles,    setNewFiles]    = useState({})
+  const [serverDocs,  setServerDocs]  = useState({})
+  const [loadingDocs, setLoadingDocs] = useState(true)
+  const [saving,      setSaving]      = useState(false)
+  const [done,        setDone]        = useState(false)
+
+  const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
+
+  useEffect(() => {
+    api.get('/profile/documents')
+      .then(({ data }) => {
+        const docs = Array.isArray(data) ? data : (data.documents || [])
+        const map  = {}
+        docs.forEach(d => { if (d.doc_type) map[d.doc_type] = d })
+        setServerDocs(map)
+      })
+      .catch(() => {})
+      .finally(() => setLoadingDocs(false))
+  }, [])
+
+  const handleDocChange = (slotKey, file) => {
+    setNewFiles(prev => ({ ...prev, [slotKey]: file || undefined }))
+    if (!file) setServerDocs(prev => { const next = { ...prev }; delete next[slotKey]; return next })
+  }
+
+  const totalUploaded    = DOC_SLOTS.filter(s => newFiles[s.key] || serverDocs[s.key]).length
+  const requiredDone     = DOC_SLOTS.filter(s => s.required && (newFiles[s.key] || serverDocs[s.key])).length
+  const requiredTotal    = DOC_SLOTS.filter(s => s.required).length
+  const requiredComplete = requiredDone === requiredTotal
+
+  const fieldsFilled = !!(form.national_id.trim() && form.address.trim() && form.fullName.trim())
+  const isComplete   = fieldsFilled && requiredComplete
+  const progress     = Math.round(
+    ([form.national_id, form.address, form.fullName].filter(v => v.trim()).length / 3) * 40 +
+    (requiredDone / requiredTotal) * 60
+  )
+
+  // ✅ FIX A + B: upload new files first, then call updateProfile() with the
+  // full confirmed document list so AuthContext gets the complete picture.
   const handleSave = async () => {
-    if (!form.fullName.trim())   { toast.error('Full name is required'); return }
-    if (!form.nationalId.trim()) { toast.error('National ID is required'); return }
-    if (!form.location.trim())   { toast.error('Location is required'); return }
-    if (!requiredComplete)       { toast.error('Please upload all required documents'); return }
+    if (!form.fullName.trim())    { toast.error('Full name is required');               return }
+    if (!form.national_id.trim()) { toast.error('National ID is required');             return }
+    if (!form.address.trim())     { toast.error('Location is required');                return }
+    if (!requiredComplete)        { toast.error('Please upload all required documents'); return }
+
     setSaving(true)
-    await new Promise(r => setTimeout(r, 700))
-    updateProfile({ ...form, documents: Object.values(docs).filter(Boolean) })
-    setDone(true)
-    setSaving(false)
-    toast.success('Profile saved successfully!')
-    setTimeout(onClose, 900)
+    try {
+      // Step 1 — upload any new local files to the profile documents endpoint
+      const uploadResults = await Promise.all(
+        Object.entries(newFiles).map(async ([docType, file]) => {
+          if (!file) return null
+          const formData = new FormData()
+          formData.append('doc_type', docType)
+          formData.append('file', file)
+          try {
+            const { data } = await api.post('/profile/documents', formData)
+            return { docType, serverDoc: data }
+          } catch (err) {
+            const msg = extractApiError(err, `Failed to upload ${docType}`)
+            toast.error(msg)
+            throw err
+          }
+        })
+      )
+
+      // Merge newly-uploaded docs back into serverDocs map
+      const mergedServerDocs = { ...serverDocs }
+      uploadResults.forEach(result => {
+        if (result) mergedServerDocs[result.docType] = result.serverDoc
+      })
+
+      // Step 2 — build the final documents list from the merged map
+      const finalDocuments = Object.values(mergedServerDocs).filter(Boolean)
+
+      // Step 3 — persist everything via AuthContext (which calls PUT /profile)
+      // ✅ FIX A: pass all fields including national_id and documents
+      await updateProfile({
+        fullName:    form.fullName,
+        national_id: form.national_id,
+        address:     form.address,
+        phone:       form.phone,
+        documents:   finalDocuments,
+      })
+
+      // ✅ FIX D: fire event once, then close after a short confirmation delay
+      setNewFiles({})
+      setDone(true)
+      toast.success('Profile saved successfully!')
+      window.dispatchEvent(new Event('profile-updated'))
+      setTimeout(onClose, 700)
+
+    } catch {
+      // Individual errors already toasted above
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -307,10 +413,11 @@ function ProfileModal({ user, updateProfile, onClose }) {
                   </button>
                 </div>
               </div>
+
               {[
-                { key: 'nationalId', label: 'National ID',              placeholder: 'e.g. 1 1998 8 0123456 7 89' },
-                { key: 'location',   label: 'Location',                 placeholder: 'e.g. Kigali, Rwanda' },
-                { key: 'phone',      label: 'Phone Number (optional)',   placeholder: 'e.g. +250 788 000 000' },
+                { key: 'national_id', label: 'National ID *',           placeholder: 'e.g. 1 1998 8 0123456 7 89' },
+                { key: 'address',     label: 'Location *',              placeholder: 'e.g. Kigali, Rwanda'         },
+                { key: 'phone',       label: 'Phone Number (optional)',  placeholder: 'e.g. +250 788 000 000'      },
               ].map(({ key, label, placeholder }) => (
                 <div key={key}>
                   <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>{label}</label>
@@ -337,11 +444,25 @@ function ProfileModal({ user, updateProfile, onClose }) {
               Documents ({totalUploaded}/{DOC_SLOTS.length})
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {DOC_SLOTS.map(slot => (
-                <DocSlot key={slot.key} slot={slot} file={docs[slot.key] || null} onChange={handleDocChange} onPreview={() => {}} />
-              ))}
-            </div>
+
+            {loadingDocs ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 24 }}>
+                <div className="spinner" style={{ width: 24, height: 24 }} />
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {DOC_SLOTS.map(slot => (
+                  <DocSlot
+                    key={slot.key}
+                    slot={slot}
+                    file={newFiles[slot.key] || null}
+                    serverDoc={serverDocs[slot.key] || null}
+                    onChange={handleDocChange}
+                    onPreview={() => {}}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Save button */}
@@ -370,13 +491,23 @@ function ProfileModal({ user, updateProfile, onClose }) {
   )
 }
 
-// ── Main Navbar ───────────────────────────────────────────────
+// ── Main Navbar ───────────────────────────────────────────────────────────────
 export default function Navbar() {
   const { user, logout, updateProfile } = useAuth()
   const navigate    = useNavigate()
   const dropdownRef = useRef(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [modalOpen,    setModalOpen]    = useState(false)
+
+  const openModal = useCallback(() => {
+    setDropdownOpen(false)
+    setModalOpen(true)
+  }, [])
+
+  useEffect(() => {
+    window.addEventListener('open-profile-modal', openModal)
+    return () => window.removeEventListener('open-profile-modal', openModal)
+  }, [openModal])
 
   useEffect(() => {
     const handler = e => {
@@ -388,20 +519,20 @@ export default function Navbar() {
   }, [])
 
   const handleLogout = () => { logout(); toast.success('Logged out successfully'); navigate('/') }
-  const openModal    = () => { setDropdownOpen(false); setModalOpen(true) }
 
-  // ✅ FIX 1: HR users are always "complete" — they have no profile fields to fill.
-  //           Only applicant users are checked for nationalId / location / documents.
-  const isHR = user?.role === 'hr'
+  const isHR        = user?.role === 'hr'
+  const displayName = getDisplayName(user)
+
+  // ✅ FIX C: national_id is now always in user (AuthContext v2.0.0)
   const profileComplete = isHR
     ? true
-    : !!(user?.nationalId && user?.location && user?.documents?.length > 0)
+    : !!(user?.national_id && user?.address && user?.documents?.length > 0)
 
   const missing = isHR
     ? []
     : [
-        !user?.nationalId       && 'National ID',
-        !user?.location         && 'Location',
+        !user?.national_id       && 'National ID',
+        !user?.address           && 'Location',
         !user?.documents?.length && 'Documents',
       ].filter(Boolean)
 
@@ -409,7 +540,6 @@ export default function Navbar() {
     <>
       <nav className="navbar">
         <div className="container navbar-inner">
-          {/* Logo */}
           <Link to="/" className="navbar-logo">
             <div style={{
               width: 32, height: 32, borderRadius: 6,
@@ -443,8 +573,7 @@ export default function Navbar() {
 
                 <div ref={dropdownRef} style={{ position: 'relative' }}>
                   <div style={{ position: 'relative', display: 'inline-flex' }}>
-                    <Avatar name={user.fullName} size={40} onClick={() => setDropdownOpen(v => !v)} />
-                    {/* ✅ FIX 1: amber dot only for incomplete APPLICANT profiles */}
+                    <Avatar name={displayName} size={40} onClick={() => setDropdownOpen(v => !v)} />
                     {!profileComplete && (
                       <span style={{
                         position: 'absolute', top: -2, right: -2,
@@ -462,25 +591,24 @@ export default function Navbar() {
                       boxShadow: '0 28px 72px rgba(10,15,40,.20)',
                       zIndex: 500, overflow: 'hidden',
                     }}>
-                      {/* Dropdown header */}
                       <div style={{
                         padding: '16px 20px 14px',
                         borderBottom: '2px solid #2563eb',
                         background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
                       }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                          <Avatar name={user.fullName} size={44} />
+                          <Avatar name={displayName} size={44} />
                           <div style={{ overflow: 'hidden' }}>
                             <p style={{
-                              margin: 0, fontWeight: 700, fontSize: '.95rem',
-                              color: '#ffffff',
+                              margin: 0, fontWeight: 700, fontSize: '.95rem', color: '#ffffff',
                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            }}>{user.fullName}</p>
+                            }}>
+                              {displayName || 'My Account'}
+                            </p>
                             <p style={{ margin: '2px 0 0', fontSize: '.78rem', color: 'rgba(255,255,255,.7)', textTransform: 'capitalize' }}>{user.role}</p>
                           </div>
                         </div>
 
-                        {/* ✅ FIX 1: profile status badge — hidden for HR */}
                         {!isHR && (
                           <div style={{
                             marginTop: 12, padding: '8px 12px', borderRadius: 6,
@@ -498,18 +626,16 @@ export default function Navbar() {
                         )}
                       </div>
 
-                      {/* ✅ FIX 3: info rows only for applicants */}
                       {!isHR && (
                         <div style={{ padding: '6px 20px 2px' }}>
-                          <InfoRow icon={CreditCard} label="National ID" value={user.nationalId} />
-                          <InfoRow icon={MapPin}      label="Location"    value={user.location} />
+                          <InfoRow icon={CreditCard} label="National ID" value={user.national_id} />
+                          <InfoRow icon={MapPin}      label="Location"    value={user.address} />
                           <InfoRow icon={Phone}       label="Phone"       value={user.phone} />
                           <InfoRow icon={ScrollText}  label="Documents"   value={user.documents?.length ? `${user.documents.length} file${user.documents.length > 1 ? 's' : ''} uploaded` : null} />
                         </div>
                       )}
 
                       <div style={{ padding: '12px 20px 16px', display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1.5px solid #e5e7eb' }}>
-                        {/* ✅ FIX 2: "View & Edit Profile" only for applicants */}
                         {!isHR && (
                           <button
                             onClick={openModal}
@@ -545,7 +671,6 @@ export default function Navbar() {
         </div>
       </nav>
 
-      {/* ✅ FIX 2: ProfileModal only rendered for applicants */}
       {modalOpen && user && !isHR && (
         <ProfileModal user={user} updateProfile={updateProfile} onClose={() => setModalOpen(false)} />
       )}

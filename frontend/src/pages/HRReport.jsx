@@ -118,6 +118,11 @@ function CandidateRow({ candidate, rank, expanded, onToggle }) {
   const isPend  = c.decision === 'pending'
   const rowBg   = isShort ? '#f0fdf4' : isPend ? '#fffbeb' : '#ffffff'
 
+  // FIX: a candidate is "processed" if they have an ai_score (not null/undefined).
+  // The old check `c.ai_reason !== undefined` was true even when ai_reason was null,
+  // causing the button to appear but the breakdown panel to be empty.
+  const isProcessed = c.ai_score != null
+
   return (
     <>
       <tr style={{ background: rowBg, borderBottom: expanded ? 'none' : '1px solid #e5e7eb' }}>
@@ -209,7 +214,7 @@ function CandidateRow({ candidate, rank, expanded, onToggle }) {
 
         {/* Expand toggle */}
         <td style={{ padding: '14px 16px' }}>
-          {c.ai_reason !== undefined ? (
+          {isProcessed ? (
             <button
               onClick={onToggle}
               style={{
@@ -236,7 +241,7 @@ function CandidateRow({ candidate, rank, expanded, onToggle }) {
               borderRadius: 8, border: '1px solid #e5e7eb',
             }}>
               {/* Summary */}
-              {c.summary && (
+              {c.summary && c.summary !== 'Not yet processed' && (
                 <div style={{
                   padding: '10px 14px', background: '#f9fafb',
                   borderRadius: 8, marginBottom: 14,

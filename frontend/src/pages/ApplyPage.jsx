@@ -1,83 +1,41 @@
 /**
- * ApplyPage.jsx — FULLY FIXED v3
+ * ApplyPage.jsx — v5.11.0
  *
- * BUGS FIXED IN THIS VERSION:
+ * FIXES in v5.11.0:
  *
- *   ✅ BUG 1 — Race condition: stale file reference in onServerStatusChange retry loop
- *      The retry loop captured `queued` (a snapshot of retryQueueRef.current) at the
- *      top of the callback, then slept 1.2s * idx before checking whether the file was
- *      still valid. During that sleep the user could pick a NEW file, which replaced
- *      retryQueueRef.current[docType]. The guard `retryQueueRef.current[docType] !== file`
- *      used the OLD file reference — so the stale old file got uploaded and the new
- *      pick was silently lost.
- *      FIX: Don't snapshot `queued` at all. Read retryQueueRef.current[docType] freshly
- *      AFTER each sleep, so we always use whatever file is actually in the queue at
- *      retry time. The old file variable is removed entirely.
+ *  ✅ FIX 1 — Profile gate now reads directly from AuthContext (user object)
+ *     instead of fetching /applications/my on every mount. AuthContext v2.0.0
+ *     is the single source of truth: after a profile save, user.national_id,
+ *     user.address, and user.phone are updated in-place and the gate clears
+ *     immediately — no extra round-trips, no stale state, no repeated banners.
  *
- *   ✅ BUG 2 — Semaphore slot leak on unmount during gate/slot wait
- *      handleUpload awaits getCurrentWakeGate() then awaits waitForUploadSlot().
- *      If the component unmounts while waiting (user navigates away), the slot is
- *      acquired but releaseOnce() never fires — the semaphore leaks by 1 permanently,
- *      eventually stalling all future uploads in the same session.
- *      FIX: After both awaits, check mountedRef.current. If already unmounted, call
- *      releaseUploadSlot() immediately and return without touching state.
+ *  ✅ FIX 2 — Removed the two profileSrc / profileLoading useEffects that
+ *     previously re-fetched /applications/my to infer national_id from
+ *     doc_verified. That heuristic was fragile (new users had no apps) and
+ *     caused the gate to fire even after a valid profile save.
  *
- *   ✅ BUG 3 — Non-atomic delete+upload in retry handler allows double-upload
- *      onServerStatusChange called uploadingRef.current.delete(docType) then
- *      handleUploadRef.current(docType, file) as two separate statements. Between
- *      those two calls the uploadingRef lock was open — a rapid file-pick event
- *      could also enter handleUpload for the same docType before the retry re-added
- *      it, starting two concurrent uploads for the same slot.
- *      FIX: handleUpload now takes an optional `_retryFile` internal flag. The retry
- *      path passes the file directly and the uploadingRef guard is bypassed ONLY for
- *      that internal retry call (the lock is re-added inside handleUpload as normal).
- *      The external delete+call sequence is replaced with a single direct call, and
- *      uploadingRef is never externally deleted before calling handleUpload.
+ *  ✅ FIX 3 — profileLoading state removed entirely. The page now shows its
+ *     loading spinner only while loadingJob is true, which is the correct
+ *     condition. This eliminates a full-page spinner flash on every visit.
  *
- *   ✅ BUG 4 — setState calls on unmounted component (memory leak + React warning)
- *      handleUpload is async and calls setDocStatus/setQueuedCount across multiple
- *      await points. If the user navigates away mid-upload all those calls fire on an
- *      unmounted component, producing "Can't perform a React state update on an
- *      unmounted component" warnings and potential memory leaks.
- *      FIX: mountedRef tracks mount state. Every setDocStatus and syncQueuedCount
- *      call in handleUpload is guarded by `if (!mountedRef.current) return`.
+ *  ✅ FIX 4 — 'profile-updated' event handler simplified: it just re-reads
+ *     the user object from AuthContext (which was already updated by
+ *     updateProfile()). No fetch needed.
  *
- *   ✅ BUG 5 — handleDeleteDoc fires while upload is in progress
- *      If the user clicked "Remove & re-upload" while a doc was in 'uploading' state
- *      (the button isn't shown, but could be reached via keyboard/screen-reader or
- *      rapid double-click), the DELETE would fire concurrently with the ongoing upload.
- *      The upload's finally block would then store a stale server ID for a doc that
- *      was already deleted, leaving the UI showing success for a non-existent document.
- *      FIX: handleDeleteDoc checks uploadingRef.current.has(docType) and shows a toast
- *      instead of deleting if an upload is active.
+ *  ✅ FIX 5 — getProfileIssues() now checks user.phone, user.address, and
+ *     user.national_id — all fields AuthContext v2.0.0 exposes — so the
+ *     missing-fields chip list is always accurate.
  *
- *   ✅ BUG 6 — handleCreateDraft not guarded against double-submit
- *      There was a brief window between button click and the `setSubmitting(true)` call
- *      where a second click could submit a second POST /applications, creating two draft
- *      applications for the same user+job.
- *      FIX: A module-level `submittingDraftRef` ref is set synchronously on first click
- *      and cleared in finally, so the guard is instant with no React render gap.
- *
- * Previously shipped fixes (retained):
- *   ✅ FIX 1  — isDuplicate 400 treated as SUCCESS
- *   ✅ FIX 2  — Network errors always queue (never show as error)
- *   ✅ FIX 3  — Queue retries staggered 1.2s apart
- *   ✅ FIX 4  — uploadingRef clears before queue check
- *   ✅ FIX 5  — handleUpload uses applicationIdRef throughout
- *   ✅ FIX 6  — Cancel clears retry queue AND resets to idle
- *   ✅ FIX 7  — Clearer ID rejection tip box
- *   ✅ FIX 8  — WakeBanner shows queue count accurately
- *   ✅ FIX 9  — FIX 3 (v2): Queue retries guard applicationIdRef before firing
- *   ✅ FIX 10 — FIX 4 (v2): handleUpload closure never stale via handleUploadRef
- *   ✅ FIX 11 — FIX 5 (v2): Existing docs restored on mount / step-2 entry
+ * All fixes from v5.9.0 / v5.10.0 (server wake gate, profile doc pre-fill,
+ * draft cleanup, upload queue) are retained unchanged.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
 import {
   Upload, CheckCircle, XCircle, AlertCircle,
-  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, RefreshCw,
+  Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, RefreshCw, User, Lock,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
@@ -90,6 +48,10 @@ import api, {
   releaseUploadSlot,
   getCurrentWakeGate,
 } from '../api/axios'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
 
 const DOC_TYPES = [
   {
@@ -138,19 +100,20 @@ const STEP_COLORS = {
   pending: { bg: '#ffffff', color: '#9ca3af', border: '#d1d5db' },
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 const makeDocState = () =>
   Object.fromEntries(DOC_TYPES.map(d => [
     d.key,
-    { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+    { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false, fromProfile: false },
   ]))
 
 function extractErrorDetail(err) {
-  if (!err.response) {
-    return { message: 'Could not reach the server.', isNetwork: true }
-  }
+  if (!err.response) return { message: 'Could not reach the server.', isNetwork: true }
   const data = err.response?.data
   if (!data)                           return { message: `Server error (${err.response.status})`, isNetwork: false }
   if (typeof data.detail === 'string') return { message: data.detail, isNetwork: false }
@@ -169,7 +132,22 @@ const _isAdvisory = msg =>
     msg.toLowerCase().includes('cross-checked')
   )
 
-// ── StepBar ───────────────────────────────────────────────────────────────────
+/**
+ * ✅ FIX 5 — checks the three fields AuthContext v2.0.0 always exposes.
+ * Returns an array of human-readable missing field labels (empty = complete).
+ */
+function getProfileIssues(user) {
+  const issues = []
+  if (!user?.phone)       issues.push('Phone number')
+  if (!user?.address)     issues.push('Location / Address')
+  if (!user?.national_id) issues.push('National ID')
+  return issues
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────────────────
+
 function StepBar({ current }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 36, overflowX: 'auto', paddingBottom: 4 }}>
@@ -206,7 +184,6 @@ function StepBar({ current }) {
   )
 }
 
-// ── WakeBanner ────────────────────────────────────────────────────────────────
 function WakeBanner({ status, queuedCount }) {
   const [dots, setDots] = useState('.')
   useEffect(() => {
@@ -246,6 +223,91 @@ function WakeBanner({ status, queuedCount }) {
   )
 }
 
+function ProfileDocsBanner({ count }) {
+  if (count === 0) return null
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '12px 16px', marginBottom: 16,
+      background: '#f0fdf4', border: '1px solid #86efac',
+      borderRadius: 8, fontSize: '.88rem', color: '#14532d', fontWeight: 600,
+      lineHeight: 1.5,
+    }}>
+      <User size={15} style={{ flexShrink: 0, color: '#16a34a' }} />
+      <span>
+        <strong>{count} document{count > 1 ? 's' : ''} pre-filled from your profile.</strong>
+        {' '}You can remove and re-upload any of them if you'd like to use a different file.
+      </span>
+    </div>
+  )
+}
+
+function ProfileGateBanner({ issues, onOpenProfile }) {
+  if (issues.length === 0) return null
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)',
+      border: '2px solid #f97316',
+      borderRadius: 12,
+      padding: '20px 24px',
+      marginBottom: 24,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+        <div style={{
+          width: 44, height: 44, borderRadius: 10,
+          background: '#fed7aa', border: '2px solid #f97316',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <Lock size={22} color="#c2410c" />
+        </div>
+
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 800, fontSize: '1rem', color: '#7c2d12', marginBottom: 6 }}>
+            🔒 Profile incomplete — you must update your profile before applying
+          </div>
+          <div style={{ fontSize: '.88rem', color: '#9a3412', lineHeight: 1.7, marginBottom: 14 }}>
+            To ensure fair and accurate AI evaluation, your profile must be complete before
+            starting an application. Please fill in the missing information using the{' '}
+            <strong>Complete My Profile</strong> button below.
+          </div>
+
+          {/* Missing field chips */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+            <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#9a3412', alignSelf: 'center' }}>
+              MISSING:
+            </span>
+            {issues.map(issue => (
+              <span key={issue} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                padding: '4px 12px', borderRadius: 99,
+                background: '#fed7aa', border: '1px solid #f97316',
+                color: '#7c2d12', fontSize: '.78rem', fontWeight: 700,
+              }}>
+                <AlertCircle size={10} /> {issue}
+              </span>
+            ))}
+          </div>
+
+          <button
+            onClick={onOpenProfile}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '10px 22px', borderRadius: 8,
+              background: '#c2410c', border: 'none',
+              color: '#ffffff', fontWeight: 700, fontSize: '.9rem',
+              cursor: 'pointer',
+            }}
+          >
+            <User size={15} /> Complete My Profile Now
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const fieldLabel = {
   display: 'block', fontSize: '.8rem', fontWeight: 700,
   color: '#374151', textTransform: 'uppercase',
@@ -253,6 +315,9 @@ const fieldLabel = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Main page
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function ApplyPage() {
   const { jobId } = useParams()
   const { user }  = useAuth()
@@ -266,23 +331,42 @@ export default function ApplyPage() {
   const [loadingJob,    setLoadingJob]    = useState(true)
   const [serverStatus,  setServerStatus]  = useState(getServerStatus)
   const [queuedCount,   setQueuedCount]   = useState(0)
+  const [profileDocCount, setProfileDocCount] = useState(0)
 
-  // Always-current refs
-  const applicationIdRef  = useRef(null)
-  const submittedRef      = useRef(false)
-  const uploadingRef      = useRef(new Set())   // prevents concurrent same-type uploads
-  const uploadedDocIds    = useRef({})          // { [docType]: serverId }
-  const retryQueueRef     = useRef({})          // { [docType]: File } — queued for retry
+  // ✅ FIX 1 + FIX 2 + FIX 3 — derive profile completeness directly from the
+  // AuthContext user object. No extra fetch, no profileLoading state.
+  // When updateProfile() is called in the Navbar modal it updates user in-place,
+  // so this useMemo re-evaluates automatically and the gate clears.
+  const profileIssues  = useMemo(() => getProfileIssues(user), [user])
+  const profileComplete = profileIssues.length === 0
 
-  // BUG 4 FIX: Track mount state to guard setState calls after unmount
-  const mountedRef = useRef(true)
+  const openProfileModal = () => {
+    window.dispatchEvent(new Event('open-profile-modal'))
+  }
 
-  // BUG 6 FIX: Synchronous draft-submit guard (no React render gap)
+  // ✅ FIX 4 — 'profile-updated' no longer needs to fetch anything.
+  // AuthContext already updated user; React will re-render this component
+  // because user changed, and profileIssues will recompute via useMemo.
+  // We keep the listener only to support any other consumers that rely on it.
+  useEffect(() => {
+    const handler = () => { /* AuthContext already updated user — nothing to do */ }
+    window.addEventListener('profile-updated', handler)
+    return () => window.removeEventListener('profile-updated', handler)
+  }, [])
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Refs
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const applicationIdRef   = useRef(null)
+  const submittedRef       = useRef(false)
+  const uploadingRef       = useRef(new Set())
+  const uploadedDocIds     = useRef({})
+  const retryQueueRef      = useRef({})
+  const profileDocIdsRef   = useRef({})
+  const mountedRef         = useRef(true)
   const submittingDraftRef = useRef(false)
-
-  // FIX 4 (v2): Store the latest handleUpload in a ref so the onServerStatusChange
-  // effect can always call the current version without ever needing to re-register.
-  const handleUploadRef = useRef(null)
+  const handleUploadRef    = useRef(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -303,51 +387,30 @@ export default function ApplyPage() {
       if (mountedRef.current) setServerStatus(newStatus)
 
       if (newStatus === 'awake') {
-        // BUG 1 FIX: Don't snapshot the queue. Read retryQueueRef.current[docType]
-        // FRESHLY after each sleep so we always upload the file that is currently
-        // queued, not a stale reference captured before the sleep delay.
         const docTypes = Object.keys(retryQueueRef.current)
         if (docTypes.length === 0) return
 
         docTypes.forEach(async (docType, idx) => {
-          // Stagger retries — don't flood the server
           await sleep(idx * 1200)
-
-          // BUG 1 FIX: Read fresh file from queue AFTER the sleep.
-          // If the user cancelled or picked a new file during the sleep, this
-          // correctly picks up the new state instead of uploading a stale file.
           const file = retryQueueRef.current[docType]
-          if (!file) return   // cancelled during sleep
+          if (!file) return
 
-          // FIX 3 (v2): Guard against applicationIdRef not being set yet.
           let waited = 0
           while (!applicationIdRef.current && waited < 30_000) {
             await sleep(500)
             waited += 500
           }
-          if (!applicationIdRef.current) {
-            console.warn(`[ApplyPage] Retry for ${docType} aborted — applicationId never became available.`)
-            return
-          }
-
-          // Verify the file is still the same one in the queue (user may have
-          // picked a replacement after our sleep above)
+          if (!applicationIdRef.current) return
           if (retryQueueRef.current[docType] !== file) return
 
-          // Remove from queue and clear the uploading lock so handleUpload can proceed.
-          // BUG 3 FIX: We do NOT call uploadingRef.current.delete() here anymore.
-          // Instead we pass _bypassUploadingGuard so handleUpload handles its own
-          // lock atomically — no window for a concurrent pick to sneak in.
           delete retryQueueRef.current[docType]
           syncQueuedCount()
-
-          // FIX 4 (v2): Call via ref so we always use the latest closure
           handleUploadRef.current?.(docType, file, { _bypassUploadingGuard: true })
         })
       }
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])   // deliberately empty — uses refs for freshness, must not re-register
+  }, [])
 
   const [form, setForm] = useState({
     gender: '', education_level: '', field_of_study: '', graduation_year: '',
@@ -366,42 +429,100 @@ export default function ApplyPage() {
       .finally(() => { if (mountedRef.current) setLoadingJob(false) })
   }, [jobId])
 
-  // ── FIX 5 (v2): Restore already-uploaded docs when applicationId is available ─
+  // ── Load profile documents ─────────────────────────────────────────────────
+  useEffect(() => {
+    api.get('/profile/documents')
+      .then(({ data }) => {
+        const docs = Array.isArray(data) ? data : (data.documents || [])
+        if (!docs.length || !mountedRef.current) return
+
+        let filled = 0
+        setDocStatus(prev => {
+          const next = { ...prev }
+          docs.forEach(doc => {
+            const docType = doc.doc_type
+            if (!next[docType] || next[docType].status !== 'idle') return
+            profileDocIdsRef.current[docType] = {
+              id:     doc.id,
+              source: doc.source || 'application',
+            }
+            next[docType] = {
+              status: 'success',
+              message: '✓ Pre-filled from your profile — ready to submit.',
+              fileName: doc.original_name || doc.file_name || docType,
+              isAdvisory: false, isNetwork: false, fromProfile: true,
+            }
+            filled++
+          })
+          return next
+        })
+        if (filled > 0) setProfileDocCount(filled)
+      })
+      .catch(() => {
+        console.info('[ApplyPage] No profile documents found or endpoint unavailable.')
+      })
+  }, [])
+
+  // ── Restore already-uploaded docs when applicationId is available ──────────
   useEffect(() => {
     if (!applicationId) return
-
     api.get(`/applications/${applicationId}/documents`)
       .then(({ data }) => {
         const docs = data.documents || []
         if (docs.length === 0 || !mountedRef.current) return
-
         docs.forEach(doc => {
           if (!doc.doc_type) return
           uploadedDocIds.current[doc.doc_type] = doc.id
-
           const msg        = doc.validation_message || '✓ Document already uploaded and accepted.'
           const isAdvisory = _isAdvisory(msg)
-
           if (mountedRef.current) {
             setDocStatus(prev => {
               if (prev[doc.doc_type]?.status !== 'idle') return prev
               return {
                 ...prev,
                 [doc.doc_type]: {
-                  status:     'success',
-                  message:    msg,
-                  fileName:   doc.original_name || doc.doc_type,
-                  isAdvisory,
-                  isNetwork:  false,
+                  status: 'success', message: msg,
+                  fileName: doc.original_name || doc.doc_type,
+                  isAdvisory, isNetwork: false, fromProfile: false,
                 },
               }
             })
           }
         })
       })
-      .catch(() => {
-        console.warn('[ApplyPage] Could not restore existing documents.')
+      .catch(() => console.warn('[ApplyPage] Could not restore existing documents.'))
+  }, [applicationId])
+
+  // ── Attach profile docs when applicationId becomes available ──────────────
+  useEffect(() => {
+    if (!applicationId) return
+    const profileTypes = Object.keys(profileDocIdsRef.current)
+    if (profileTypes.length === 0) return
+
+    const attachAll = async () => {
+      const tasks = profileTypes.map(async (docType) => {
+        const entry = profileDocIdsRef.current[docType]
+        if (!entry) return
+        const { id: profileDocId, source } = entry
+        try {
+          const { data } = await api.post(
+            `/applications/${applicationId}/documents/attach-profile`,
+            { profile_doc_id: profileDocId, doc_type: docType, source }
+          )
+          if (data?.id) {
+            uploadedDocIds.current[docType] = data.id
+            delete profileDocIdsRef.current[docType]
+          }
+        } catch (err) {
+          const status = err?.response?.status
+          const detail = err?.response?.data?.detail || err?.message || 'unknown error'
+          console.warn(`[ApplyPage] attach-profile failed for '${docType}' (source=${source}, status=${status}): ${detail}`)
+        }
       })
+      await Promise.allSettled(tasks)
+    }
+    attachAll()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applicationId])
 
   // ── Cleanup draft on unmount ───────────────────────────────────────────────
@@ -410,8 +531,8 @@ export default function ApplyPage() {
       if (applicationIdRef.current && !submittedRef.current) {
         const token = localStorage.getItem('token') || sessionStorage.getItem('token') || ''
         fetch(`${BACKEND}/applications/${applicationIdRef.current}`, {
-          method:    'DELETE',
-          headers:   token ? { Authorization: `Bearer ${token}` } : {},
+          method: 'DELETE',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
           keepalive: true,
         }).catch(() => {})
       }
@@ -422,6 +543,7 @@ export default function ApplyPage() {
   const successCount         = DOC_TYPES.filter(d => docStatus[d.key].status === 'success').length
   const requiredCount        = REQUIRED_DOC_KEYS.filter(k => docStatus[k].status === 'success').length
   const missingRequiredCount = REQUIRED_DOC_KEYS.length - requiredCount
+  const activeProfileDocCount = DOC_TYPES.filter(d => docStatus[d.key].fromProfile).length
 
   // ── Form validation ────────────────────────────────────────────────────────
   const validateForm = () => {
@@ -437,14 +559,14 @@ export default function ApplyPage() {
 
   // ── Create draft ───────────────────────────────────────────────────────────
   const handleCreateDraft = async () => {
-    // BUG 6 FIX: Synchronous guard — no React render gap between clicks
-    if (submittingDraftRef.current) return
-    submittingDraftRef.current = true
-
-    if (!validateForm()) {
-      submittingDraftRef.current = false
+    if (!profileComplete) {
+      toast.error('Please complete your profile before applying.', { duration: 6000, icon: '🔒' })
+      openProfileModal()
       return
     }
+    if (submittingDraftRef.current) return
+    submittingDraftRef.current = true
+    if (!validateForm()) { submittingDraftRef.current = false; return }
     setSubmitting(true)
     try {
       const { data } = await api.post('/applications', {
@@ -474,116 +596,79 @@ export default function ApplyPage() {
   }
 
   // ── Document upload ────────────────────────────────────────────────────────
-  // BUG 3 FIX: Added optional `opts` parameter.
-  // When called from the retry loop, opts._bypassUploadingGuard = true skips the
-  // uploadingRef guard check so the retry can atomically re-acquire the lock inside
-  // this function, eliminating the window where a concurrent file-pick could sneak in.
   const handleUpload = useCallback(async (docType, file, opts = {}) => {
     const appId = applicationIdRef.current
     if (!appId) { toast.error('Please complete your details first'); return }
-
-    // Prevent concurrent uploads of the same doc type.
-    // BUG 3 FIX: bypass only when the retry path explicitly requests it.
     if (!opts._bypassUploadingGuard && uploadingRef.current.has(docType)) return
-    uploadingRef.current.add(docType)   // re-add atomically even for bypassed retries
+    uploadingRef.current.add(docType)
 
-    // Show "pending" immediately so user sees their file was accepted.
     if (mountedRef.current) {
       setDocStatus(prev => ({
         ...prev,
         [docType]: {
           status: 'pending', message: 'Waiting in queue…',
-          fileName: file.name, isAdvisory: false, isNetwork: false,
+          fileName: file.name, isAdvisory: false, isNetwork: false, fromProfile: false,
         },
       }))
     }
 
-    // Wait for server wake gate, then for the serializer slot.
     await getCurrentWakeGate()
     await waitForUploadSlot()
 
-    // BUG 2 FIX: If component unmounted while we were waiting for the gate/slot,
-    // release the slot immediately and bail — never touch state on an unmounted component.
-    if (!mountedRef.current) {
-      releaseUploadSlot()
-      uploadingRef.current.delete(docType)
-      return
-    }
+    if (!mountedRef.current) { releaseUploadSlot(); uploadingRef.current.delete(docType); return }
 
-    // Slot acquired — now actually uploading
     setDocStatus(prev => ({
       ...prev,
       [docType]: {
         status: 'uploading', message: 'Uploading…',
-        fileName: file.name, isAdvisory: false, isNetwork: false,
+        fileName: file.name, isAdvisory: false, isNetwork: false, fromProfile: false,
       },
     }))
 
-    // Mark that we pre-acquired the slot so the axios interceptor doesn't double-acquire.
     let slotReleased = false
-    const releaseOnce = () => {
-      if (!slotReleased) { slotReleased = true; releaseUploadSlot() }
-    }
+    const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseUploadSlot() } }
 
-    // Show a "still working…" hint after 8s — AI verification can take 20–60s.
     const slowHintTimer = setTimeout(() => {
-      if (!mountedRef.current) return   // BUG 4 FIX
+      if (!mountedRef.current) return
       setDocStatus(prev => {
         if (prev[docType]?.status !== 'uploading') return prev
-        return {
-          ...prev,
-          [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' },
-        }
+        return { ...prev, [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' } }
       })
     }, 8_000)
 
     try {
-      // Delete existing doc if we have its server ID
       const existingId = uploadedDocIds.current[docType]
       if (existingId) {
-        try {
-          await api.delete(`/applications/${appId}/documents/${existingId}`)
-        } catch { /* already gone — continue */ }
+        try { await api.delete(`/applications/${appId}/documents/${existingId}`) } catch { /* gone */ }
         delete uploadedDocIds.current[docType]
       }
+      delete profileDocIdsRef.current[docType]
 
-      // Upload the new file
       const formData = new FormData()
       formData.append('doc_type', docType)
       formData.append('file', file)
 
       const { data } = await api.post(
-        `/applications/${appId}/documents`,
-        formData,
+        `/applications/${appId}/documents`, formData,
         { _slotPreacquired: true },
       )
-
       if (data.id) uploadedDocIds.current[docType] = data.id
-
-      // Remove from retry queue on success
-      if (retryQueueRef.current[docType]) {
-        delete retryQueueRef.current[docType]
-        if (mountedRef.current) syncQueuedCount()   // BUG 4 FIX
-      }
+      if (retryQueueRef.current[docType]) { delete retryQueueRef.current[docType]; if (mountedRef.current) syncQueuedCount() }
 
       const msg        = data.validation_message || 'Document accepted ✓'
       const isAdvisory = _isAdvisory(msg)
 
-      // BUG 4 FIX: Guard setState
       if (mountedRef.current) {
         setDocStatus(prev => ({
           ...prev,
-          [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory, isNetwork: false },
+          [docType]: { status: 'success', message: msg, fileName: file.name, isAdvisory, isNetwork: false, fromProfile: false },
         }))
         toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} uploaded successfully`)
       }
 
     } catch (err) {
       const { message, isNetwork } = extractErrorDetail(err)
-
-      // FIX 1 (v2): Duplicate 400 → treat as SUCCESS
-      const isDuplicate = err.response?.status === 400 &&
-        message?.toLowerCase().includes('already been uploaded')
+      const isDuplicate = err.response?.status === 400 && message?.toLowerCase().includes('already been uploaded')
 
       if (isDuplicate) {
         try {
@@ -592,58 +677,35 @@ export default function ApplyPage() {
           if (existing?.id) {
             uploadedDocIds.current[docType] = existing.id
             delete retryQueueRef.current[docType]
-            // BUG 4 FIX: Guard setState
             if (mountedRef.current) {
               syncQueuedCount()
               setDocStatus(prev => ({
                 ...prev,
-                [docType]: {
-                  status:     'success',
-                  message:    '✓ Document already uploaded and accepted.',
-                  fileName:   existing.original_name || file.name,
-                  isAdvisory: false,
-                  isNetwork:  false,
-                },
+                [docType]: { status: 'success', message: '✓ Document already uploaded and accepted.', fileName: existing.original_name || file.name, isAdvisory: false, isNetwork: false, fromProfile: false },
               }))
               toast.success(`${DOC_TYPES.find(d => d.key === docType)?.label} confirmed ✓`)
             }
             return
           }
-        } catch { /* fall through to error */ }
+        } catch { /* fall through */ }
       }
 
-      // FIX 2 (v2): Network error → silently queue, never show as error
       if (isNetwork) {
         retryQueueRef.current[docType] = file
-        // BUG 4 FIX: Guard setState
         if (mountedRef.current) {
           syncQueuedCount()
           setDocStatus(prev => ({
             ...prev,
-            [docType]: {
-              status:     'queued',
-              message:    'Server is starting up — your file will upload automatically.',
-              fileName:   file.name,
-              isAdvisory: false,
-              isNetwork:  true,
-            },
+            [docType]: { status: 'queued', message: 'Server is starting up — your file will upload automatically.', fileName: file.name, isAdvisory: false, isNetwork: true, fromProfile: false },
           }))
         }
         return
       }
 
-      // Real rejection (4xx with a meaningful message)
-      // BUG 4 FIX: Guard setState
       if (mountedRef.current) {
         setDocStatus(prev => ({
           ...prev,
-          [docType]: {
-            status:     'error',
-            message,
-            fileName:   file.name,
-            isAdvisory: false,
-            isNetwork:  false,
-          },
+          [docType]: { status: 'error', message, fileName: file.name, isAdvisory: false, isNetwork: false, fromProfile: false },
         }))
         toast.error(`Rejected: ${message}`, { duration: 8000 })
       }
@@ -655,10 +717,7 @@ export default function ApplyPage() {
     }
   }, [syncQueuedCount])
 
-  // Keep the ref in sync with the latest handleUpload closure (FIX 4 v2, retained)
-  useEffect(() => {
-    handleUploadRef.current = handleUpload
-  }, [handleUpload])
+  useEffect(() => { handleUploadRef.current = handleUpload }, [handleUpload])
 
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
@@ -667,7 +726,6 @@ export default function ApplyPage() {
     handleUpload(docType, file)
   }
 
-  // ── Manual retry from queued state ────────────────────────────────────────
   const handleManualRetry = (docType) => {
     const file = retryQueueRef.current[docType]
     if (!file) return
@@ -677,30 +735,32 @@ export default function ApplyPage() {
     handleUpload(docType, file, { _bypassUploadingGuard: true })
   }
 
-  // ── Cancel queued upload ──────────────────────────────────────────────────
   const handleCancelQueue = (docType) => {
     delete retryQueueRef.current[docType]
     syncQueuedCount()
     uploadingRef.current.delete(docType)
     setDocStatus(prev => ({
       ...prev,
-      [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+      [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false, fromProfile: false },
     }))
   }
 
-  // ── Delete successfully uploaded doc ──────────────────────────────────────
   const handleDeleteDoc = async (docType) => {
-    // BUG 5 FIX: Don't allow delete while an upload is in progress for this type.
-    // The upload's finally block would cache a stale server ID for a deleted doc.
-    if (uploadingRef.current.has(docType)) {
-      toast.error('Upload in progress — please wait until it finishes before removing.')
+    if (uploadingRef.current.has(docType)) { toast.error('Upload in progress — please wait.'); return }
+
+    const isProfileOnly = docStatus[docType]?.fromProfile && !uploadedDocIds.current[docType]
+    if (isProfileOnly) {
+      delete profileDocIdsRef.current[docType]
+      if (mountedRef.current) {
+        setDocStatus(prev => ({
+          ...prev,
+          [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false, fromProfile: false },
+        }))
+      }
       return
     }
 
-    if (retryQueueRef.current[docType]) {
-      delete retryQueueRef.current[docType]
-      syncQueuedCount()
-    }
+    if (retryQueueRef.current[docType]) { delete retryQueueRef.current[docType]; syncQueuedCount() }
     const existingId = uploadedDocIds.current[docType]
     try {
       if (existingId) {
@@ -711,19 +771,17 @@ export default function ApplyPage() {
         if (doc) await api.delete(`/applications/${applicationId}/documents/${doc.id}`)
       }
       delete uploadedDocIds.current[docType]
+      delete profileDocIdsRef.current[docType]
       if (mountedRef.current) {
         setDocStatus(prev => ({
           ...prev,
-          [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false },
+          [docType]: { status: 'idle', message: '', fileName: '', isAdvisory: false, isNetwork: false, fromProfile: false },
         }))
         toast.success('Document removed.')
       }
-    } catch {
-      toast.error('Failed to remove document')
-    }
+    } catch { toast.error('Failed to remove document') }
   }
 
-  // ── Finalize / submit ─────────────────────────────────────────────────────
   const handleFinalize = async () => {
     if (!requiredUploaded) { toast.error('Please upload all 3 required documents.'); return }
     setSubmitting(true)
@@ -739,7 +797,11 @@ export default function ApplyPage() {
     }
   }
 
-  // ── Loading / not-found ───────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // Loading / not-found / success screens
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ✅ FIX 3 — only loadingJob matters; profileLoading is gone
   if (loadingJob) return (
     <div className="page-wrapper">
       <Navbar />
@@ -763,18 +825,13 @@ export default function ApplyPage() {
     </div>
   )
 
-  // ── Success screen ────────────────────────────────────────────────────────
   if (submitted) return (
     <div className="page-wrapper">
       <Helmet><title>Application Submitted — Shortlisting AI</title></Helmet>
       <Navbar />
       <div style={{ background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)', padding: '40px 0 36px' }} />
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 24px', textAlign: 'center' }}>
-        <div style={{
-          width: 80, height: 80, borderRadius: '50%',
-          background: '#dcfce7', border: '3px solid #16a34a',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 28,
-        }}>
+        <div style={{ width: 80, height: 80, borderRadius: '50%', background: '#dcfce7', border: '3px solid #16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 28 }}>
           <CheckCircle size={40} color="#16a34a" />
         </div>
         <h1 style={{ fontSize: '2rem', fontWeight: 800, color: '#111827', marginBottom: 14 }}>Application Submitted!</h1>
@@ -795,7 +852,10 @@ export default function ApplyPage() {
     </div>
   )
 
-  // ── Main render ───────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // Main render
+  // ─────────────────────────────────────────────────────────────────────────
+
   return (
     <>
       <Helmet><title>Apply — {job.title} | Shortlisting AI</title></Helmet>
@@ -821,6 +881,10 @@ export default function ApplyPage() {
                 <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 10 }}>Step 1 of 4</div>
                 <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#111827', marginBottom: 6 }}>About This Role</h2>
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 20 }} />
+
+                {/* Profile gate — only shown when profile is genuinely incomplete */}
+                <ProfileGateBanner issues={profileIssues} onOpenProfile={openProfileModal} />
+
                 <p style={{ color: '#4b5563', fontSize: '1rem', lineHeight: 1.8, marginBottom: 24 }}>
                   {job.description || 'Review the role details before applying.'}
                 </p>
@@ -838,15 +902,45 @@ export default function ApplyPage() {
                   </div>
                 )}
 
+                {profileDocCount > 0 && (
+                  <div style={{ padding: '12px 16px', background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, marginBottom: 20, fontSize: '.88rem', color: '#14532d', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <User size={14} color="#16a34a" />
+                    <span><strong>{profileDocCount} document{profileDocCount > 1 ? 's' : ''} from your profile</strong> will be pre-filled in the upload step — saving you time.</span>
+                  </div>
+                )}
+
                 <div style={{ padding: '16px 20px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, marginBottom: 30, fontSize: '.88rem', color: '#78350f', lineHeight: 1.7 }}>
                   <strong>📋 Documents required:</strong><br />
                   <strong>Required (3):</strong> National ID/Passport, CV/Resume, Academic Diploma<br />
                   <strong>Optional (2):</strong> Professional Certificate, Experience Document
                 </div>
 
-                <button onClick={() => setStep(1)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '11px 24px', borderRadius: 6, border: 'none', background: '#2563eb', color: '#ffffff', fontWeight: 700, cursor: 'pointer', fontSize: '.9rem' }}>
-                  Begin Application <ArrowRight size={14} />
-                </button>
+                {profileComplete ? (
+                  <button
+                    onClick={() => setStep(1)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '11px 24px', borderRadius: 6, border: 'none',
+                      background: '#2563eb', color: '#ffffff', fontWeight: 700,
+                      cursor: 'pointer', fontSize: '.9rem',
+                    }}
+                  >
+                    Begin Application <ArrowRight size={14} />
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    title="Complete your profile first"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 8,
+                      padding: '11px 24px', borderRadius: 6, border: 'none',
+                      background: '#e5e7eb', color: '#9ca3af',
+                      fontWeight: 700, cursor: 'not-allowed', fontSize: '.9rem',
+                    }}
+                  >
+                    <Lock size={14} /> Complete Profile to Begin
+                  </button>
+                )}
               </div>
             )}
 
@@ -917,7 +1011,9 @@ export default function ApplyPage() {
                     <ArrowLeft size={13} /> Back
                   </button>
                   <button onClick={handleCreateDraft} disabled={submitting} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '10px 24px', borderRadius: 6, border: 'none', background: submitting ? '#93c5fd' : '#2563eb', color: '#ffffff', fontWeight: 700, cursor: submitting ? 'not-allowed' : 'pointer', fontSize: '.9rem' }}>
-                    {submitting ? <><Loader size={13} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</> : <>Continue to Documents <ArrowRight size={13} /></>}
+                    {submitting
+                      ? <><Loader size={13} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</>
+                      : <>Continue to Documents <ArrowRight size={13} /></>}
                   </button>
                 </div>
               </div>
@@ -939,56 +1035,60 @@ export default function ApplyPage() {
                   <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>. Accepted: PDF, PNG, JPG (max 5 MB).
                 </p>
 
+                <ProfileDocsBanner count={activeProfileDocCount} />
                 <WakeBanner status={serverStatus} queuedCount={queuedCount} />
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 28 }}>
                   {DOC_TYPES.map(doc => {
-                    const state      = docStatus[doc.key]
-                    const isSuccess  = state.status === 'success'
-                    const isError    = state.status === 'error'
-                    const isLoading  = state.status === 'uploading'
-                    const isQueued   = state.status === 'queued'
-                    const isPending  = state.status === 'pending'
-                    const isAdvisory = isSuccess && state.isAdvisory
-                    const isIDReject = isError && doc.key === 'id_card' &&
+                    const state     = docStatus[doc.key]
+                    const isSuccess = state.status === 'success'
+                    const isError   = state.status === 'error'
+                    const isLoading = state.status === 'uploading'
+                    const isQueued  = state.status === 'queued'
+                    const isPending = state.status === 'pending'
+                    const isAdvisory    = isSuccess && state.isAdvisory
+                    const isFromProfile = isSuccess && state.fromProfile
+                    const isIDReject    = isError && doc.key === 'id_card' &&
                       (state.message?.toLowerCase().includes('id') || state.message?.toLowerCase().includes('name'))
 
-                    const borderColor = isSuccess && !isAdvisory ? '#16a34a'
-                      : isAdvisory  ? '#d97706'
-                      : isQueued    ? '#60a5fa'
-                      : isPending   ? '#a5b4fc'
-                      : isError     ? '#dc2626'
+                    const borderColor = isFromProfile ? '#16a34a'
+                      : isSuccess && !isAdvisory ? '#16a34a'
+                      : isAdvisory ? '#d97706'
+                      : isQueued   ? '#60a5fa'
+                      : isPending  ? '#a5b4fc'
+                      : isError    ? '#dc2626'
                       : '#e5e7eb'
 
-                    const bgColor = isSuccess && !isAdvisory ? '#f0fdf4'
-                      : isAdvisory  ? '#fffbeb'
-                      : isQueued    ? '#eff6ff'
-                      : isPending   ? '#f5f3ff'
-                      : isError     ? '#fff1f2'
+                    const bgColor = isFromProfile ? '#f0fdf4'
+                      : isSuccess && !isAdvisory ? '#f0fdf4'
+                      : isAdvisory ? '#fffbeb'
+                      : isQueued   ? '#eff6ff'
+                      : isPending  ? '#f5f3ff'
+                      : isError    ? '#fff1f2'
                       : '#f9fafb'
 
                     return (
                       <div key={doc.key} style={{ padding: '18px 20px', border: `1.5px solid ${borderColor}`, borderRadius: 10, background: bgColor, transition: 'all .2s' }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
-
-                          {/* Doc icon */}
                           <div style={{ width: 44, height: 44, borderRadius: 8, background: '#ffffff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.4rem', flexShrink: 0, border: '1px solid #e5e7eb' }}>
                             {doc.icon}
                           </div>
-
-                          {/* Body */}
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontWeight: 700, fontSize: '.95rem', color: '#111827', marginBottom: 4 }}>
+                            <div style={{ fontWeight: 700, fontSize: '.95rem', color: '#111827', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                               {doc.label}
                               {doc.required
-                                ? <span style={{ marginLeft: 6, color: '#dc2626', fontSize: '.8rem' }}>*</span>
-                                : <span style={{ marginLeft: 6, color: '#9ca3af', fontSize: '.78rem', fontWeight: 400 }}>(optional)</span>}
+                                ? <span style={{ color: '#dc2626', fontSize: '.8rem' }}>*</span>
+                                : <span style={{ color: '#9ca3af', fontSize: '.78rem', fontWeight: 400 }}>(optional)</span>}
+                              {isFromProfile && (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '.68rem', fontWeight: 700, background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: 4, padding: '2px 7px' }}>
+                                  <User size={9} /> From profile
+                                </span>
+                              )}
                             </div>
                             <div style={{ fontSize: '.8rem', color: '#6b7280', lineHeight: 1.6, marginBottom: 10 }}>
                               {doc.description}
                             </div>
 
-                            {/* ── Success ── */}
                             {isSuccess && state.message && (
                               <div style={{ fontSize: '.78rem', lineHeight: 1.5, marginBottom: 10, padding: '8px 12px', borderRadius: 6, background: isAdvisory ? '#fef3c7' : '#dcfce7', color: isAdvisory ? '#78350f' : '#14532d', border: `1px solid ${isAdvisory ? '#fcd34d' : '#86efac'}`, display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                                 {isAdvisory ? <Info size={12} style={{ flexShrink: 0, marginTop: 1 }} /> : <CheckCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />}
@@ -996,7 +1096,6 @@ export default function ApplyPage() {
                               </div>
                             )}
 
-                            {/* ── Queued ── */}
                             {isQueued && (
                               <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#eff6ff', color: '#1e40af', border: '1px solid #93c5fd' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
@@ -1009,7 +1108,6 @@ export default function ApplyPage() {
                               </div>
                             )}
 
-                            {/* ── Error (real rejection) ── */}
                             {isError && state.message && (
                               <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#fee2e2', color: '#7f1d1d', border: '1px solid #fca5a5' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
@@ -1019,50 +1117,41 @@ export default function ApplyPage() {
                                 <div style={{ paddingLeft: 19 }}>{state.message}</div>
                                 {isIDReject && (
                                   <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff7f7', borderRadius: 4, border: '1px solid #fecaca', fontSize: '.78rem', color: '#991b1b' }}>
-                                    <strong>💡 Tip:</strong> Your account name is <strong>{user?.full_name || user?.fullName}</strong>. Make sure this exactly matches the name on your National ID or Passport (including order of names).
+                                    <strong>💡 Tip:</strong> Your account name is <strong>{user?.full_name || user?.fullName}</strong>. Make sure this exactly matches the name on your National ID or Passport.
                                   </div>
                                 )}
                               </div>
                             )}
 
-                            {/* ── Action buttons ── */}
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                               {isPending ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6d28d9', fontSize: '.85rem' }}>
                                   <div className="spinner" style={{ width: 14, height: 14, borderTopColor: '#6d28d9' }} />
                                   {state.fileName} — waiting in queue…
                                 </div>
-
                               ) : isLoading ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
                                   <div className="spinner" style={{ width: 14, height: 14 }} />
                                   {state.message || 'Uploading…'}
                                 </div>
-
                               ) : isQueued ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#2563eb', fontSize: '.85rem', fontWeight: 600 }}>
                                     <RefreshCw size={13} style={{ animation: 'spin 2s linear infinite' }} />
                                     {state.fileName} — queued
                                   </div>
-                                  <button onClick={() => handleManualRetry(doc.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}>
-                                    Retry now
-                                  </button>
-                                  <button onClick={() => handleCancelQueue(doc.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}>
-                                    Cancel
-                                  </button>
+                                  <button onClick={() => handleManualRetry(doc.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}>Retry now</button>
+                                  <button onClick={() => handleCancelQueue(doc.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}>Cancel</button>
                                 </div>
-
                               ) : isSuccess ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: isAdvisory ? '#78350f' : '#15803d', fontSize: '.85rem', fontWeight: 600 }}>
                                     <CheckCircle size={13} /> {state.fileName}
                                   </div>
                                   <button onClick={() => handleDeleteDoc(doc.key)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', fontSize: '.78rem', textDecoration: 'underline', padding: 0 }}>
-                                    Remove &amp; re-upload
+                                    {isFromProfile ? 'Remove & upload different file' : 'Remove & re-upload'}
                                   </button>
                                 </div>
-
                               ) : (
                                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 6, border: 'none', background: isError ? '#dc2626' : '#2563eb', color: '#ffffff', fontWeight: 700, fontSize: '.82rem', cursor: 'pointer' }}>
                                   <Upload size={13} />
@@ -1073,7 +1162,6 @@ export default function ApplyPage() {
                             </div>
                           </div>
 
-                          {/* Status icon */}
                           <div style={{ flexShrink: 0, marginTop: 4 }}>
                             {isSuccess && !isAdvisory && <CheckCircle size={20} color="#16a34a" />}
                             {isAdvisory                && <Info        size={20} color="#d97706" />}
