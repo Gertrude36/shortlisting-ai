@@ -1,30 +1,20 @@
 """
-backend/ocr_service.py  ·  v6.0.0
+backend/ocr_service.py  ·  v6.1.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION:
+CHANGES IN v6.1.0:
 
-  ✅ FIX 1 — Advanced OpenCV preprocessing pipeline (matches ocr_utils.py)
-     • Deskewing    — corrects tilted documents (up to ±20°)
-     • Denoising    — removes camera/compression noise
-     • Upscaling    — enlarges small images to ≥1200px wide before OCR
-     • CLAHE        — adaptive histogram equalisation for uneven lighting
-     • Binarisation — Otsu and adaptive threshold both tried
-     • Morphology   — closes character gaps
+  ✅ DEPLOY-FIX — ENABLE_OCR environment variable toggle.
+     Set ENABLE_OCR=false in your hosting environment to disable
+     all OCR processing without removing any code.
+     Set ENABLE_OCR=true to re-enable when ready.
 
-  ✅ FIX 2 — Multi-strategy preprocessing
-     Four strategies tried per image; the one yielding the most
-     usable text wins automatically.
+     When disabled:
+       • /health     → reports ocr_enabled: false (still returns 200)
+       • /ocr        → returns success:true with empty text and a notice
+       • /ocr/batch  → same per-file behaviour as above
 
-  ✅ FIX 3 — PSM 11, 6, 3, 4 all tried; best result returned
-     PSM 11 (sparse text) is particularly good for ID cards with
-     grid/table layouts.
-
-  ✅ FIX 4 — Multi-language OCR (eng+fra) with safe fallback
-     Rwanda National IDs contain French text. Falls back to eng
-     if fra Tesseract data is not installed.
-
-  ✅ RETAINED — All Flask routes, PDF support, batch endpoint,
-     file size limits, health check.
+     All v6.0.0 fixes retained (preprocessing pipeline, multi-strategy,
+     multi-PSM, multi-language, PDF support, health check).
 """
 
 import os
@@ -38,6 +28,17 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ DEPLOY-FIX — OCR master toggle
+# Set ENABLE_OCR=false in your .env / hosting env vars to disable OCR.
+# ─────────────────────────────────────────────────────────────────────────────
+
+OCR_ENABLED = os.getenv("ENABLE_OCR", "true").lower() == "true"
+
+if not OCR_ENABLED:
+    print("[ocr_service] ⚠️  OCR is DISABLED via ENABLE_OCR=false. "
+          "All OCR endpoints will return empty text until re-enabled.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Windows Tesseract path
@@ -74,6 +75,8 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_ocr_language() -> str:
+    if not OCR_ENABLED:
+        return "eng"
     try:
         available = pytesseract.get_languages()
         if "fra" in available:
@@ -102,7 +105,7 @@ def allowed_file(filename: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1 — OpenCV preprocessing helpers
+# OpenCV preprocessing helpers (unchanged from v6.0.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _pil_to_cv2(img: Image.Image) -> np.ndarray:
@@ -196,14 +199,9 @@ def _morph_clean(binary: np.ndarray) -> np.ndarray:
         return binary
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 2 — Multi-strategy preprocessing variants
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _build_variants(img: Image.Image) -> list[Image.Image]:
     variants: list[Image.Image] = []
 
-    # Strategy C — PIL only (always available)
     try:
         pil = img.convert("L")
         pil = ImageOps.autocontrast(pil, cutoff=2)
@@ -219,21 +217,18 @@ def _build_variants(img: Image.Image) -> list[Image.Image]:
     try:
         grey = cv2.cvtColor(_pil_to_cv2(img), cv2.COLOR_BGR2GRAY)
 
-        # Strategy A — CLAHE + adaptive (best for phone photos)
         try:
             g = _morph_clean(_binarise_adaptive(_clahe(_denoise(_deskew(_upscale_if_small(grey.copy()))))))
             variants.insert(0, _cv2_to_pil(g))
         except Exception:
             pass
 
-        # Strategy B — CLAHE + Otsu (best for clean scans)
         try:
             g = _binarise_otsu(_clahe(_denoise(_deskew(_upscale_if_small(grey.copy())))))
             variants.append(_cv2_to_pil(g))
         except Exception:
             pass
 
-        # Strategy D — upscaled original
         try:
             g = _upscale_if_small(grey.copy(), min_width=2400)
             variants.append(_cv2_to_pil(g))
@@ -245,10 +240,6 @@ def _build_variants(img: Image.Image) -> list[Image.Image]:
 
     return variants or [img]
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 3 — Multi-PSM OCR
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _ocr_one(img: Image.Image) -> str:
     best = ""
@@ -289,17 +280,25 @@ def ocr_pdf(file_bytes: bytes) -> str:
 
 @app.route("/health", methods=["GET"])
 def health():
+    # ✅ DEPLOY-FIX: health always succeeds; reports ocr_enabled status
+    if not OCR_ENABLED:
+        return jsonify({
+            "status":      "ok",
+            "ocr_enabled": False,
+            "notice":      "OCR is disabled via ENABLE_OCR=false. Set ENABLE_OCR=true to re-enable.",
+        })
     try:
         version = pytesseract.get_tesseract_version().version
     except Exception as e:
         return jsonify({"status": "error", "error": f"Tesseract not found: {e}"}), 500
     return jsonify({
-        "status":      "ok",
-        "ocr_engine":  "tesseract",
-        "ocr_lang":    OCR_LANG,
-        "pdf_support": PDF_SUPPORT,
+        "status":        "ok",
+        "ocr_enabled":   True,
+        "ocr_engine":    "tesseract",
+        "ocr_lang":      OCR_LANG,
+        "pdf_support":   PDF_SUPPORT,
         "cv2_available": CV2_AVAILABLE,
-        "version":     version,
+        "version":       version,
     })
 
 
@@ -318,6 +317,23 @@ def ocr_endpoint():
     if len(file_bytes) > MAX_FILE_SIZE_MB * 1024 * 1024:
         return jsonify({"success": False, "error": f"File too large (max {MAX_FILE_SIZE_MB} MB)"}), 413
 
+    # ✅ DEPLOY-FIX: skip OCR processing when disabled; still return success
+    # so document uploads don't fail with 500. Text will be empty/null.
+    if not OCR_ENABLED:
+        ext   = uploaded.filename.rsplit(".", 1)[1].lower()
+        pages = 1
+        return jsonify({
+            "success":     True,
+            "filename":    uploaded.filename,
+            "pages":       pages,
+            "lang":        OCR_LANG,
+            "text":        "",
+            "ocr_enabled": False,
+            "notice":      "OCR is currently disabled for deployment. "
+                           "The file has been received and stored. "
+                           "OCR will be re-enabled later.",
+        })
+
     ext = uploaded.filename.rsplit(".", 1)[1].lower()
 
     try:
@@ -330,11 +346,12 @@ def ocr_endpoint():
             pages = 1
 
         return jsonify({
-            "success":  True,
-            "filename": uploaded.filename,
-            "pages":    pages,
-            "lang":     OCR_LANG,
-            "text":     text.strip(),
+            "success":     True,
+            "filename":    uploaded.filename,
+            "pages":       pages,
+            "lang":        OCR_LANG,
+            "text":        text.strip(),
+            "ocr_enabled": True,
         })
 
     except Exception as e:
@@ -354,6 +371,20 @@ def ocr_batch():
             results.append({"filename": uploaded.filename,
                             "success": False, "error": "Unsupported file type"})
             continue
+
+        # ✅ DEPLOY-FIX: return empty text without error when OCR is disabled
+        if not OCR_ENABLED:
+            results.append({
+                "filename":    uploaded.filename,
+                "success":     True,
+                "pages":       1,
+                "lang":        OCR_LANG,
+                "text":        "",
+                "ocr_enabled": False,
+                "notice":      "OCR disabled for deployment.",
+            })
+            continue
+
         try:
             file_bytes = uploaded.read()
             ext        = uploaded.filename.rsplit(".", 1)[1].lower()
@@ -365,8 +396,12 @@ def ocr_batch():
                 text  = ocr_image(image)
                 pages = 1
             results.append({
-                "filename": uploaded.filename, "success": True,
-                "pages": pages, "lang": OCR_LANG, "text": text.strip(),
+                "filename":    uploaded.filename,
+                "success":     True,
+                "pages":       pages,
+                "lang":        OCR_LANG,
+                "text":        text.strip(),
+                "ocr_enabled": True,
             })
         except Exception as e:
             results.append({"filename": uploaded.filename,
@@ -377,7 +412,8 @@ def ocr_batch():
 
 if __name__ == "__main__":
     port = int(os.environ.get("OCR_PORT", 5050))
-    print(f"\n✅  OCR Service v6.0.0 on http://localhost:{port}")
+    print(f"\n✅  OCR Service v6.1.0 on http://localhost:{port}")
+    print(f"    OCR enabled   : {'YES' if OCR_ENABLED else 'NO (ENABLE_OCR=false)'}")
     print(f"    OCR language  : {OCR_LANG}")
     print(f"    PDF support   : {'enabled' if PDF_SUPPORT else 'disabled'}")
     print(f"    OpenCV        : {'enabled — advanced preprocessing' if CV2_AVAILABLE else 'disabled — pip install opencv-python'}")

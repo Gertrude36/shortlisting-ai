@@ -1,79 +1,20 @@
 """
-backend/main.py  ·  v6.5.0
+backend/main.py  ·  v6.5.1
 ────────────────────────────────────────────────────────────────
-ALL PREVIOUS FIXES RETAINED (FIX-CORE-1 through FIX-MIGRATE-2,
-FIX-ROUTE-1, FIX-STARTUP-1).
+ALL v6.5.0 FIXES RETAINED.
 
-NEW FIXES IN v6.5.0:
+NEW IN v6.5.1:
 
-  ✅ FIX-QUERY-1 — All 'Column != None' comparisons replaced with
-     .isnot(None) and all 'Column == None' replaced with .is_(None).
-     In SQLAlchemy, Python's != and == operators on Column objects do
-     NOT generate IS NOT NULL / IS NULL SQL. They generate '!= NULL'
-     which always evaluates to NULL (unknown) in SQL, silently returning
-     zero rows or wrong results. The correct API is .isnot(None) and
-     .is_(None). Affected queries:
-       - my_applications()              → submitted_at != None
-       - submit_application()           → submitted_at != None  (×2)
-       - finalize_application()         (uses expire_all, OK)
-       - get_profile_documents()        → submitted_at != None
-       - shortlist_all_for_job()        → submitted_at != None, decision == None,
-                                          ai_reason == None / == ""
-       - reshortlist_all_for_job()      → submitted_at != None
-       - get_all_candidates()           → submitted_at != None
-       - get_job_report()               → submitted_at != None
-       - delete_draft_application()     → submitted_at == None
-       - submit_application() old_draft → submitted_at == None
+  ✅ DEPLOY-FIX — ENABLE_OCR environment variable toggle.
+     Set ENABLE_OCR=false in your hosting dashboard / .env to
+     disable OCR during deployment so document uploads no longer
+     return 500. Set ENABLE_OCR=true to re-enable when ready.
 
-  ✅ FIX-QUERY-2 — shortlist_all_for_job() ai_reason filter fixed.
-     The old filter:
-       or_(Application.ai_reason == None, Application.ai_reason == "")
-     used == None (wrong, see FIX-QUERY-1) and == "" which generates
-     'ai_reason = ''' — valid SQL but misses NULLs. Fixed to:
-       or_(Application.ai_reason.is_(None), Application.ai_reason == "")
-
-  ✅ FIX-ENUM-1 — DocumentType enum comparisons now use .value consistently.
-     SQLAlchemy SAEnum(native_enum=False) stores VARCHAR. When filtering
-     with a Python enum instance, SQLAlchemy should call .value
-     automatically, but under certain SQLAlchemy + psycopg2 version
-     combinations this fails, sending the repr 'DocumentType.cv' instead
-     of the string 'cv' to PostgreSQL → type mismatch → 500.
-     Fix: all ProfileDocument / Document doc_type filters now explicitly
-     pass DocumentType(doc_type).value (a plain string) to the filter.
-
-  ✅ FIX-FILE-1 — /profile/documents GET no longer filters out files
-     that don't exist on disk.
-     On Render free tier, /tmp is ephemeral — all uploaded files are wiped
-     on every server restart / wake-from-sleep cycle. The old code called
-     os.path.exists(doc.file_path) and silently skipped missing files,
-     returning an empty list after every cold boot. The frontend then
-     logged "No profile documents found" and the upload POST retried in
-     a loop, each attempt returning 500 because the DB record existed but
-     the file didn't.
-     Fix: return all DB records regardless of file existence. Add a new
-     "file_available" boolean field so the frontend can show a
-     "file lost — please re-upload" warning instead of a blank screen.
-     The POST /profile/documents upload now correctly replaces the DB
-     record AND overwrites the file, so re-uploading always works.
-
-  ✅ FIX-FILE-2 — attach_profile_document() no longer raises 410 when
-     source file is missing (same ephemeral /tmp reason as FIX-FILE-1).
-     Instead it raises 400 with a clear "please re-upload" message.
-
-  ✅ FIX-MIGRATE-3 — ensure_document_type_enum() is now a no-op when
-     models use native_enum=False (which is always the case here).
-     The old code tried to ALTER a PostgreSQL native ENUM type that
-     doesn't exist (because native_enum=False stores VARCHAR), causing
-     a ProgrammingError on some PG versions that was swallowed but left
-     a dirty transaction open → subsequent queries on the same connection
-     returned "transaction aborted" errors → 500.
-     Fix: the function now checks native_enum setting and returns early.
-
-  ✅ FIX-STARTUP-2 — Lifespan no longer lets ML load failure crash the
-     import. The ML load is wrapped in an additional try/except that
-     catches BaseException (not just Exception) so that even
-     SystemExit / KeyboardInterrupt from within a thread pool executor
-     don't propagate and kill the ASGI server.
+     Two changes from v6.5.0:
+       1. OCR_ENABLED constant added after timeout config block.
+       2. _extract_all_doc_texts() short-circuits immediately when
+          OCR_ENABLED=false, returning empty strings for all docs
+          so shortlisting still runs without crashing.
 """
 
 import os
@@ -147,6 +88,16 @@ from email_utils import send_reset_email, send_hr_invite_email
 CANDIDATE_TIMEOUT_SECONDS    = 150
 OCR_TIMEOUT_SECONDS          = 20
 OCR_CANDIDATE_BUDGET_SECONDS = 60
+
+# ✅ DEPLOY-FIX — OCR master toggle
+# Set ENABLE_OCR=false in .env or hosting dashboard to disable OCR.
+# Set ENABLE_OCR=true (or remove the var) to re-enable.
+# Shared by ocr_service.py, document_verifier.py, and main.py.
+OCR_ENABLED = os.getenv("ENABLE_OCR", "true").lower() == "true"
+
+if not OCR_ENABLED:
+    print("[main] ⚠️  OCR is DISABLED via ENABLE_OCR=false. "
+          "Document text extraction will be skipped during shortlisting.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +230,11 @@ def _extract_all_doc_texts(
 ) -> dict[str, str]:
     doc_texts: dict[str, str] = {}
     ocr_start = time.monotonic()
+
+    # ✅ DEPLOY-FIX: skip all OCR when disabled — return empty strings for
+    # every doc so shortlisting still runs without crashing.
+    if not OCR_ENABLED:
+        return {_doc_type_value(d): "" for d in docs}
 
     for d in docs:
         doc_type = _doc_type_value(d)
@@ -729,7 +685,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.5.0",
+    version     = "6.5.1",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -758,11 +714,12 @@ async def wake(request: Request):
     return JSONResponse(
         status_code=200 if _APP_READY else 202,
         content={
-            "status":   "awake" if _APP_READY else "starting",
-            "ready":    _APP_READY,
-            "born_at":  _SERVER_BORN_AT,
-            "now":      datetime.now(timezone.utc).isoformat(),
-            "ml_error": _ML_LOAD_ERROR,
+            "status":      "awake" if _APP_READY else "starting",
+            "ready":       _APP_READY,
+            "born_at":     _SERVER_BORN_AT,
+            "now":         datetime.now(timezone.utc).isoformat(),
+            "ml_error":    _ML_LOAD_ERROR,
+            "ocr_enabled": OCR_ENABLED,
         },
     )
 
@@ -775,10 +732,11 @@ def root():
 @_app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health():
     return JSONResponse(status_code=200, content={
-        "status":   "ok",
-        "ready":    _APP_READY,
-        "born_at":  _SERVER_BORN_AT,
-        "ml_error": _ML_LOAD_ERROR,
+        "status":      "ok",
+        "ready":       _APP_READY,
+        "born_at":     _SERVER_BORN_AT,
+        "ml_error":    _ML_LOAD_ERROR,
+        "ocr_enabled": OCR_ENABLED,
     })
 
 
@@ -894,6 +852,7 @@ _BLOCKING_SIGNALS = [
 _ADVISORY_SIGNALS = [
     "ocr tools not available",
     "ocr skipped",
+    "ocr disabled",
     "text extraction limited",
     "text extraction skipped",
     "text could not be fully extracted",
@@ -1232,7 +1191,6 @@ def list_jobs(db: Session = Depends(get_db)):
         db.query(Job)
         .filter(
             Job.is_active == True,
-            # ✅ FIX-QUERY-1: .is_(None) instead of == None
             or_(Job.deadline.is_(None), Job.deadline > now),
         )
         .all()
@@ -1306,7 +1264,6 @@ def submit_application(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or no longer active")
 
-    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     existing = db.query(Application).filter(
         Application.applicant_id == current_user.id,
         Application.job_id       == payload.job_id,
@@ -1324,7 +1281,6 @@ def submit_application(
             )
         return existing
 
-    # ✅ FIX-QUERY-1: .is_(None) instead of == None
     old_draft = db.query(Application).filter(
         Application.applicant_id == current_user.id,
         Application.job_id       == payload.job_id,
@@ -1358,14 +1314,11 @@ def submit_application(
     return app_obj
 
 
-# ✅ FIX-ROUTE-1: /applications/my MUST be registered BEFORE
-# /applications/{application_id}.
 @_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
 def my_applications(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     return (
         db.query(Application)
         .filter(
@@ -1399,7 +1352,6 @@ def delete_draft_application(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    # ✅ FIX-QUERY-1: .is_(None) instead of == None
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -1563,19 +1515,6 @@ def get_profile_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    """
-    ✅ FIX-FILE-1: No longer filters out documents whose file is missing on disk.
-
-    On Render free tier, /tmp is ephemeral — all files are wiped on every
-    server restart or wake-from-sleep. The old code skipped DB records where
-    the file no longer existed, returning an empty list every cold boot.
-    This caused the frontend to show no documents and the upload flow to loop.
-
-    Now: all DB records are returned. Each item includes a 'file_available'
-    boolean so the frontend can display a "file lost — please re-upload" notice
-    instead of a blank screen. Re-uploading always replaces both the DB record
-    and the file correctly.
-    """
     seen_types:   set[str]   = set()
     profile_docs: list[dict] = []
 
@@ -1590,7 +1529,6 @@ def get_profile_documents(
         if dtype in seen_types:
             continue
         seen_types.add(dtype)
-        # ✅ FIX-FILE-1: report availability but never skip the record
         file_available = os.path.exists(doc.file_path)
         profile_docs.append({
             "id":             doc.id,
@@ -1601,11 +1539,10 @@ def get_profile_documents(
             "uploaded_at":    doc.uploaded_at.isoformat() if doc.uploaded_at else None,
             "application_id": None,
             "source":         "profile",
-            "file_available": file_available,   # ✅ FIX-FILE-1
+            "file_available": file_available,
         })
 
     if len(seen_types) < len(ALLOWED_DOC_TYPES):
-        # ✅ FIX-QUERY-1: .isnot(None) instead of != None
         apps = (
             db.query(Application)
             .filter(
@@ -1627,7 +1564,6 @@ def get_profile_documents(
                 if dtype in seen_types:
                     continue
                 seen_types.add(dtype)
-                # ✅ FIX-FILE-1: report availability but never skip
                 file_available = os.path.exists(doc.file_path)
                 profile_docs.append({
                     "id":             doc.id,
@@ -1638,7 +1574,7 @@ def get_profile_documents(
                     "uploaded_at":    doc.uploaded_at.isoformat() if doc.uploaded_at else None,
                     "application_id": app_obj.id,
                     "source":         "application",
-                    "file_available": file_available,  # ✅ FIX-FILE-1
+                    "file_available": file_available,
                 })
 
     return {"documents": profile_docs}
@@ -1669,9 +1605,6 @@ async def upload_profile_document(
             detail=f"File size exceeds the {MAX_FILE_SIZE_MB} MB limit.",
         )
 
-    # ✅ FIX-ENUM-1: use .value (plain string) for the DB filter to avoid
-    #    SQLAlchemy + psycopg2 version mismatches where the enum repr is
-    #    sent to PostgreSQL instead of the string value → type error → 500.
     doc_type_value = DocumentType(doc_type).value
     existing = db.query(ProfileDocument).filter(
         ProfileDocument.user_id  == current_user.id,
@@ -1692,7 +1625,7 @@ async def upload_profile_document(
 
     prof_doc = ProfileDocument(
         user_id=current_user.id,
-        doc_type=doc_type_value,        # ✅ FIX-ENUM-1: plain string, not enum instance
+        doc_type=doc_type_value,
         filename=unique_name,
         original_name=file.filename,
         file_path=save_path,
@@ -1710,7 +1643,7 @@ async def upload_profile_document(
         "file_name":      file.filename,
         "uploaded_at":    prof_doc.uploaded_at.isoformat() if prof_doc.uploaded_at else None,
         "source":         "profile",
-        "file_available": True,         # ✅ FIX-FILE-1: just uploaded, always available
+        "file_available": True,
         "message":        f"✓ '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' saved to your profile.",
     }
 
@@ -1765,7 +1698,6 @@ def attach_profile_document(
     source_filename  = None
 
     if payload.source == "profile":
-        # ✅ FIX-ENUM-1: plain string comparison
         doc_type_value = DocumentType(doc_type).value
         prof_doc = db.query(ProfileDocument).filter(
             ProfileDocument.id      == payload.profile_doc_id,
@@ -1798,9 +1730,6 @@ def attach_profile_document(
         source_original  = source_doc.original_name
         source_filename  = source_doc.filename
 
-    # ✅ FIX-FILE-2: replaced 410 with 400 + re-upload instruction.
-    #    On Render free tier /tmp is wiped on restart; a missing file is
-    #    expected, not a permanent gone-forever error. 400 is retryable.
     if not os.path.exists(source_file_path):
         raise HTTPException(
             status_code=400,
@@ -1821,7 +1750,6 @@ def attach_profile_document(
             status_code=500, detail=f"Failed to copy document file: {exc}"
         )
 
-    # ✅ FIX-ENUM-1: plain string for doc_type
     new_doc = Document(
         application_id=application_id,
         doc_type=DocumentType(doc_type).value,
@@ -1952,7 +1880,6 @@ async def upload_document(
              ip=_ip(request), status="failure")
         raise HTTPException(status_code=400, detail=check_message)
 
-    # ✅ FIX-ENUM-1: plain string for doc_type
     doc = Document(
         application_id=application_id,
         doc_type=DocumentType(doc_type).value,
@@ -2019,7 +1946,7 @@ def list_documents(
             "original_name":  d.original_name,
             "uploaded_at":    d.uploaded_at,
             "url":            f"/uploads/{d.filename}",
-            "file_available": os.path.exists(d.file_path),  # ✅ FIX-FILE-1
+            "file_available": os.path.exists(d.file_path),
         } for d in docs],
         "uploaded_types":       sorted(uploaded_set),
         "missing_types":        missing,
@@ -2321,7 +2248,6 @@ def get_all_candidates(
     db: Session = Depends(get_db),
     hr: User    = Depends(require_hr),
 ):
-    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     query = (
         db.query(Application, User, Job)
         .join(User, Application.applicant_id == User.id)
@@ -2384,7 +2310,6 @@ def get_job_report(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # ✅ FIX-QUERY-1: .isnot(None) instead of != None
     rows = (
         db.query(Application, User)
         .join(User, Application.applicant_id == User.id)
@@ -2955,7 +2880,6 @@ async def shortlist_all_for_job(
 
     same_title_ids = [j.id for j in db.query(Job).filter(Job.title == job.title).all()]
 
-    # ✅ FIX-QUERY-1 + FIX-QUERY-2: use .isnot(None) and .is_(None) throughout
     all_apps = db.query(Application).filter(
         Application.job_id.in_(same_title_ids),
         Application.submitted_at.isnot(None),
@@ -3083,7 +3007,6 @@ async def reshortlist_all_for_job(
     same_title_ids = [
         j.id for j in db.query(Job).filter(Job.title == job.title).all()
     ]
-    # ✅ FIX-QUERY-1: .isnot(None)
     all_apps = db.query(Application).filter(
         Application.job_id.in_(same_title_ids),
         Application.submitted_at.isnot(None),

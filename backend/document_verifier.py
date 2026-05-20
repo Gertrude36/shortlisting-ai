@@ -1,32 +1,19 @@
 """
-backend/document_verifier.py  ·  v6.0.0
+backend/document_verifier.py  ·  v6.1.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (on top of v5.x):
+CHANGES IN v6.1.0:
 
-  ✅ FIX V6-1 — verify_documents() now returns a clean 3-tuple:
-       (verified: bool, advisory: bool, summary: str)
-     "verified"  = True when no BLOCKING issues exist (missing docs,
-                   hard type-mismatch, identity fraud, field/edu mismatch).
-     "advisory"  = True when documents passed but OCR was partial, or
-                   minor warnings exist that HR should review.
-     This eliminates the ambiguous single-bool return that caused
-     doc_verified=False even for candidates with acceptable documents.
+  ✅ DEPLOY-FIX — ENABLE_OCR environment variable toggle.
+     When ENABLE_OCR=false:
+       • pre_submission_check() — skips OCR entirely; accepts every
+         document with an advisory message so uploads never 500.
+       • verify_documents()     — skips OCR entirely; returns
+         (verified=True, advisory=True, summary="OCR disabled…")
+         so shortlisting still runs without crashing.
 
-  ✅ FIX V6-2 — documents_count is now returned as a separate value
-     (count of docs that were actually found on disk and processed),
-     so the frontend can display "3/3" or "4/4" correctly instead of
-     showing raw filesystem counts.
+     Set ENABLE_OCR=true to re-enable full verification.
 
-  ✅ FIX V6-3 — Summary strings are NEVER prefixed with "✗" unless
-     there is a genuine blocking failure. Previously partial-OCR paths
-     produced "✗ Verification failed" even though the candidate was
-     accepted. Now all accepted-but-advisory paths use "⚠ Advisory: …".
-
-  ✅ FIX V6-4 — pre_submission_check() advisory messages are now
-     clearly prefixed with "⚠ Advisory:" so the frontend can style
-     them distinctly from both success and error states.
-
-  All previous fixes (DOC-1 through DOC-7, FIX A/B/C) retained.
+  All v6.0.0 fixes retained (FIX V6-1 through V6-4).
 """
 
 from __future__ import annotations
@@ -44,6 +31,19 @@ from ai_matcher import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ DEPLOY-FIX — OCR master toggle
+# Reads from environment — change in .env or hosting dashboard; no code edits needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+OCR_ENABLED = os.getenv("ENABLE_OCR", "true").lower() == "true"
+
+if not OCR_ENABLED:
+    logger.warning(
+        "[document_verifier] OCR is DISABLED via ENABLE_OCR=false. "
+        "All document checks will be skipped and documents accepted automatically."
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Document type keyword maps (weighted)
@@ -695,11 +695,23 @@ def pre_submission_check(
     """
     Returns (accepted: bool, message: str).
 
-    Message prefixes:
-      "✓ "         → fully verified, no issues
-      "⚠ Advisory:" → accepted but HR should be aware (partial OCR, low name score, etc.)
-      No prefix    → hard rejection (returned as False)
+    ✅ DEPLOY-FIX: When ENABLE_OCR=false, skip all OCR/AI checks and
+    accept every document automatically with an advisory note.
+    This prevents 500 errors on document upload during deployment.
+    Re-enable OCR by setting ENABLE_OCR=true.
     """
+
+    # ✅ DEPLOY-FIX — OCR disabled path
+    if not OCR_ENABLED:
+        logger.info(
+            "pre_submission_check: OCR disabled — auto-accepting '%s' for '%s'",
+            declared_type, applicant_name,
+        )
+        return True, (
+            f"⚠ Advisory: '{declared_type}' accepted (OCR verification is temporarily "
+            f"disabled for deployment). Document will be re-verified when OCR is re-enabled."
+        )
+
     if declared_type == "experience":
         return True, (
             "✓ Experience document accepted. It will be evaluated "
@@ -800,7 +812,6 @@ def pre_submission_check(
                 )
 
         if score < advisory_below:
-            # ✅ FIX V6-4: low-but-acceptable name score → advisory, not silent accept
             return True, (
                 f"⚠ Advisory: '{declared_type}' accepted — name match score "
                 f"({score:.0%}) is low but within the acceptable range. "
@@ -818,11 +829,6 @@ def pre_submission_check(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main verification entry point (called during AI shortlisting)
-#
-# ✅ FIX V6-1: Now returns a 3-tuple: (verified, advisory, summary)
-#   verified = True  → no blocking issues; doc_verified saved as True in DB
-#   advisory = True  → accepted but partial OCR or minor warnings; HR should check
-#   advisory = False → fully clean verification
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_documents(
@@ -835,11 +841,27 @@ def verify_documents(
     """
     Returns:
         verified (bool)  — True when no hard blocking issues found.
-                           This maps directly to doc_verified in the DB.
-        advisory (bool)  — True when verified but partial OCR / minor warnings exist.
-                           HR sees an "Advisory — please review" badge.
+        advisory (bool)  — True when verified but partial OCR / minor warnings.
         summary  (str)   — Human-readable explanation for HR.
+
+    ✅ DEPLOY-FIX: When ENABLE_OCR=false, skip all checks.
+    Returns (True, True, advisory_message) so shortlisting runs
+    without crashing and HR is notified to re-verify later.
     """
+
+    # ✅ DEPLOY-FIX — OCR disabled path
+    if not OCR_ENABLED:
+        logger.info(
+            "verify_documents: OCR disabled — auto-accepting all docs for '%s'",
+            applicant_name,
+        )
+        doc_count = len(document_paths) if document_paths else 0
+        return True, True, (
+            f"⚠ Advisory: Document verification skipped — OCR is temporarily disabled "
+            f"for deployment ({doc_count} file(s) received). "
+            f"HR should re-verify documents when OCR is re-enabled."
+        )
+
     if not document_paths:
         return False, False, (
             "No documents uploaded. Required: ID card, CV, Diploma."
@@ -943,7 +965,7 @@ def verify_documents(
         identity_ok     = True
         identity_detail = "Identity: ✓ (accepted — insufficient readable documents for automated check)"
 
-    # ── Collect blocking issues ───────────────────────────────────────────────
+    # Collect blocking issues
     blocking_issues: list[str] = []
 
     if missing_types:
@@ -961,10 +983,8 @@ def verify_documents(
     if not edu_ok:
         blocking_issues.append(edu_detail)
 
-    # ✅ FIX V6-1: verified = no blocking issues
     verified = len(blocking_issues) == 0
 
-    # ✅ FIX V6-1: advisory = verified but partial OCR or minor issues exist
     has_advisory = (
         verified and (
             len(ocr_skipped) > 0
@@ -974,7 +994,6 @@ def verify_documents(
         )
     )
 
-    # ── Build human-readable summary ──────────────────────────────────────────
     parts = []
 
     if missing_types:
@@ -993,14 +1012,12 @@ def verify_documents(
     parts.append("Document checks: " + " | ".join(doc_details))
 
     if not verified:
-        # ✅ FIX V6-3: only use "✗" prefix for genuine failures
         summary = (
             "✗ Document verification failed — "
             + " | ".join(blocking_issues)
             + " | " + " | ".join(doc_details)
         )
     elif has_advisory:
-        # ✅ FIX V6-3: advisory path uses "⚠ Advisory:" prefix
         summary = (
             "⚠ Advisory: Documents accepted but require HR review — "
             + " | ".join(parts)
