@@ -1,34 +1,33 @@
 /**
- * ApplyPage.jsx — v5.12.0
+ * ApplyPage.jsx — v5.11.0
  *
- * FIXES in v5.12.0:
+ * FIXES in v5.11.0:
  *
- *  ✅ FIX-GATE-1 — Removed `national_id` from getProfileIssues().
- *     The backend /auth/me endpoint NEVER returns national_id — it only
- *     returns { id, full_name, email, role, phone, address }. Checking
- *     user?.national_id always evaluated to undefined → falsy → the gate
- *     ALWAYS fired, permanently locking the "Begin Application" button
- *     and causing every draft POST to hit the locked guard and show
- *     "Internal server error" toast (the toast was triggering a 400 from
- *     the profile-incomplete guard, which the generic error handler
- *     surfaced as a 500-style toast).
- *     Fix: getProfileIssues() now only checks user?.phone and user?.address,
- *     matching exactly what /auth/me and /profile expose.
+ *  ✅ FIX 1 — Profile gate now reads directly from AuthContext (user object)
+ *     instead of fetching /applications/my on every mount. AuthContext v2.0.0
+ *     is the single source of truth: after a profile save, user.national_id,
+ *     user.address, and user.phone are updated in-place and the gate clears
+ *     immediately — no extra round-trips, no stale state, no repeated banners.
  *
- *  ✅ FIX-GATE-2 — handleCreateDraft() now calls the gate check with the
- *     correct profileComplete value (derived from the fixed getProfileIssues).
- *     Previously it could call openProfileModal() and return early even when
- *     the user's profile was genuinely complete, preventing any application
- *     from ever being created.
+ *  ✅ FIX 2 — Removed the two profileSrc / profileLoading useEffects that
+ *     previously re-fetched /applications/my to infer national_id from
+ *     doc_verified. That heuristic was fragile (new users had no apps) and
+ *     caused the gate to fire even after a valid profile save.
  *
- *  ✅ FIX-FORM-1 — national_id removed from the POST /applications payload.
- *     The ApplicationCreate schema on the backend does not have a national_id
- *     field. Sending it caused a 422 Unprocessable Entity on some Pydantic
- *     versions (extra fields forbidden), which the frontend's generic error
- *     handler displayed as "Internal server error".
+ *  ✅ FIX 3 — profileLoading state removed entirely. The page now shows its
+ *     loading spinner only while loadingJob is true, which is the correct
+ *     condition. This eliminates a full-page spinner flash on every visit.
  *
- * All fixes from v5.11.0 (AuthContext profile gate, server wake gate,
- * profile doc pre-fill, draft cleanup, upload queue) are retained unchanged.
+ *  ✅ FIX 4 — 'profile-updated' event handler simplified: it just re-reads
+ *     the user object from AuthContext (which was already updated by
+ *     updateProfile()). No fetch needed.
+ *
+ *  ✅ FIX 5 — getProfileIssues() now checks user.phone, user.address, and
+ *     user.national_id — all fields AuthContext v2.0.0 exposes — so the
+ *     missing-fields chip list is always accurate.
+ *
+ * All fixes from v5.9.0 / v5.10.0 (server wake gate, profile doc pre-fill,
+ * draft cleanup, upload queue) are retained unchanged.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -134,16 +133,14 @@ const _isAdvisory = msg =>
   )
 
 /**
- * ✅ FIX-GATE-1 — Only checks phone and address, which are the two fields
- * that /auth/me and /profile actually return. national_id is NOT returned
- * by the backend auth endpoints and must NOT be checked here.
- *
+ * ✅ FIX 5 — checks the three fields AuthContext v2.0.0 always exposes.
  * Returns an array of human-readable missing field labels (empty = complete).
  */
 function getProfileIssues(user) {
   const issues = []
-  if (!user?.phone)   issues.push('Phone number')
-  if (!user?.address) issues.push('Location / Address')
+  if (!user?.phone)       issues.push('Phone number')
+  if (!user?.address)     issues.push('Location / Address')
+  if (!user?.national_id) issues.push('National ID')
   return issues
 }
 
@@ -336,18 +333,23 @@ export default function ApplyPage() {
   const [queuedCount,   setQueuedCount]   = useState(0)
   const [profileDocCount, setProfileDocCount] = useState(0)
 
-  // ✅ FIX-GATE-1 — only phone + address; national_id is never in /auth/me
-  const profileIssues   = useMemo(() => getProfileIssues(user), [user])
+  // ✅ FIX 1 + FIX 2 + FIX 3 — derive profile completeness directly from the
+  // AuthContext user object. No extra fetch, no profileLoading state.
+  // When updateProfile() is called in the Navbar modal it updates user in-place,
+  // so this useMemo re-evaluates automatically and the gate clears.
+  const profileIssues  = useMemo(() => getProfileIssues(user), [user])
   const profileComplete = profileIssues.length === 0
 
   const openProfileModal = () => {
     window.dispatchEvent(new Event('open-profile-modal'))
   }
 
-  // Profile-updated listener — AuthContext already updated user in-place,
-  // React re-renders this component and profileIssues recomputes via useMemo.
+  // ✅ FIX 4 — 'profile-updated' no longer needs to fetch anything.
+  // AuthContext already updated user; React will re-render this component
+  // because user changed, and profileIssues will recompute via useMemo.
+  // We keep the listener only to support any other consumers that rely on it.
   useEffect(() => {
-    const handler = () => { /* no-op: AuthContext handles the update */ }
+    const handler = () => { /* AuthContext already updated user — nothing to do */ }
     window.addEventListener('profile-updated', handler)
     return () => window.removeEventListener('profile-updated', handler)
   }, [])
@@ -557,7 +559,6 @@ export default function ApplyPage() {
 
   // ── Create draft ───────────────────────────────────────────────────────────
   const handleCreateDraft = async () => {
-    // ✅ FIX-GATE-2 — uses the corrected profileComplete (no national_id check)
     if (!profileComplete) {
       toast.error('Please complete your profile before applying.', { duration: 6000, icon: '🔒' })
       openProfileModal()
@@ -568,8 +569,6 @@ export default function ApplyPage() {
     if (!validateForm()) { submittingDraftRef.current = false; return }
     setSubmitting(true)
     try {
-      // ✅ FIX-FORM-1 — national_id removed; backend ApplicationCreate has no such field.
-      // Only send fields that ApplicationCreate schema actually declares.
       const { data } = await api.post('/applications', {
         job_id:           parseInt(jobId),
         gender:           form.gender,
@@ -802,6 +801,7 @@ export default function ApplyPage() {
   // Loading / not-found / success screens
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ✅ FIX 3 — only loadingJob matters; profileLoading is gone
   if (loadingJob) return (
     <div className="page-wrapper">
       <Navbar />
@@ -882,7 +882,7 @@ export default function ApplyPage() {
                 <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#111827', marginBottom: 6 }}>About This Role</h2>
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 20 }} />
 
-                {/* Profile gate — only shown when phone/address are missing */}
+                {/* Profile gate — only shown when profile is genuinely incomplete */}
                 <ProfileGateBanner issues={profileIssues} onOpenProfile={openProfileModal} />
 
                 <p style={{ color: '#4b5563', fontSize: '1rem', lineHeight: 1.8, marginBottom: 24 }}>
