@@ -1,33 +1,32 @@
 """
-backend/database.py
-
+backend/database.py  ·  v2.0.0
+────────────────────────────────────────────────────────────────
 Supports PostgreSQL (Render production) and SQLite (local dev).
 
-WHY DATA WAS LOST ON DEPLOY:
-  SQLite stores data in a local file (capstone.db). Render's free tier
-  has an ephemeral filesystem — it resets on every deploy/restart,
-  wiping all users, jobs, and applications.
+FIXES IN v2.0.0:
 
-SOLUTION:
-  Use PostgreSQL on Render. Data lives in a persistent managed database
-  that survives all deploys and restarts.
+  ✅ FIX-DB-1 — REMOVED sys.exit(1) on connection failure.
+     The old code called sys.exit(1) if the DB was unreachable at
+     import time. On Render, the DB may not be ready for 10–30s after
+     the web service starts (cold boot race). sys.exit() killed the
+     process before uvicorn ever bound the port, putting the service
+     into a crash loop that Render could never recover from.
+     Now: we log a warning and let the app start. FastAPI's lifespan
+     and endpoint handlers will surface DB errors naturally.
 
-SETUP (one-time):
-  The render.yaml in this project creates a free PostgreSQL database and
-  links it automatically via the DATABASE_URL env var.
-  Just push to GitHub and Render does the rest.
+  ✅ FIX-DB-2 — Pool size reduced to stay under Render free PostgreSQL
+     connection limit (~10 connections max on free tier).
+     Old: pool_size=5, max_overflow=10  → up to 15 connections → crashes.
+     New: pool_size=3, max_overflow=5   → up to 8 connections → safe.
 
-LOCAL DEV:
-  DATABASE_URL is not set → falls back to SQLite (capstone.db) as before.
-  No changes needed locally.
+  ✅ FIX-DB-3 — pool_pre_ping=True retained (detects dead connections).
 
-FIXES APPLIED:
-  ✅ FIX 1 — postgres:// → postgresql:// URL rewrite (Render compatibility)
-  ✅ FIX 2 — Pool settings tuned for Render free tier (max 25 connections)
-  ✅ FIX 3 — pool_pre_ping=True prevents stale connection errors after sleep
-  ✅ FIX 4 — pool_recycle=300 avoids "server closed connection" after idle
-  ✅ FIX 5 — SQLite WAL mode prevents locking in local dev
-  ✅ FIX 6 — Startup DB connectivity check with clear error message
+  ✅ FIX-DB-4 — pool_recycle=300 retained (avoids stale connection errors).
+
+  ✅ FIX-DB-5 — SQLite WAL mode retained for local dev.
+
+  ✅ FIX-DB-6 — _check_db_connection() now returns a bool instead of
+     calling sys.exit(), so main.py can decide how to handle it.
 """
 
 from __future__ import annotations
@@ -59,15 +58,17 @@ print(f"[database] Using {'SQLite (local dev)' if _is_sqlite else 'PostgreSQL (p
 # ── Engine ────────────────────────────────────────────────────────────────────
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 
-# Keep pool small on Render free tier (max 25 connections total)
+# ✅ FIX-DB-2: Render free PostgreSQL allows ~10 connections total.
+# pool_size=3 + max_overflow=5 = 8 max → safely under the limit.
+# Old values (5 + 10 = 15) exceeded the limit and caused connection errors.
 _pool_kwargs: dict = (
     {}
     if _is_sqlite
     else {
-        "pool_size":     5,
-        "max_overflow":  10,
-        "pool_pre_ping": True,   # ✅ FIX: detects dead connections before use
-        "pool_recycle":  300,    # ✅ FIX: recycle every 5 min — avoids stale conn errors
+        "pool_size":     3,
+        "max_overflow":  5,
+        "pool_pre_ping": True,   # ✅ FIX-DB-3: detects dead connections before use
+        "pool_recycle":  300,    # ✅ FIX-DB-4: recycle every 5 min — avoids stale conn errors
         "pool_timeout":  30,
     }
 )
@@ -78,7 +79,7 @@ engine = create_engine(
     **_pool_kwargs,
 )
 
-# ✅ FIX: Enable WAL mode for SQLite to prevent locking issues in local dev
+# ✅ FIX-DB-5: Enable WAL mode for SQLite to prevent locking issues in local dev
 if _is_sqlite:
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -86,23 +87,35 @@ if _is_sqlite:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
-# ✅ FIX: Verify DB is reachable at startup — fail fast with a clear message
-def _check_db_connection():
+
+# ✅ FIX-DB-6: Returns bool instead of calling sys.exit().
+# Render's free DB can take 10–30s to become reachable after a cold boot.
+# Crashing the web service with sys.exit() here prevents it from ever
+# registering as healthy, creating an unrecoverable crash loop.
+def _check_db_connection() -> bool:
+    """
+    Verify DB is reachable. Returns True if OK, False if not.
+    Logs the result either way. Does NOT call sys.exit().
+    """
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         print("[database] ✅ Database connection OK")
+        return True
     except Exception as exc:
-        print(f"[database] ❌ Cannot connect to database: {exc}")
+        print(f"[database] ⚠️  Cannot connect to database at startup: {exc}")
         if not _is_sqlite:
             print(
-                "[database] 💡 Make sure DATABASE_URL is set correctly in Render.\n"
-                "           Go to: Render Dashboard → your service → Environment\n"
-                "           The DATABASE_URL should be auto-linked from your PostgreSQL db."
+                "[database] 💡 This is normal on Render cold boot — the PostgreSQL\n"
+                "           instance may need 10–30s to wake up. The app will keep\n"
+                "           running; individual requests will retry the connection.\n"
+                "           If this persists, check DATABASE_URL in:\n"
+                "           Render Dashboard → your service → Environment"
             )
-        sys.exit(1)   # Hard fail so Render marks deploy as failed, not silently broken
+        return False
 
-_check_db_connection()
+
+_check_db_connection()  # Log result at startup, but never exit
 
 # ── Session ───────────────────────────────────────────────────────────────────
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

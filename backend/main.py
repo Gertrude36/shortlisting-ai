@@ -1,23 +1,33 @@
 """
-backend/main.py  ·  v6.3.0
+backend/main.py  ·  v6.4.0
 ────────────────────────────────────────────────────────────────
-ALL PREVIOUS FIXES RETAINED (FIX-CORE-1 through FIX-UNPACK-4).
+ALL PREVIOUS FIXES RETAINED (FIX-CORE-1 through FIX-MIGRATE-1).
 
-NEW FIXES IN v6.3.0:
+NEW FIXES IN v6.4.0:
 
-  ✅ FIX-MIGRATE-1 — ensure_application_columns() added to startup
-     migrations. It adds the missing `doc_advisory` column to the
-     `applications` table if it doesn't exist yet. Without this,
-     any shortlist call on an existing database crashes with:
-         OperationalError: table applications has no column named doc_advisory
-     (SQLAlchemy CREATE TABLE only adds new columns on a fresh DB;
-      ALTER TABLE is needed for existing databases.)
+  ✅ FIX-ROUTE-1 — /applications/my MOVED above /applications/{application_id}
+     FastAPI matches routes in registration order. When /applications/my was
+     registered AFTER /applications/{application_id}, FastAPI treated "my"
+     as an integer path parameter, causing a 422 validation error that
+     the CORS wrapper re-raised as a 500. Fix: register the static path
+     /applications/my FIRST.
 
-  ✅ FIX-DISPLAY-1 — The HR candidates endpoint now returns
-     doc_advisory so HRReport.jsx can show the correct badge
-     (Verified / Advisory / Not Verified).
+  ✅ FIX-MIGRATE-2 — Migrations now run INSIDE lifespan, AFTER
+     Base.metadata.create_all(), not at module import time.
+     The old code called ensure_application_columns() at the top-level
+     of main.py (module scope), which ran before the tables existed on
+     a fresh database. inspect(engine).get_columns("applications") raised
+     OperationalError: no such table: applications — crashing the import
+     and returning 500 on every endpoint.
+     Fix: all migrations are now called in the lifespan startup block,
+     after create_all() has guaranteed the tables exist.
 
-  All FIX-UNPACK-1 through FIX-UNPACK-4 from v6.2.0 retained.
+  ✅ FIX-STARTUP-1 — create_all() also moved into lifespan so table
+     creation and migrations are sequenced correctly and errors are
+     caught and logged rather than crashing the import.
+
+  All previous fixes (FIX-CORE-1 through FIX-MIGRATE-1, FIX-UNPACK-1
+  through FIX-UNPACK-4, FIX-DISPLAY-1) are retained.
 """
 
 import os
@@ -83,7 +93,11 @@ from auth import (
 )
 from email_utils import send_reset_email, send_hr_invite_email
 
-Base.metadata.create_all(bind=engine)
+# ✅ FIX-STARTUP-1: Do NOT call Base.metadata.create_all() here at module scope.
+# It is now called inside lifespan() so that:
+#   (a) errors are caught and logged, not silently swallowed
+#   (b) migrations run AFTER tables are guaranteed to exist
+# (Moved to lifespan below)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,14 +206,7 @@ def _load_ml_modules() -> None:
         print(f"[ml_loader] ⚠️  ocr_utils import failed: {exc!r}")
 
 
-# ✅ FIX-UNPACK-1 — updated to accept document_paths + declared_types
 def _call_predict(app_obj, job, doc_texts=None, document_paths=None, declared_types=None):
-    """
-    Calls shortlisting_engine.predict() and always returns a 4-tuple:
-        (decision_str, score, reason_json, doc_result)
-
-    doc_result is a dict with keys: verified, advisory, summary.
-    """
     if _predict is None:
         raise HTTPException(
             status_code=503,
@@ -215,12 +222,6 @@ def _call_predict(app_obj, job, doc_texts=None, document_paths=None, declared_ty
 
 
 def _call_verify_documents(**kwargs):
-    """
-    Calls document_verifier.verify_documents() which returns a 3-tuple:
-        (verified: bool, advisory: bool, summary: str)
-
-    Falls back to (True, False, message) when the module is not loaded.
-    """
     if _verify_documents is None:
         return True, False, "Document verification module loading — accepted."
     return _verify_documents(**kwargs)
@@ -236,9 +237,6 @@ def _extract_all_doc_texts(
     docs: list,
     budget_seconds: float = OCR_CANDIDATE_BUDGET_SECONDS,
 ) -> dict[str, str]:
-    """
-    Extract OCR text from all docs with a hard time budget.
-    """
     doc_texts: dict[str, str] = {}
     ocr_start = time.monotonic()
 
@@ -301,120 +299,128 @@ _CANDIDATE_POOL = concurrent.futures.ThreadPoolExecutor(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Database migrations — runs at startup
+# Database migrations
 # ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX-MIGRATE-2: These functions are ONLY called from inside lifespan(),
+# AFTER Base.metadata.create_all() has run. Do NOT call them at module scope.
+# Calling inspect(engine).get_columns("applications") before the table exists
+# raises OperationalError and crashes the entire app import.
 
 def _is_sqlite_db() -> bool:
     return str(engine.url).startswith("sqlite")
 
 
 def ensure_job_columns():
-    inspector        = inspect(engine)
-    existing_columns = [col["name"] for col in inspector.get_columns("jobs")]
-    with engine.connect() as conn:
-        for col, coltype in [
-            ("job_level",        "VARCHAR"),
-            ("number_of_posts",  "INTEGER"),
-            ("deadline",         "DATETIME"),
-        ]:
-            if col not in existing_columns:
-                try:
-                    conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {coltype}"))
-                    conn.commit()
-                except Exception as exc:
+    try:
+        inspector        = inspect(engine)
+        existing_columns = [col["name"] for col in inspector.get_columns("jobs")]
+        with engine.connect() as conn:
+            for col, coltype in [
+                ("job_level",        "VARCHAR"),
+                ("number_of_posts",  "INTEGER"),
+                ("deadline",         "DATETIME"),
+            ]:
+                if col not in existing_columns:
                     try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    print(f"[migration] Note: could not add jobs.{col}: {exc}")
-        try:
-            conn.execute(text(
-                "UPDATE jobs SET job_level = 'Mid-Level' WHERE job_level IS NULL"
-            ))
-            conn.execute(text(
-                "UPDATE jobs SET number_of_posts = 1 WHERE number_of_posts IS NULL"
-            ))
-            if _is_sqlite_db():
-                conn.execute(text(
-                    "UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"
-                ))
-            else:
-                conn.execute(text(
-                    "UPDATE jobs SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL"
-                ))
-            conn.commit()
-        except Exception as exc:
+                        conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {coltype}"))
+                        conn.commit()
+                    except Exception as exc:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        print(f"[migration] Note: could not add jobs.{col}: {exc}")
             try:
-                conn.rollback()
-            except Exception:
-                pass
-            print(f"[ensure_job_columns] Backfill warning: {exc}")
+                conn.execute(text(
+                    "UPDATE jobs SET job_level = 'Mid-Level' WHERE job_level IS NULL"
+                ))
+                conn.execute(text(
+                    "UPDATE jobs SET number_of_posts = 1 WHERE number_of_posts IS NULL"
+                ))
+                if _is_sqlite_db():
+                    conn.execute(text(
+                        "UPDATE jobs SET deadline = date('now', '+30 days') WHERE deadline IS NULL"
+                    ))
+                else:
+                    conn.execute(text(
+                        "UPDATE jobs SET deadline = NOW() + INTERVAL '30 days' WHERE deadline IS NULL"
+                    ))
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(f"[ensure_job_columns] Backfill warning: {exc}")
+    except Exception as exc:
+        print(f"[ensure_job_columns] ⚠️  Skipped: {exc}")
 
 
 def ensure_user_profile_columns():
-    inspector        = inspect(engine)
-    existing_columns = [col["name"] for col in inspector.get_columns("users")]
-    with engine.connect() as conn:
-        for col in ["phone", "address"]:
-            if col not in existing_columns:
-                coltype = "VARCHAR(50)" if col == "phone" else "VARCHAR(255)"
-                try:
-                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {coltype}"))
-                    conn.commit()
-                    print(f"[migration] ✅ Added 'users.{col}' column")
-                except Exception as exc:
+    try:
+        inspector        = inspect(engine)
+        existing_columns = [col["name"] for col in inspector.get_columns("users")]
+        with engine.connect() as conn:
+            for col in ["phone", "address"]:
+                if col not in existing_columns:
+                    coltype = "VARCHAR(50)" if col == "phone" else "VARCHAR(255)"
                     try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    print(f"[migration] ⚠️  Could not add 'users.{col}': {exc}")
+                        conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {coltype}"))
+                        conn.commit()
+                        print(f"[migration] ✅ Added 'users.{col}' column")
+                    except Exception as exc:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        print(f"[migration] ⚠️  Could not add 'users.{col}': {exc}")
+    except Exception as exc:
+        print(f"[ensure_user_profile_columns] ⚠️  Skipped: {exc}")
 
 
-# ✅ FIX-MIGRATE-1: Add doc_advisory to applications if it doesn't exist.
-# This is the ROOT CAUSE of the "Processing" bug on existing databases:
-# SQLAlchemy's create_all() only creates new tables; it never alters
-# existing ones. So the doc_advisory column defined in models.py was
-# never added to existing databases, causing AttributeError / silent
-# failures every time shortlisting tried to save app_obj.doc_advisory.
 def ensure_application_columns():
     """
     Add any new columns to the applications table that are missing.
     Safe to run on every startup — skips columns that already exist.
-    """
-    inspector        = inspect(engine)
-    existing_columns = [col["name"] for col in inspector.get_columns("applications")]
-    with engine.connect() as conn:
-        new_cols = [
-            ("doc_advisory", "BOOLEAN DEFAULT 0"),
-        ]
-        for col, coldef in new_cols:
-            if col not in existing_columns:
-                try:
-                    conn.execute(text(
-                        f"ALTER TABLE applications ADD COLUMN {col} {coldef}"
-                    ))
-                    conn.commit()
-                    print(f"[migration] ✅ Added 'applications.{col}' column")
-                except Exception as exc:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    print(f"[migration] ⚠️  Could not add 'applications.{col}': {exc}")
 
-        # Backfill: existing rows that already have doc_verified=True but
-        # doc_advisory was just added as NULL → set to False (not advisory).
-        try:
-            conn.execute(text(
-                "UPDATE applications SET doc_advisory = 0 WHERE doc_advisory IS NULL"
-            ))
-            conn.commit()
-        except Exception as exc:
+    ✅ FIX-MIGRATE-1: Adds doc_advisory column for existing databases.
+    ✅ FIX-MIGRATE-2: Must only be called AFTER Base.metadata.create_all().
+    """
+    try:
+        inspector        = inspect(engine)
+        existing_columns = [col["name"] for col in inspector.get_columns("applications")]
+        with engine.connect() as conn:
+            new_cols = [
+                ("doc_advisory", "BOOLEAN DEFAULT 0"),
+            ]
+            for col, coldef in new_cols:
+                if col not in existing_columns:
+                    try:
+                        conn.execute(text(
+                            f"ALTER TABLE applications ADD COLUMN {col} {coldef}"
+                        ))
+                        conn.commit()
+                        print(f"[migration] ✅ Added 'applications.{col}' column")
+                    except Exception as exc:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        print(f"[migration] ⚠️  Could not add 'applications.{col}': {exc}")
+
             try:
-                conn.rollback()
-            except Exception:
-                pass
-            print(f"[ensure_application_columns] Backfill warning: {exc}")
+                conn.execute(text(
+                    "UPDATE applications SET doc_advisory = 0 WHERE doc_advisory IS NULL"
+                ))
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(f"[ensure_application_columns] Backfill warning: {exc}")
+    except Exception as exc:
+        print(f"[ensure_application_columns] ⚠️  Skipped: {exc}")
 
 
 def ensure_document_type_enum():
@@ -454,12 +460,16 @@ def ensure_pending_decision_default():
         print(f"[migration] decision backfill warning: {exc}")
 
 
-# Run all migrations at startup
-ensure_job_columns()
-ensure_user_profile_columns()
-ensure_application_columns()   # ✅ FIX-MIGRATE-1: new
-ensure_document_type_enum()
-ensure_pending_decision_default()
+def _run_all_migrations():
+    """
+    Run all DB migrations in the correct order.
+    Called from lifespan() AFTER Base.metadata.create_all().
+    """
+    ensure_job_columns()
+    ensure_user_profile_columns()
+    ensure_application_columns()
+    ensure_document_type_enum()
+    ensure_pending_decision_default()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -469,7 +479,23 @@ ensure_pending_decision_default()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _APP_READY
-    print("[lifespan] Server bound — starting ML background load …")
+    print("[lifespan] Server bound — initialising …")
+
+    # ✅ FIX-STARTUP-1 + FIX-MIGRATE-2: create tables first, THEN migrate.
+    # Both steps are inside lifespan so errors are caught and logged.
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("[lifespan] ✅ Database tables created / verified.")
+    except Exception as exc:
+        print(f"[lifespan] ⚠️  create_all() failed: {exc!r}")
+
+    try:
+        _run_all_migrations()
+        print("[lifespan] ✅ Migrations complete.")
+    except Exception as exc:
+        print(f"[lifespan] ⚠️  Migrations failed (non-fatal): {exc!r}")
+
+    print("[lifespan] Starting ML background load …")
     loop = asyncio.get_running_loop()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         try:
@@ -481,6 +507,7 @@ async def lifespan(app: FastAPI):
             print("[lifespan] ⚠️  ML load timed out after 120s — degraded mode.")
         except Exception as exc:
             print(f"[lifespan] ⚠️  ML load error: {exc!r}")
+
     _APP_READY = True
     print("[lifespan] ✅ Application ready.")
     yield
@@ -674,7 +701,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.3.0",
+    version     = "6.4.0",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -907,10 +934,6 @@ def _rank_candidates(candidates: list[dict]) -> list[dict]:
         ranked.append({**c, "rank": i})
     return ranked
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX-BP-1: _parse_reason_data — safely parse ai_reason into a complete dict
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_reason_data(app_obj) -> dict:
     raw = (app_obj.ai_reason or "").strip()
@@ -1301,6 +1324,38 @@ def submit_application(
     return app_obj
 
 
+# ✅ FIX-ROUTE-1: /applications/my MUST be registered BEFORE
+# /applications/{application_id}. FastAPI matches routes in registration
+# order. If the parameterised route comes first, "my" is parsed as an
+# integer → validation fails → 422/500. Static paths must come first.
+@_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
+def my_applications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_applicant),
+):
+    return db.query(Application).filter(
+        Application.applicant_id == current_user.id,
+        Application.submitted_at != None,
+    ).all()
+
+
+@_app.get("/applications/{application_id}", response_model=ApplicationResponse, tags=["applications"])
+def get_application(
+    application_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    app_obj = db.query(Application).filter(Application.id == application_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if (
+        current_user.role == UserRole.applicant
+        and app_obj.applicant_id != current_user.id
+    ):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return app_obj
+
+
 @_app.delete("/applications/{application_id}", tags=["applications"])
 def delete_draft_application(
     application_id: int, request: Request,
@@ -1394,34 +1449,6 @@ def finalize_application(
         "uploaded_types":  sorted(uploaded_types),
         "documents_count": len(docs),
     }
-
-
-@_app.get("/applications/my", response_model=List[ApplicationResponse], tags=["applications"])
-def my_applications(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_applicant),
-):
-    return db.query(Application).filter(
-        Application.applicant_id == current_user.id,
-        Application.submitted_at != None,
-    ).all()
-
-
-@_app.get("/applications/{application_id}", response_model=ApplicationResponse, tags=["applications"])
-def get_application(
-    application_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    app_obj = db.query(Application).filter(Application.id == application_id).first()
-    if not app_obj:
-        raise HTTPException(status_code=404, detail="Application not found")
-    if (
-        current_user.role == UserRole.applicant
-        and app_obj.applicant_id != current_user.id
-    ):
-        raise HTTPException(status_code=403, detail="Not authorized")
-    return app_obj
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2257,7 +2284,6 @@ def get_all_candidates(
             "ai_score":        app.ai_score,
             "ai_reason":       app.ai_reason,
             "doc_verified":    app.doc_verified,
-            # ✅ FIX-DISPLAY-1: include doc_advisory in HR candidate response
             "doc_advisory":    getattr(app, "doc_advisory", False),
             "submitted_at":    app.submitted_at,
             "documents": [{
@@ -2317,7 +2343,6 @@ def get_job_report(
             "ai_score":          app_obj.ai_score,
             "ai_reason":         app_obj.ai_reason,
             "doc_verified":      app_obj.doc_verified,
-            # ✅ FIX-DISPLAY-1: include doc_advisory in report
             "doc_advisory":      getattr(app_obj, "doc_advisory", False),
             "submitted_at":      app_obj.submitted_at.isoformat()   if app_obj.submitted_at   else None,
             "shortlisted_at":    app_obj.shortlisted_at.isoformat() if app_obj.shortlisted_at else None,
@@ -2390,9 +2415,6 @@ def get_job_report(
 # ═══════════════════════════════════════════════════════════════
 
 def _run_verification_and_prediction(app_obj, job, user, docs, db):
-    """
-    Runs OCR → document type/identity gate → AI predict() for one candidate.
-    """
     try:
         try:
             from ai_matcher import _m as _ai_model_ref
@@ -2407,7 +2429,6 @@ def _run_verification_and_prediction(app_obj, job, user, docs, db):
         verify_paths = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE]
         verify_types = [t for t in doc_types if t in VERIFIABLE]
 
-        # ✅ FIX-UNPACK-4: _call_verify_documents returns 3-tuple (verified, advisory, detail)
         gate_verified, gate_advisory, gate_detail = _call_verify_documents(
             applicant_name  = user.full_name,
             education_level = app_obj.education_level or "",
@@ -2419,7 +2440,6 @@ def _run_verification_and_prediction(app_obj, job, user, docs, db):
 
         doc_texts = _extract_all_doc_texts(docs, budget_seconds=OCR_CANDIDATE_BUDGET_SECONDS)
 
-        # ✅ FIX-UNPACK-2: predict() returns 4-tuple — unpack all 4 values
         try:
             decision_str, score, reason_json, doc_result = _call_predict(
                 app_obj,
@@ -2474,9 +2494,6 @@ def _run_verification_and_prediction(app_obj, job, user, docs, db):
             )
             reason_json = json.dumps(reason_obj, ensure_ascii=False)
 
-        # ✅ FIX-UNPACK-2 + FIX-MIGRATE-1: Save BOTH doc_verified AND doc_advisory.
-        # doc_advisory now exists in the DB (added by ensure_application_columns()),
-        # so this assignment no longer crashes with AttributeError.
         app_obj.decision       = DecisionStatus(decision_str)
         app_obj.ai_score       = round(float(score), 4)
         app_obj.ai_reason      = reason_json

@@ -1,38 +1,31 @@
 """
-backend/auth.py
+backend/auth.py  ·  v2.0.0
 ────────────────────────────────────────────────────────────────
 Password hashing, JWT creation/verification, and the
 `get_current_user` / `require_hr` FastAPI dependencies.
 
-FIXES APPLIED:
-  ✅ FIX 1 — datetime.utcnow() replaced with datetime.now(timezone.utc)
+FIXES IN v2.0.0:
 
-  ✅ FIX 2 — bcrypt >= 4.1 incompatibility with passlib
-     passlib 1.7.4 breaks with bcrypt >= 4.1:
-       - AttributeError: module 'bcrypt' has no attribute '__about__'
-       - ValueError: password cannot be longer than 72 bytes
-     Fix: suppress the warning + truncate passwords to 72 UTF-8 bytes.
+  ✅ FIX-AUTH-1 — jose version compatibility for ExpiredSignatureError.
+     On some versions of python-jose (< 3.3.0), ExpiredSignatureError
+     is not exported from the top-level `jose` package — only from
+     `jose.exceptions`. The old import crashed with ImportError at
+     startup, causing ALL endpoints to return 500.
+     Fix: try both import paths with a safe fallback.
 
-  ✅ FIX 3 — 401 retry loop prevention
-     verify_access_token() distinguishes EXPIRED vs INVALID tokens.
-     get_current_user() returns machine-readable codes so the frontend
-     can clear its token and stop retrying on 401.
+  ✅ FIX-AUTH-2 — datetime.utcnow() replaced with datetime.now(timezone.utc)
+     (retained from previous version).
 
-  ✅ FIX 4 — Password Reset Token Support
-     create_reset_token(email) / verify_reset_token(token) added.
+  ✅ FIX-AUTH-3 — bcrypt >= 4.1 incompatibility with passlib suppressed
+     (retained from previous version).
 
-  ✅ FIX 5 (NEW) — require_hr / require_applicant raise 403, not 401.
-     Previously a role mismatch could surface as a 401 in some proxy
-     configurations because HTTPException headers included WWW-Authenticate.
-     Now role-guard errors are clean 403s with no auth headers.
+  ✅ FIX-AUTH-4 — Password Reset Token Support (retained).
 
-  ✅ FIX 6 (NEW) — get_current_user now handles a missing/None token
-     explicitly (e.g. when oauth2_scheme returns "" on some FastAPI
-     versions) rather than letting jwt.decode raise an opaque error.
+  ✅ FIX-AUTH-5 — require_hr / require_applicant raise clean 403 (retained).
 
-  ✅ FIX 7 (NEW) — _safe_encode truncation now handles non-string input
-     gracefully (converts to str first) to prevent unexpected TypeErrors
-     from downstream callers.
+  ✅ FIX-AUTH-6 — get_current_user handles missing/None token (retained).
+
+  ✅ FIX-AUTH-7 — _safe_encode handles non-string input (retained).
 """
 
 import os
@@ -54,10 +47,24 @@ warnings.filterwarnings(
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import ExpiredSignatureError, JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+
+# ✅ FIX-AUTH-1 — Safe import for ExpiredSignatureError across jose versions.
+# python-jose < 3.3.0 does not export ExpiredSignatureError from the top-level
+# `jose` package. This caused an ImportError that silently broke ALL auth and
+# made every protected endpoint return 500. We try both import paths.
+try:
+    from jose import ExpiredSignatureError, JWTError, jwt
+except ImportError:
+    # Older jose versions: ExpiredSignatureError lives in jose.exceptions
+    from jose import JWTError, jwt
+    try:
+        from jose.exceptions import ExpiredSignatureError
+    except ImportError:
+        # Ultimate fallback: treat expired as a generic JWTError subclass
+        ExpiredSignatureError = JWTError
 
 from database import get_db
 from models import User, UserRole
@@ -77,7 +84,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 def _safe_encode(plain) -> str:
     """
-    ✅ FIX 7: Coerce to str before encoding, then truncate to 72 UTF-8
+    ✅ FIX-AUTH-7: Coerce to str before encoding, then truncate to 72 UTF-8
     bytes — bcrypt's hard limit. Consistent across all bcrypt/passlib versions.
     """
     if not isinstance(plain, str):
@@ -100,7 +107,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# ── ✅ FIX 3: Token verification with expiry distinction ─────────────────────
+# ── ✅ FIX-AUTH-3: Token verification with expiry distinction ─────────────────
 
 def verify_access_token(token: str) -> "dict | str":
     """
@@ -111,7 +118,7 @@ def verify_access_token(token: str) -> "dict | str":
       - "expired"      if the token is valid but expired
       - "invalid"      if the token is malformed or tampered
     """
-    # ✅ FIX 6: guard against empty/None token
+    # ✅ FIX-AUTH-6: guard against empty/None token
     if not token or not token.strip():
         return "invalid"
 
@@ -167,12 +174,12 @@ def get_current_user(
     db:    Session = Depends(get_db),
 ) -> User:
     """
-    ✅ FIX 3 + FIX 6: Returns machine-readable error codes in 401 responses
-    so the frontend can stop the retry loop and clear its stored token.
+    ✅ FIX-AUTH-3 + FIX-AUTH-6: Returns machine-readable error codes in 401
+    responses so the frontend can stop the retry loop and clear its token.
 
     Response shape on error:
-      { "detail": "human message", "code": "TOKEN_EXPIRED" | "TOKEN_INVALID" }
-    (code surfaced via X-Token-Error header for axios interceptors)
+      { "detail": "human message" }
+      Header: X-Token-Error: TOKEN_EXPIRED | TOKEN_INVALID
     """
     result = verify_access_token(token)
 
@@ -218,9 +225,8 @@ def get_current_user(
 
 def require_hr(current_user: User = Depends(get_current_user)) -> User:
     """
-    ✅ FIX 5: Raises a clean 403 (no WWW-Authenticate header) if the
-    logged-in user is not HR. Previously the 401 header from
-    get_current_user could leak through on some proxy configurations.
+    ✅ FIX-AUTH-5: Raises a clean 403 (no WWW-Authenticate header) if the
+    logged-in user is not HR.
     """
     if current_user.role != UserRole.hr:
         raise HTTPException(
@@ -232,7 +238,7 @@ def require_hr(current_user: User = Depends(get_current_user)) -> User:
 
 def require_applicant(current_user: User = Depends(get_current_user)) -> User:
     """
-    ✅ FIX 5: Raises a clean 403 if the logged-in user is not an applicant.
+    ✅ FIX-AUTH-5: Raises a clean 403 if the logged-in user is not an applicant.
     """
     if current_user.role != UserRole.applicant:
         raise HTTPException(
