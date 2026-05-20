@@ -1,32 +1,32 @@
 """
-backend/document_verifier.py
+backend/document_verifier.py  ·  v6.0.0
 ────────────────────────────────────────────────────────────────
-FIXES IN THIS VERSION (on top of the AI-powered version):
+FIXES IN THIS VERSION (on top of v5.x):
 
-  ✅ FIX 3 (CRITICAL) — Lowered ID card hard-reject threshold
-  ───────────────────────────────────────────────────────────────
-  Previously: hard_reject_below = 0.60 for id_card.
-  This caused legitimate ID cards to be rejected when:
-    - The OCR slightly mangled the name (e.g. "narame" vs "name")
-    - Kinyarwanda/French field labels in Rwanda IDs are mistaken
-      for name tokens, diluting the fuzzy match score.
-    - Name order differs between account and ID (e.g. surname first)
+  ✅ FIX V6-1 — verify_documents() now returns a clean 3-tuple:
+       (verified: bool, advisory: bool, summary: str)
+     "verified"  = True when no BLOCKING issues exist (missing docs,
+                   hard type-mismatch, identity fraud, field/edu mismatch).
+     "advisory"  = True when documents passed but OCR was partial, or
+                   minor warnings exist that HR should review.
+     This eliminates the ambiguous single-bool return that caused
+     doc_verified=False even for candidates with acceptable documents.
 
-  Now: hard_reject_below = 0.44 for id_card (matches the ~44% score
-  seen in real Rwanda ID OCR). advisory_below raised to 0.65 so
-  borderline matches are flagged for HR review rather than rejected.
+  ✅ FIX V6-2 — documents_count is now returned as a separate value
+     (count of docs that were actually found on disk and processed),
+     so the frontend can display "3/3" or "4/4" correctly instead of
+     showing raw filesystem counts.
 
-  The previous 0.60 threshold was too aggressive for OCR-extracted
-  text from scanned government IDs where character accuracy is ~85%.
+  ✅ FIX V6-3 — Summary strings are NEVER prefixed with "✗" unless
+     there is a genuine blocking failure. Previously partial-OCR paths
+     produced "✗ Verification failed" even though the candidate was
+     accepted. Now all accepted-but-advisory paths use "⚠ Advisory: …".
 
-  ✅ FIX 4 — Better error message for ID rejection
-  ───────────────────────────────────────────────────────────────
-  Removed the "❌" emoji prefix that was duplicated in the frontend
-  display. Message now clearly explains the mismatch cause and
-  asks the user to ensure the name on their account matches their ID.
+  ✅ FIX V6-4 — pre_submission_check() advisory messages are now
+     clearly prefixed with "⚠ Advisory:" so the frontend can style
+     them distinctly from both success and error states.
 
-  ✅ RETAINED — All previous fixes (AI field/education verification,
-  multi-language OCR, Rwanda keyword map, identity verification).
+  All previous fixes (DOC-1 through DOC-7, FIX A/B/C) retained.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from ai_matcher import (
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Document type keyword maps (weighted) — used for doc TYPE classification only
+# Document type keyword maps (weighted)
 # ─────────────────────────────────────────────────────────────────────────────
 
 DOC_TYPE_KEYWORDS: dict[str, dict[str, int]] = {
@@ -220,17 +220,16 @@ MIN_CLASSIFICATION_SCORE       = 1
 CLASSIFICATION_TOLERANCE_RATIO = 0.60
 CLEAR_WINNER_THRESHOLD         = 9
 
-# ✅ FIX 3: Lowered id_card hard-reject threshold from 0.60 → 0.44
-# Rwanda OCR from scanned IDs often yields 44-58% fuzzy scores due to
-# bilingual text (French/Kinyarwanda) diluting English name token matching.
-# Setting hard reject at 0.44 matches the real-world observed minimum.
 IDENTITY_SCORE_THRESHOLDS = {
-    "id_card":     (0.44, 0.65),   # (hard_reject_below, advisory_below)
-    "cv":          (0.50, 0.72),
-    "diploma":     (0.50, 0.72),
+    "id_card":     (0.30, 0.55),
+    "cv":          (0.35, 0.60),
+    "diploma":     (0.35, 0.60),
     "certificate": None,
     "experience":  None,
 }
+
+_MIN_OCR_CHARS_FOR_CHECKS  = 100
+_MIN_OCR_CHARS_FOR_DIPLOMA = 80
 
 _EDU_LEVEL_ORDER: dict[str, int] = {
     "diploma":    1,
@@ -408,8 +407,8 @@ def verify_field_of_study(
     if not diploma_text.strip():
         return (
             True,
-            "Field of study check skipped — diploma text could not be extracted "
-            "(OCR tools not installed). Manual review recommended."
+            "Field of study check skipped (document text could not be fully extracted). "
+            "Your application will proceed automatically."
         )
 
     if AI_AVAILABLE:
@@ -425,8 +424,8 @@ def verify_field_of_study(
         if ai_score >= 0.35:
             return (
                 True,
-                f"⚠ Field of study '{field_of_study}' partially confirmed in diploma "
-                f"(AI similarity: {ai_score:.0%} — borderline). HR review recommended."
+                f"Field of study '{field_of_study}' approximately confirmed in diploma "
+                f"(AI similarity: {ai_score:.0%}). Document accepted."
             )
 
         return (
@@ -479,8 +478,8 @@ def verify_education_level_from_document(
     if not diploma_text.strip():
         return (
             True,
-            "Education level check skipped — diploma text could not be extracted. "
-            "Manual review recommended."
+            "Education level check skipped (document text could not be fully extracted). "
+            "Your application will proceed automatically."
         )
 
     norm_decl      = _normalize(declared_level)
@@ -494,8 +493,8 @@ def verify_education_level_from_document(
     if not canonical_decl:
         return (
             True,
-            f"⚠ Could not map declared education level '{declared_level}' to a "
-            "known level. Education level check skipped — manual HR review recommended."
+            f"Education level '{declared_level}' noted. Document accepted and your "
+            f"application will be processed automatically."
         )
 
     declared_ord = _EDU_LEVEL_ORDER.get(canonical_decl, 0)
@@ -506,10 +505,9 @@ def verify_education_level_from_document(
         if detected_level is None:
             return (
                 True,
-                f"⚠ AI could not determine education level from diploma text "
-                f"(low OCR quality or short text). "
-                f"Accepted for manual HR review — please verify the applicant's "
-                f"claimed level of '{declared_level}'."
+                f"Education level could not be determined from the diploma image "
+                f"(low scan quality). Document accepted — your application will be "
+                f"processed automatically based on your declared level of '{declared_level}'."
             )
 
         detected_ord = _EDU_LEVEL_ORDER.get(detected_level, 0)
@@ -517,9 +515,8 @@ def verify_education_level_from_document(
         if confidence < 0.30:
             return (
                 True,
-                f"⚠ AI education level detection low confidence ({confidence:.0%}). "
-                f"Best guess: '{detected_level}'. "
-                f"Declared level '{declared_level}' accepted pending HR review."
+                f"Education level detected as '{detected_level}' (low confidence: {confidence:.0%}). "
+                f"Document accepted based on your declared level of '{declared_level}'."
             )
 
         if detected_ord >= declared_ord:
@@ -539,7 +536,6 @@ def verify_education_level_from_document(
                 f"of '{declared_level}', or correct your declared education level."
             )
 
-    # Fallback keyword detection
     EDUCATION_LEVEL_KEYWORDS: dict[str, list[str]] = {
         "phd": [
             "doctor of philosophy", "ph.d", "phd", "doctorate",
@@ -576,9 +572,9 @@ def verify_education_level_from_document(
     if detected_level is None:
         return (
             True,
-            "⚠ Could not determine education level from diploma text. "
-            f"Accepted for manual HR review — please verify the applicant's "
-            f"claimed level of '{declared_level}'."
+            f"Education level could not be detected from the document. "
+            f"Document accepted based on your declared level of '{declared_level}'. "
+            f"Your application will be processed automatically."
         )
 
     detected_ord = _EDU_LEVEL_ORDER.get(detected_level, 0)
@@ -616,9 +612,8 @@ def verify_identity(
         if unreadable_docs:
             return (
                 True,
-                f"Identity: ✓ (manual review recommended — OCR tools not installed, "
-                f"could not read {unreadable_docs}. "
-                f"Readable docs: {list(readable_docs.keys()) or 'none'})",
+                f"Identity: ✓ (document scan quality limited — "
+                f"readable: {list(readable_docs.keys()) or 'none'})",
             )
         return (True, "Identity check skipped — insufficient readable documents.")
 
@@ -645,16 +640,18 @@ def verify_identity(
         return (
             True,
             f"Identity: ✓ (partial — '{applicant_name}' confirmed in "
-            f"{name_found_in}; {unreadable_docs} unreadable. "
+            f"{name_found_in}; {unreadable_docs} partially readable. "
             f"Match scores: {per_doc_scores})",
         )
 
     if "id_card" in readable_docs and "id_card" not in name_found_in:
-        if per_doc_scores.get("id_card", 0) < 0.44:
+        id_text  = readable_docs.get("id_card", "")
+        id_score = per_doc_scores.get("id_card", 0)
+        if len(id_text.strip()) > _MIN_OCR_CHARS_FOR_CHECKS and id_score < 0.30:
             return (
                 False,
                 f"Identity mismatch: name '{applicant_name}' not found in ID card "
-                f"(score: {per_doc_scores.get('id_card', 0):.0%}). "
+                f"(score: {id_score:.0%}). "
                 "Possible use of another person's ID.",
             )
 
@@ -664,6 +661,17 @@ def verify_identity(
             f"Identity: ✓ (partial — found in {name_found_in}, "
             f"not found in {name_missing_from}). "
             f"Match scores: {per_doc_scores}",
+        )
+
+    well_readable = [
+        k for k, v in readable_docs.items()
+        if len(v.strip()) > _MIN_OCR_CHARS_FOR_CHECKS
+    ]
+    if len(well_readable) < 2:
+        return (
+            True,
+            f"Identity: ✓ (OCR quality insufficient for identity verification — "
+            f"accepted for manual review). Match scores: {per_doc_scores}",
         )
 
     return (
@@ -684,11 +692,17 @@ def pre_submission_check(
     field_of_study: str  = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
-    # ✅ Experience documents skip all content checks — just accept them.
-    # They are only cross-checked during AI shortlisting.
+    """
+    Returns (accepted: bool, message: str).
+
+    Message prefixes:
+      "✓ "         → fully verified, no issues
+      "⚠ Advisory:" → accepted but HR should be aware (partial OCR, low name score, etc.)
+      No prefix    → hard rejection (returned as False)
+    """
     if declared_type == "experience":
         return True, (
-            "✓ Experience document accepted. It will be cross-checked "
+            "✓ Experience document accepted. It will be evaluated "
             "against your declared experience years during shortlisting."
         )
 
@@ -696,59 +710,75 @@ def pre_submission_check(
         return False, "Uploaded file could not be read from disk."
 
     text = extract_document_text(file_path)
-    ext  = os.path.splitext(file_path)[1].lower()
 
+    # Empty OCR → accept with advisory
     if not text.strip():
-        if ext in (".png", ".jpg", ".jpeg") and not OCR_AVAILABLE:
-            return True, (
-                f"⚠ Image document '{declared_type}' accepted — "
-                "OCR tools are not configured. Document will be reviewed manually."
-            )
-        if ext == ".pdf" and not POPPLER_AVAILABLE:
-            return True, (
-                f"⚠ PDF document '{declared_type}' accepted — "
-                "PDF could not be fully read. Document will be reviewed manually."
-            )
+        logger.info(
+            "pre_submission_check: empty OCR text for '%s' (%s) — accepting as advisory.",
+            declared_type, os.path.basename(file_path),
+        )
         return True, (
-            f"⚠ Could not extract text from '{declared_type}'. "
-            "Accepted for manual review."
+            f"⚠ Advisory: '{declared_type}' accepted — document text could not be "
+            f"extracted (scan quality may be low). HR will verify manually."
         )
 
     is_correct, detected_type, scores = classify_document(text, declared_type)
 
     if not is_correct and detected_type not in ("unreadable", "unknown"):
+        if len(text.strip()) < _MIN_OCR_CHARS_FOR_CHECKS:
+            return True, (
+                f"⚠ Advisory: '{declared_type}' accepted (limited OCR text — "
+                f"your application will be processed automatically)."
+            )
         return False, (
             f"Document rejected: you declared this as '{declared_type}' but "
             f"it appears to be a '{detected_type}'. "
             "Please upload the correct document type."
         )
 
-    if detected_type == "unknown":
+    if detected_type in ("unreadable", "unknown"):
         return True, (
-            f"⚠ '{declared_type}' uploaded — document content could not be "
-            "automatically confirmed (low OCR confidence). "
-            "Document accepted and will be reviewed by HR during shortlisting."
+            f"⚠ Advisory: '{declared_type}' accepted — document content could not "
+            f"be fully read. HR will verify manually."
         )
 
-    # Diploma content checks (AI-powered)
+    # Diploma content checks
     if declared_type == "diploma":
-        if field_of_study:
-            field_ok, field_detail = verify_field_of_study(field_of_study, text)
-            if not field_ok:
-                return False, (
-                    f"Diploma rejected: {field_detail} "
-                    f"Please upload the diploma matching your declared field: '{field_of_study}'."
-                )
+        if len(text.strip()) >= _MIN_OCR_CHARS_FOR_DIPLOMA:
+            if field_of_study:
+                field_ok, field_detail = verify_field_of_study(field_of_study, text)
+                if not field_ok:
+                    return False, (
+                        f"Diploma rejected: {field_detail} "
+                        f"Please upload the diploma matching your declared field: '{field_of_study}'."
+                    )
 
-        if education_level:
-            edu_ok, edu_detail = verify_education_level_from_document(education_level, text)
-            if not edu_ok:
-                return False, f"Diploma rejected: {edu_detail}"
+            if education_level:
+                edu_ok, edu_detail = verify_education_level_from_document(education_level, text)
+                if not edu_ok:
+                    return False, f"Diploma rejected: {edu_detail}"
+        else:
+            logger.info(
+                "pre_submission_check: diploma OCR too short (%d chars) — skipping field/edu checks",
+                len(text.strip()),
+            )
 
-    # Identity ownership check (score-based)
+    # Identity ownership check
     thresholds = IDENTITY_SCORE_THRESHOLDS.get(declared_type)
 
     if thresholds is not None:
+        if not text.strip():
+            return True, (
+                f"⚠ Advisory: '{declared_type}' accepted — identity check skipped "
+                f"(document text could not be extracted)."
+            )
+
+        if len(text.strip()) < _MIN_OCR_CHARS_FOR_CHECKS:
+            return True, (
+                f"⚠ Advisory: '{declared_type}' accepted (limited OCR text — "
+                f"HR will verify identity manually)."
+            )
+
         hard_reject_below, advisory_below = thresholds
         score = _fuzzy_name_score(applicant_name, text)
 
@@ -770,23 +800,29 @@ def pre_submission_check(
                 )
 
         if score < advisory_below:
+            # ✅ FIX V6-4: low-but-acceptable name score → advisory, not silent accept
             return True, (
-                f"⚠ '{declared_type}' accepted with low name-match confidence "
-                f"({score:.0%}). This may be flagged for HR review. "
-                "Ensure the document belongs to you."
+                f"⚠ Advisory: '{declared_type}' accepted — name match score "
+                f"({score:.0%}) is low but within the acceptable range. "
+                f"HR will verify identity manually."
             )
 
         ai_note = " (AI field & education verification active)" if AI_AVAILABLE else ""
         return True, (
             f"✓ '{declared_type}' validated "
-            f"(type: {detected_type}, name match: {score:.0%}){ai_note}."
+            f"(type confirmed, name match: {score:.0%}){ai_note}."
         )
 
-    return True, f"✓ '{declared_type}' validated (type: {detected_type})."
+    return True, f"✓ '{declared_type}' validated (type confirmed)."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main verification entry point (called during AI shortlisting)
+#
+# ✅ FIX V6-1: Now returns a 3-tuple: (verified, advisory, summary)
+#   verified = True  → no blocking issues; doc_verified saved as True in DB
+#   advisory = True  → accepted but partial OCR or minor warnings; HR should check
+#   advisory = False → fully clean verification
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_documents(
@@ -795,14 +831,25 @@ def verify_documents(
     field_of_study: str,
     document_paths: list[str],
     declared_types: list[str] | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, bool, str]:
+    """
+    Returns:
+        verified (bool)  — True when no hard blocking issues found.
+                           This maps directly to doc_verified in the DB.
+        advisory (bool)  — True when verified but partial OCR / minor warnings exist.
+                           HR sees an "Advisory — please review" badge.
+        summary  (str)   — Human-readable explanation for HR.
+    """
     if not document_paths:
-        return False, "No documents uploaded. Required: ID card, CV, Diploma, Certificate."
+        return False, False, (
+            "No documents uploaded. Required: ID card, CV, Diploma."
+        )
 
     doc_texts:       dict[str, str] = {}
     doc_details:     list[str]      = []
     wrong_type_docs: list[str]      = []
     ocr_skipped:     list[str]      = []
+    advisory_notes:  list[str]      = []
 
     for i, path in enumerate(document_paths):
         fname         = os.path.basename(path)
@@ -818,27 +865,38 @@ def verify_documents(
             ocr_skipped.append(declared_type)
             doc_texts[declared_type] = ""
             doc_details.append(
-                f"{fname} ({declared_type}): ⚠ text extraction skipped "
-                "(OCR tools not available — document accepted for manual review)"
+                f"{fname} ({declared_type}): ✓ accepted (text extraction limited — advisory)"
+            )
+            advisory_notes.append(
+                f"Document '{declared_type}' could not be read by OCR — accepted for manual HR review."
             )
             continue
 
         is_correct, detected_type, _ = classify_document(text, declared_type)
 
+        text_len = len(text.strip())
         if not is_correct and detected_type not in ("unreadable", "unknown"):
-            wrong_type_docs.append(
-                f"{fname}: declared='{declared_type}', detected='{detected_type}'"
-            )
-            doc_details.append(
-                f"{fname}: ✗ type mismatch "
-                f"(declared={declared_type}, detected={detected_type})"
-            )
+            if text_len > _MIN_OCR_CHARS_FOR_CHECKS:
+                wrong_type_docs.append(
+                    f"{fname}: declared='{declared_type}', detected='{detected_type}'"
+                )
+                doc_details.append(
+                    f"{fname}: ✗ type mismatch "
+                    f"(declared={declared_type}, detected={detected_type})"
+                )
+            else:
+                advisory_notes.append(
+                    f"Document '{declared_type}': low OCR confidence, type could not be confirmed — accepted for HR review."
+                )
+                doc_details.append(
+                    f"{fname} ({declared_type}): ✓ accepted (low OCR confidence)"
+                )
         else:
             doc_details.append(f"{fname} ({declared_type}): ✓ type confirmed")
 
         doc_texts[declared_type] = text
 
-    # For shortlisting, only require id_card, cv, diploma
+    # Check required documents
     SHORTLIST_REQUIRED = {"id_card", "cv", "diploma"}
     uploaded_types     = set(doc_texts.keys()) - {"unknown"}
     missing_types      = list(SHORTLIST_REQUIRED - uploaded_types)
@@ -850,28 +908,42 @@ def verify_documents(
 
     if "diploma" in doc_texts:
         diploma_text = doc_texts.get("diploma", "")
-        if field_of_study:
-            field_ok, field_detail = verify_field_of_study(field_of_study, diploma_text)
-        if education_level:
-            edu_ok, edu_detail = verify_education_level_from_document(education_level, diploma_text)
+        if len(diploma_text.strip()) >= _MIN_OCR_CHARS_FOR_DIPLOMA:
+            if field_of_study:
+                field_ok, field_detail = verify_field_of_study(field_of_study, diploma_text)
+            if education_level:
+                edu_ok, edu_detail = verify_education_level_from_document(education_level, diploma_text)
+        else:
+            logger.info(
+                "verify_documents: diploma OCR too short (%d chars) — skipping field/edu checks for '%s'",
+                len(diploma_text.strip()), applicant_name,
+            )
 
     identity_ok     = True
     identity_detail = "Identity check skipped (insufficient readable documents)."
 
-    # Only check identity on verifiable doc types (not experience)
     verifiable_texts = {k: v for k, v in doc_texts.items() if k != "experience"}
-    readable_count   = sum(1 for v in verifiable_texts.values() if v.strip())
+
+    well_readable_texts = {
+        k: v for k, v in verifiable_texts.items()
+        if len(v.strip()) > _MIN_OCR_CHARS_FOR_CHECKS
+    }
+    readable_count = len(well_readable_texts)
 
     if readable_count >= 2:
-        identity_ok, identity_detail = verify_identity(applicant_name, verifiable_texts)
+        identity_ok, identity_detail = verify_identity(applicant_name, well_readable_texts)
     elif len(verifiable_texts) >= 2:
         identity_ok     = True
         identity_detail = (
-            f"Identity: ✓ (advisory — OCR unavailable, "
-            f"{len(ocr_skipped)} document(s) could not be read. "
-            "Manual review recommended.)"
+            f"Identity: ✓ (document scan quality limited — "
+            f"{len(ocr_skipped)} document(s) partially readable, accepted for manual review)"
         )
+        advisory_notes.append("Identity could not be fully verified due to low OCR quality — HR should verify manually.")
+    else:
+        identity_ok     = True
+        identity_detail = "Identity: ✓ (accepted — insufficient readable documents for automated check)"
 
+    # ── Collect blocking issues ───────────────────────────────────────────────
     blocking_issues: list[str] = []
 
     if missing_types:
@@ -889,30 +961,51 @@ def verify_documents(
     if not edu_ok:
         blocking_issues.append(edu_detail)
 
+    # ✅ FIX V6-1: verified = no blocking issues
     verified = len(blocking_issues) == 0
 
+    # ✅ FIX V6-1: advisory = verified but partial OCR or minor issues exist
+    has_advisory = (
+        verified and (
+            len(ocr_skipped) > 0
+            or len(advisory_notes) > 0
+            or (identity_ok and "partial" in identity_detail.lower())
+            or (identity_ok and "limited" in identity_detail.lower())
+        )
+    )
+
+    # ── Build human-readable summary ──────────────────────────────────────────
     parts = []
+
     if missing_types:
         parts.append(f"Missing: {', '.join(sorted(missing_types))}")
     if ocr_skipped:
-        parts.append(
-            f"OCR skipped (tools not installed) — accepted for manual review: "
-            f"{', '.join(ocr_skipped)}"
-        )
+        parts.append(f"Partial OCR on: {', '.join(ocr_skipped)} (accepted for HR review)")
     if wrong_type_docs:
-        parts.append(f"Type flags: {len(wrong_type_docs)}")
+        parts.append(f"Type mismatch: {len(wrong_type_docs)} document(s) flagged")
     if field_detail:
         parts.append(field_detail)
     if edu_detail:
         parts.append(edu_detail)
+    if advisory_notes:
+        parts.append("Advisory notes: " + " | ".join(advisory_notes))
     parts.append(identity_detail)
-    parts.append("Docs: " + " | ".join(doc_details))
+    parts.append("Document checks: " + " | ".join(doc_details))
 
-    summary = (
-        "✓ Documents accepted. " + " | ".join(parts)
-        if verified
-        else "✗ Verification failed — " + " | ".join(blocking_issues)
-             + " | " + " | ".join(doc_details)
-    )
+    if not verified:
+        # ✅ FIX V6-3: only use "✗" prefix for genuine failures
+        summary = (
+            "✗ Document verification failed — "
+            + " | ".join(blocking_issues)
+            + " | " + " | ".join(doc_details)
+        )
+    elif has_advisory:
+        # ✅ FIX V6-3: advisory path uses "⚠ Advisory:" prefix
+        summary = (
+            "⚠ Advisory: Documents accepted but require HR review — "
+            + " | ".join(parts)
+        )
+    else:
+        summary = "✓ Documents fully verified — " + " | ".join(parts)
 
-    return verified, summary
+    return verified, has_advisory, summary

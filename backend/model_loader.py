@@ -5,37 +5,41 @@ Loads all ML artifacts from disk exactly once when the FastAPI
 app starts. Every other module imports the singletons below.
 
 FIXES APPLIED:
-  - job_requirements.pkl is loaded conditionally: if the file is
-    missing the server no longer crashes at startup — it falls back
-    to an empty dict and logs a warning. This artifact is not used
-    anywhere in the shortlisting pipeline so its absence is safe.
+  ✅ FIX LOAD-1 — job_requirements.pkl loaded conditionally (missing
+     file no longer crashes startup).
 
-  - ✅ FIX: Suppressed harmless BertModel LOAD REPORT warning
-    ("embeddings.position_ids | UNEXPECTED") that appears when
-    loading sentence-transformers/all-MiniLM-L6-v2. The weight
-    loads successfully (103/103); this is just a version mismatch
-    in a non-trainable buffer — safe to ignore.
+  ✅ FIX LOAD-2 — Suppressed harmless BertModel LOAD REPORT warning
+     ("embeddings.position_ids | UNEXPECTED").
+
+  ✅ FIX LOAD-3 — feature_columns, label_encoders, scaler wrapped in
+     try/except with descriptive errors instead of bare FileNotFoundError
+     propagating up through lifespan and leaving _APP_READY = False.
+
+  ✅ FIX LOAD-4 — Added _ARTIFACTS_OK flag so main.py can check
+     whether ML artifacts loaded correctly independently of whether
+     the sentence-transformers model loaded.
+
+  ✅ FIX LOAD-5 — Calibrated model path uses os.path.join consistently
+     (was mixing styles across platforms).
 """
 
 import os
 import logging
 import warnings
+
 import joblib
 
 # ── Suppress harmless transformer/sentence-transformers warnings ──────────────
-# The "embeddings.position_ids | UNEXPECTED" message is a known cosmetic warning
-# from loading all-MiniLM-L6-v2 across slightly different transformers versions.
-# All 103 weights load correctly — this just silences the noise.
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*UNEXPECTED.*",
-    category=UserWarning,
-)
+warnings.filterwarnings("ignore", message=r".*UNEXPECTED.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*were not sharded.*", category=UserWarning)
 # ─────────────────────────────────────────────────────────────────────────────
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ✅ FIX LOAD-4: public flag so callers can check load health
+_ARTIFACTS_OK: bool = False
 
 
 def _load(filename: str):
@@ -50,31 +54,55 @@ def _load(filename: str):
 
 # ── Singletons (loaded once at import time) ──────────────────────────────────
 
-# Try calibrated model first; fall back to original
-calibrated_path = os.path.join(BASE_DIR, "calibrated_model.pkl")
-if os.path.exists(calibrated_path):
-    model = joblib.load(calibrated_path)
-    print("✓ Loaded calibrated model (calibrated_model.pkl)")
-else:
-    model = _load("model.pkl")
-    print("✓ Loaded original model (model.pkl)")
+# ✅ FIX LOAD-3: wrap core artifacts in try/except so a missing file
+# surfaces a clear error at startup rather than an opaque crash.
+try:
+    # ✅ FIX LOAD-5: consistent os.path.join usage
+    calibrated_path = os.path.join(BASE_DIR, "calibrated_model.pkl")
+    original_path   = os.path.join(BASE_DIR, "model.pkl")
 
-feature_columns = _load("feature_columns.pkl")   # list[str] — exact column order
-label_encoders  = _load("label_encoders.pkl")    # dict[str, LabelEncoder]
-scaler          = _load("scaler.pkl")             # StandardScaler
+    if os.path.exists(calibrated_path):
+        model = joblib.load(calibrated_path)
+        print("[model_loader] ✓ Loaded calibrated model (calibrated_model.pkl)")
+    elif os.path.exists(original_path):
+        model = joblib.load(original_path)
+        print("[model_loader] ✓ Loaded original model (model.pkl)")
+    else:
+        raise FileNotFoundError(
+            "Neither calibrated_model.pkl nor model.pkl found in backend/. "
+            "Run the training notebook to generate them."
+        )
 
-# ✅ FIX: job_requirements is not used in shortlisting_engine.py.
-#    Load it only if the file exists so a missing file doesn't crash startup.
+    feature_columns = _load("feature_columns.pkl")   # list[str] — exact column order
+    label_encoders  = _load("label_encoders.pkl")     # dict[str, LabelEncoder]
+    scaler          = _load("scaler.pkl")             # StandardScaler
+
+    _ARTIFACTS_OK = True
+    print("[model_loader] ✓ All core ML artifacts loaded successfully")
+    print(f"  Model    : {type(model).__name__}")
+    print(f"  Features : {len(feature_columns)}")
+    print(f"  Encoders : {list(label_encoders.keys())}")
+
+except Exception as _load_exc:
+    # ✅ FIX LOAD-3: provide safe fallback values so imports don't crash
+    # the whole process — main.py will surface the error via /health.
+    model           = None  # type: ignore[assignment]
+    feature_columns = []    # type: ignore[assignment]
+    label_encoders  = {}    # type: ignore[assignment]
+    scaler          = None  # type: ignore[assignment]
+    _ARTIFACTS_OK   = False
+    print(f"[model_loader] ⚠️  Failed to load ML artifacts: {_load_exc!r}")
+    print("[model_loader] ⚠️  Server will start in degraded mode (shortlisting disabled).")
+
+# ── Optional: job_requirements (not used in shortlisting pipeline) ────────────
 _job_req_path = os.path.join(BASE_DIR, "job_requirements.pkl")
 if os.path.exists(_job_req_path):
-    job_requirements = joblib.load(_job_req_path)
+    try:
+        job_requirements = joblib.load(_job_req_path)
+        print(f"[model_loader] ✓ job_requirements loaded ({len(job_requirements)} job types)")
+    except Exception as _jr_exc:
+        job_requirements = {}
+        print(f"[model_loader] ⚠️  job_requirements.pkl found but failed to load: {_jr_exc!r}")
 else:
     job_requirements = {}
-    print("⚠ job_requirements.pkl not found — using empty dict (non-critical)")
-
-print("✓ All ML artifacts loaded successfully")
-print(f"  Model        : {type(model).__name__}")
-print(f"  Features     : {len(feature_columns)}")
-print(f"  Encoders     : {list(label_encoders.keys())}")
-if job_requirements:
-    print(f"  Job types    : {list(job_requirements.keys())}")
+    print("[model_loader] ⚠️  job_requirements.pkl not found — using empty dict (non-critical)")

@@ -57,8 +57,86 @@ def _validate_config() -> None:
 _validate_config()
 
 
-# ── HTML email template ───────────────────────────────────────────────────────
-def _build_html(to_name: str, reset_link: str) -> str:
+# ── Low-level Brevo sender ────────────────────────────────────────────────────
+def _send_brevo_email(
+    to_name: str,
+    to_email: str,
+    subject: str,
+    html_content: str,
+    text_content: str,
+) -> bool:
+    """
+    Core Brevo HTTP API call. Shared by all email-sending functions.
+    Returns True on success, False on failure. Never raises.
+    """
+    if not BREVO_API_KEY or not MAIL_FROM:
+        print(
+            "[email_utils] ❌ Cannot send — BREVO_API_KEY or MAIL_FROM not set.\n"
+            "              Add them in Render Dashboard → Environment."
+        )
+        return False
+
+    payload = json.dumps({
+        "sender":      {"name": MAIL_FROM_NAME, "email": MAIL_FROM},
+        "to":          [{"name": to_name, "email": to_email}],
+        "subject":     subject,
+        "htmlContent": html_content,
+        "textContent": text_content,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        BREVO_API_URL,
+        data    = payload,
+        headers = {
+            "api-key":      BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
+        },
+        method = "POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body   = resp.read().decode("utf-8")
+            data   = json.loads(body)
+            msg_id = data.get("messageId", "unknown")
+            print(f"[email_utils] ✅ Email sent to {to_email} via Brevo (messageId={msg_id}).")
+            return True
+
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        try:
+            err = json.loads(body)
+            msg = err.get("message") or str(err)
+        except Exception:
+            msg = body
+
+        if e.code == 401:
+            print(
+                "[email_utils] ❌ Brevo 401 — API key invalid.\n"
+                "              Generate a new key: Brevo Dashboard → SMTP & API → API keys & MCP\n"
+                f"              Detail: {msg}"
+            )
+        elif e.code == 400:
+            print(
+                f"[email_utils] ❌ Brevo 400 — Bad request: {msg}\n"
+                "              Most likely: MAIL_FROM email is not verified in Brevo."
+            )
+        elif e.code == 429:
+            print(f"[email_utils] ❌ Brevo 429 — Daily limit reached (300/day on free tier). Detail: {msg}")
+        else:
+            print(f"[email_utils] ❌ Brevo HTTP {e.code}: {msg}")
+
+    except urllib.error.URLError as e:
+        print(f"[email_utils] ❌ Could not reach Brevo API: {e.reason}")
+    except Exception as e:
+        print(f"[email_utils] ❌ Unexpected error: {type(e).__name__}: {e}")
+
+    return False
+
+
+# ── Password Reset Email ──────────────────────────────────────────────────────
+def _build_reset_html(to_name: str, reset_link: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -146,7 +224,7 @@ def _build_html(to_name: str, reset_link: str) -> str:
 </html>"""
 
 
-def _build_plain(to_name: str, reset_link: str) -> str:
+def _build_reset_plain(to_name: str, reset_link: str) -> str:
     return f"""Hi {to_name},
 
 We received a request to reset the password for your Shortlisting AI account.
@@ -161,97 +239,164 @@ If you did not request this, you can safely ignore this email.
 """
 
 
-# ── Send via Brevo HTTP API ───────────────────────────────────────────────────
 def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
     """
-    Send a password-reset email via Brevo HTTP API (port 443).
-    Works on Render free tier. Sends to ANY email address.
-    Uses only Python stdlib (urllib) — no extra packages needed.
+    Send a password-reset email via Brevo HTTP API.
     Returns True on success, False on failure. Never raises.
     """
-    if not BREVO_API_KEY or not MAIL_FROM:
-        print(
-            "[email_utils] ❌ Cannot send — BREVO_API_KEY or MAIL_FROM not set.\n"
-            "              Add them in Render Dashboard → Environment."
-        )
-        _print_dev_fallback(to_name, to_email, reset_link)
-        return False
-
-    payload = json.dumps({
-        "sender": {
-            "name":  MAIL_FROM_NAME,
-            "email": MAIL_FROM,
-        },
-        "to": [
-            {"name": to_name, "email": to_email}
-        ],
-        "subject":     "Reset your Shortlisting AI password",
-        "htmlContent": _build_html(to_name, reset_link),
-        "textContent": _build_plain(to_name, reset_link),
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        BREVO_API_URL,
-        data    = payload,
-        headers = {
-            "api-key":      BREVO_API_KEY,
-            "Content-Type": "application/json",
-            "Accept":       "application/json",
-        },
-        method = "POST",
+    success = _send_brevo_email(
+        to_name      = to_name,
+        to_email     = to_email,
+        subject      = "Reset your Shortlisting AI password",
+        html_content = _build_reset_html(to_name, reset_link),
+        text_content = _build_reset_plain(to_name, reset_link),
     )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body   = resp.read().decode("utf-8")
-            data   = json.loads(body)
-            msg_id = data.get("messageId", "unknown")
-            print(f"[email_utils] ✅ Reset email sent to {to_email} via Brevo (messageId={msg_id}).")
-            return True
-
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
-        try:
-            err = json.loads(body)
-            msg = err.get("message") or str(err)
-        except Exception:
-            msg = body
-
-        if e.code == 401:
-            print(
-                "[email_utils] ❌ Brevo 401 — API key invalid.\n"
-                "              Generate a new key: Brevo Dashboard → SMTP & API → API keys & MCP\n"
-                "              Then update BREVO_API_KEY in Render Environment.\n"
-                f"              Detail: {msg}"
-            )
-        elif e.code == 400:
-            print(
-                f"[email_utils] ❌ Brevo 400 — Bad request: {msg}\n"
-                "              Most likely: MAIL_FROM email is not verified in Brevo.\n"
-                "              Fix: Brevo Dashboard → Senders, domains, IPs → Senders → verify email."
-            )
-        elif e.code == 429:
-            print(
-                "[email_utils] ❌ Brevo 429 — Daily limit reached (300/day on free tier).\n"
-                f"              Detail: {msg}"
-            )
-        else:
-            print(f"[email_utils] ❌ Brevo HTTP {e.code}: {msg}")
-
-    except urllib.error.URLError as e:
-        print(f"[email_utils] ❌ Could not reach Brevo API: {e.reason}")
-    except Exception as e:
-        print(f"[email_utils] ❌ Unexpected error: {type(e).__name__}: {e}")
-
-    _print_dev_fallback(to_name, to_email, reset_link)
-    return False
+    if not success:
+        _print_dev_fallback(to_name, to_email, reset_link)
+    return success
 
 
 def _print_dev_fallback(to_name: str, to_email: str, reset_link: str) -> None:
-    """Prints the reset link to logs when email fails — copy this link manually."""
     print("\n" + "═" * 70)
     print("  PASSWORD RESET — EMAIL FAILED, USE THIS LINK MANUALLY")
     print(f"  User  : {to_name} <{to_email}>")
     print(f"  Link  : {reset_link}")
     print(f"  Expiry: 15 minutes from now")
     print("═" * 70 + "\n")
+
+
+# ── ✅ NEW: HR Invite Code Email ───────────────────────────────────────────────
+def _build_invite_html(to_name: str, invite_code: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Your HR Invite Code</title>
+</head>
+<body style="margin:0;padding:0;background:#f0f4ff;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4ff;padding:40px 16px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0"
+             style="max-width:520px;background:#ffffff;border-radius:16px;
+                    box-shadow:0 4px 32px rgba(0,0,0,.10);overflow:hidden;">
+        <tr>
+          <td style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 60%,#1d4ed8 100%);
+                     padding:32px 40px;text-align:center;">
+            <div style="font-size:2.5rem;margin-bottom:12px;">🔐</div>
+            <div style="display:inline-block;background:rgba(255,255,255,.15);
+                        border:1px solid rgba(255,255,255,.3);border-radius:99px;
+                        padding:5px 18px;font-size:11px;font-weight:700;
+                        letter-spacing:.08em;text-transform:uppercase;color:#ffffff;
+                        margin-bottom:16px;">
+              HR Access
+            </div>
+            <h1 style="margin:0;font-size:26px;font-weight:800;color:#ffffff;line-height:1.2;">
+              Your HR Invite Code
+            </h1>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:36px 40px;">
+            <p style="margin:0 0 8px;font-size:16px;color:#374151;">
+              Hi <strong>{to_name}</strong>,
+            </p>
+            <p style="margin:0 0 24px;font-size:15px;color:#6b7280;line-height:1.7;">
+              Your request for an <strong>HR account invite code</strong> on
+              <strong>Shortlisting AI</strong> has been approved. Use the code
+              below when registering as <em>HR / Recruiter</em>.
+            </p>
+
+            <!-- Invite code box -->
+            <div style="background:#f0f4ff;border:2px dashed #2563eb;border-radius:12px;
+                        padding:24px;text-align:center;margin-bottom:28px;">
+              <div style="font-size:11px;font-weight:700;letter-spacing:.12em;
+                          text-transform:uppercase;color:#6b7280;margin-bottom:10px;">
+                HR Invite Code
+              </div>
+              <div style="font-size:1.6rem;font-weight:800;color:#1e3a5f;
+                          letter-spacing:.06em;font-family:monospace;">
+                {invite_code}
+              </div>
+            </div>
+
+            <!-- Steps -->
+            <div style="background:#f9fafb;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
+              <div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:12px;">
+                How to use this code:
+              </div>
+              <ol style="margin:0;padding-left:18px;font-size:13px;color:#6b7280;line-height:2;">
+                <li>Go to the <strong>Register</strong> page</li>
+                <li>Select <strong>HR / Recruiter</strong> as your role</li>
+                <li>Enter the invite code above in the HR Invite Code field</li>
+                <li>Complete registration and sign in</li>
+              </ol>
+            </div>
+
+            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;
+                        padding:12px 16px;margin-bottom:24px;">
+              <p style="margin:0;font-size:13px;color:#991b1b;">
+                🔒 <strong>Keep this code private.</strong> Do not share it publicly.
+                It grants full access to candidate data and shortlisting tools.
+              </p>
+            </div>
+
+            <p style="margin:0;font-size:13px;color:#9ca3af;line-height:1.6;">
+              If you did not request this code, please ignore this email.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 40px 28px;border-top:1px solid #e5e7eb;text-align:center;">
+            <p style="margin:0;font-size:12px;color:#9ca3af;">
+              © 2025 Shortlisting AI · This is an automated message, please do not reply.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _build_invite_plain(to_name: str, invite_code: str) -> str:
+    return f"""Hi {to_name},
+
+Your HR invite code for Shortlisting AI is:
+
+  {invite_code}
+
+How to use it:
+1. Go to the Register page
+2. Select HR / Recruiter as your role
+3. Enter the invite code above
+4. Complete registration and sign in
+
+Keep this code private — it grants full HR access.
+
+If you did not request this, please ignore this email.
+
+— The Shortlisting AI Team
+"""
+
+
+def send_hr_invite_email(to_name: str, to_email: str, invite_code: str) -> bool:
+    """
+    Send the HR invite code to the requester's email via Brevo.
+    Returns True on success, False on failure. Never raises.
+    """
+    success = _send_brevo_email(
+        to_name      = to_name,
+        to_email     = to_email,
+        subject      = "Your HR Invite Code — Shortlisting AI",
+        html_content = _build_invite_html(to_name, invite_code),
+        text_content = _build_invite_plain(to_name, invite_code),
+    )
+    if not success:
+        print("\n" + "═" * 70)
+        print("  HR INVITE — EMAIL FAILED, CODE FOR MANUAL SHARING:")
+        print(f"  Recipient : {to_name} <{to_email}>")
+        print(f"  Code      : {invite_code}")
+        print("═" * 70 + "\n")
+    return success

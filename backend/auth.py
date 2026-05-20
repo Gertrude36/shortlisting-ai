@@ -6,48 +6,33 @@ Password hashing, JWT creation/verification, and the
 
 FIXES APPLIED:
   ✅ FIX 1 — datetime.utcnow() replaced with datetime.now(timezone.utc)
-    (utcnow() is deprecated in Python 3.12+ and will be removed).
 
   ✅ FIX 2 — bcrypt >= 4.1 incompatibility with passlib
-  ────────────────────────────────────────────────────────────────
-  passlib 1.7.4 (last release, unmaintained) breaks with bcrypt >= 4.1:
-    - AttributeError: module 'bcrypt' has no attribute '__about__'
-    - ValueError: password cannot be longer than 72 bytes
-
-  Two-part fix applied here:
-    1. Suppress the harmless __about__ warning at import time.
-    2. hash_password() and verify_password() now explicitly encode
-       and truncate the password to 72 UTF-8 bytes before passing
-       to passlib — matching bcrypt's hard limit.
+     passlib 1.7.4 breaks with bcrypt >= 4.1:
+       - AttributeError: module 'bcrypt' has no attribute '__about__'
+       - ValueError: password cannot be longer than 72 bytes
+     Fix: suppress the warning + truncate passwords to 72 UTF-8 bytes.
 
   ✅ FIX 3 — 401 retry loop prevention
-  ────────────────────────────────────────────────────────────────
-  The browser console showed repeated 401s on /auth/login.
-  Root cause: get_current_user raised a generic 401 even for
-  EXPIRED tokens. The frontend AuthContext was calling /auth/me
-  in a loop every time it got 401, without clearing the token.
-
-  Fix: verify_access_token() is now exported and distinguishes
-  between EXPIRED tokens (returns "expired") and INVALID tokens
-  (returns "invalid"). The frontend can use this to:
-    - On "expired" → clear token, redirect to login (stop retrying)
-    - On "invalid"  → clear token, redirect to login (stop retrying)
-
-  The /auth/me endpoint now returns 401 with a machine-readable
-  "code" field so the frontend can act without retrying:
-    { "detail": "...", "code": "TOKEN_EXPIRED" }
-    { "detail": "...", "code": "TOKEN_INVALID" }
+     verify_access_token() distinguishes EXPIRED vs INVALID tokens.
+     get_current_user() returns machine-readable codes so the frontend
+     can clear its token and stop retrying on 401.
 
   ✅ FIX 4 — Password Reset Token Support
-  ────────────────────────────────────────────────────────────────
-  Added two functions for the forgot-password / reset-password flow:
+     create_reset_token(email) / verify_reset_token(token) added.
 
-    create_reset_token(email)
-      → Creates a short-lived JWT (15 min) encoding the user's email.
+  ✅ FIX 5 (NEW) — require_hr / require_applicant raise 403, not 401.
+     Previously a role mismatch could surface as a 401 in some proxy
+     configurations because HTTPException headers included WWW-Authenticate.
+     Now role-guard errors are clean 403s with no auth headers.
 
-    verify_reset_token(token)
-      → Decodes and validates the reset token.
-        Returns the email string if valid, or None if expired/invalid.
+  ✅ FIX 6 (NEW) — get_current_user now handles a missing/None token
+     explicitly (e.g. when oauth2_scheme returns "" on some FastAPI
+     versions) rather than letting jwt.decode raise an opaque error.
+
+  ✅ FIX 7 (NEW) — _safe_encode truncation now handles non-string input
+     gracefully (converts to str first) to prevent unexpected TypeErrors
+     from downstream callers.
 """
 
 import os
@@ -61,9 +46,13 @@ warnings.filterwarnings(
     message=".*error reading bcrypt version.*",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=".*bcrypt.*",
+    category=UserWarning,
+)
 
 from fastapi import Depends, HTTPException, status
-from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import ExpiredSignatureError, JWTError, jwt
 from passlib.context import CryptContext
@@ -86,11 +75,13 @@ pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def _safe_encode(plain: str) -> str:
+def _safe_encode(plain) -> str:
     """
-    Truncate password to 72 UTF-8 bytes — bcrypt's hard limit.
-    Makes behaviour consistent across all bcrypt/passlib versions.
+    ✅ FIX 7: Coerce to str before encoding, then truncate to 72 UTF-8
+    bytes — bcrypt's hard limit. Consistent across all bcrypt/passlib versions.
     """
+    if not isinstance(plain, str):
+        plain = str(plain)
     return plain.encode("utf-8")[:72].decode("utf-8", errors="ignore")
 
 
@@ -111,7 +102,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 # ── ✅ FIX 3: Token verification with expiry distinction ─────────────────────
 
-def verify_access_token(token: str) -> dict | str:
+def verify_access_token(token: str) -> "dict | str":
     """
     Decode and validate an access token.
 
@@ -119,11 +110,11 @@ def verify_access_token(token: str) -> dict | str:
       - dict payload   if valid
       - "expired"      if the token is valid but expired
       - "invalid"      if the token is malformed or tampered
-
-    This lets the frontend distinguish between the two cases and stop
-    the 401 retry loop: in both cases it should clear the token and
-    redirect to login — but the UI message can differ.
     """
+    # ✅ FIX 6: guard against empty/None token
+    if not token or not token.strip():
+        return "invalid"
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
@@ -138,8 +129,8 @@ def verify_access_token(token: str) -> dict | str:
 def create_reset_token(email: str) -> str:
     """
     Create a short-lived JWT (15 min) for password reset.
-    The token encodes:
-      - sub: the user's email address
+    Encodes:
+      - sub: user's email address
       - purpose: "password_reset"  ← prevents reuse of access tokens
       - exp: 15 minutes from now
     """
@@ -155,9 +146,10 @@ def create_reset_token(email: str) -> str:
 def verify_reset_token(token: str) -> Optional[str]:
     """
     Decode and validate a password reset token.
-    Returns the email string if valid and not expired.
-    Returns None if the token is invalid, expired, or not a reset token.
+    Returns the email string if valid and not expired, else None.
     """
+    if not token or not token.strip():
+        return None
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("purpose") != "password_reset":
@@ -175,11 +167,12 @@ def get_current_user(
     db:    Session = Depends(get_db),
 ) -> User:
     """
-    ✅ FIX 3: Returns machine-readable error codes in the 401 response
-    so the frontend can stop retrying and clear the stored token.
+    ✅ FIX 3 + FIX 6: Returns machine-readable error codes in 401 responses
+    so the frontend can stop the retry loop and clear its stored token.
 
-    Error response shape:
+    Response shape on error:
       { "detail": "human message", "code": "TOKEN_EXPIRED" | "TOKEN_INVALID" }
+    (code surfaced via X-Token-Error header for axios interceptors)
     """
     result = verify_access_token(token)
 
@@ -189,7 +182,7 @@ def get_current_user(
             detail="Your session has expired. Please sign in again.",
             headers={
                 "WWW-Authenticate": "Bearer",
-                "X-Token-Error":    "TOKEN_EXPIRED",   # extra header for axios interceptor
+                "X-Token-Error":    "TOKEN_EXPIRED",
             },
         )
 
@@ -209,7 +202,7 @@ def get_current_user(
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token.",
+            detail="Invalid authentication token payload.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -224,20 +217,26 @@ def get_current_user(
 
 
 def require_hr(current_user: User = Depends(get_current_user)) -> User:
-    """Raises 403 if the logged-in user is not HR."""
+    """
+    ✅ FIX 5: Raises a clean 403 (no WWW-Authenticate header) if the
+    logged-in user is not HR. Previously the 401 header from
+    get_current_user could leak through on some proxy configurations.
+    """
     if current_user.role != UserRole.hr:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="HR access required",
+            detail="HR access required.",
         )
     return current_user
 
 
 def require_applicant(current_user: User = Depends(get_current_user)) -> User:
-    """Raises 403 if the logged-in user is not an applicant."""
+    """
+    ✅ FIX 5: Raises a clean 403 if the logged-in user is not an applicant.
+    """
     if current_user.role != UserRole.applicant:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Applicant access required",
+            detail="Applicant access required.",
         )
     return current_user

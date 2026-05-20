@@ -1,40 +1,30 @@
 """
-backend/ocr_service.py
+backend/ocr_service.py  ·  v6.0.0
 ────────────────────────────────────────────────────────────────
-WHAT WAS FIXED IN THIS VERSION:
+FIXES IN THIS VERSION:
 
-  ✅ FIX 1 — Multi-language OCR (eng+fra)
-  ───────────────────────────────────────────────────────────────
-  Previously: OCR_LANG was hardcoded to "eng" only.
-  Rwanda National IDs contain French text ("AGENCE NATIONALE
-  D'IDENTIFICATION", "DATE DE NAISSANCE", "NOM DE FAMILLE").
-  English-only OCR missed all of this, causing keyword misses
-  in document_verifier.py's id_card classifier.
+  ✅ FIX 1 — Advanced OpenCV preprocessing pipeline (matches ocr_utils.py)
+     • Deskewing    — corrects tilted documents (up to ±20°)
+     • Denoising    — removes camera/compression noise
+     • Upscaling    — enlarges small images to ≥1200px wide before OCR
+     • CLAHE        — adaptive histogram equalisation for uneven lighting
+     • Binarisation — Otsu and adaptive threshold both tried
+     • Morphology   — closes character gaps
 
-  Now: Attempts "eng+fra" first, falls back to "eng" if the
-  French language pack is not installed.
+  ✅ FIX 2 — Multi-strategy preprocessing
+     Four strategies tried per image; the one yielding the most
+     usable text wins automatically.
 
-  Install French language pack:
-    Linux:   sudo apt install tesseract-ocr-fra
-    Windows: re-run Tesseract installer → tick "French"
-    Mac:     brew install tesseract-lang
+  ✅ FIX 3 — PSM 11, 6, 3, 4 all tried; best result returned
+     PSM 11 (sparse text) is particularly good for ID cards with
+     grid/table layouts.
 
-  ✅ FIX 2 — Multiple PSM modes tried per image
-  ───────────────────────────────────────────────────────────────
-  Previously: OCR_CONFIG = "--psm 6" only (assume uniform text block).
-  This fails on ID cards with grid/table layouts.
+  ✅ FIX 4 — Multi-language OCR (eng+fra) with safe fallback
+     Rwanda National IDs contain French text. Falls back to eng
+     if fra Tesseract data is not installed.
 
-  Now: Tries PSM 6, PSM 3, and PSM 11 for each image, returns
-  whichever yields the most extracted text.
-
-  ✅ FIX 3 — Image pre-processing before OCR
-  ───────────────────────────────────────────────────────────────
-  Added grayscale conversion, auto-contrast, and sharpening
-  before passing images to Tesseract — dramatically improves
-  accuracy on photos of ID cards and low-quality scans.
-
-  ✅ RETAINED — All previous functionality (Flask routes, PDF
-  support, batch endpoint, file size limits, etc.)
+  ✅ RETAINED — All Flask routes, PDF support, batch endpoint,
+     file size limits, health check.
 """
 
 import os
@@ -42,8 +32,9 @@ import io
 import traceback
 import logging
 
+import numpy as np
 from flask import Flask, request, jsonify
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 logger = logging.getLogger(__name__)
@@ -51,32 +42,38 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Windows Tesseract path
 # ─────────────────────────────────────────────────────────────────────────────
-
 _WIN_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 if os.path.exists(_WIN_PATH):
     pytesseract.pytesseract.tesseract_cmd = _WIN_PATH
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Optional OpenCV
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("[WARN] opencv-python not installed — advanced preprocessing disabled. "
+          "Run: pip install opencv-python")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Optional PDF support
 # ─────────────────────────────────────────────────────────────────────────────
-
 try:
     from pdf2image import convert_from_bytes
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
-    print("[WARN] pdf2image not installed — PDF OCR disabled. Run: pip install pdf2image")
+    print("[WARN] pdf2image not installed — PDF OCR disabled. "
+          "Run: pip install pdf2image")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 1 — Determine best available language string
+# Language detection
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_ocr_language() -> str:
-    """
-    Try to use eng+fra (for Rwanda IDs with French text).
-    Falls back to eng-only if French Tesseract data is not installed.
-    """
     try:
         available = pytesseract.get_languages()
         if "fra" in available:
@@ -84,7 +81,6 @@ def _resolve_ocr_language() -> str:
             return "eng+fra"
         logger.warning(
             "⚠ French Tesseract data not installed — using 'eng' only. "
-            "Rwanda IDs may not be fully read. "
             "Linux fix: sudo apt install tesseract-ocr-fra"
         )
         return "eng"
@@ -96,8 +92,9 @@ OCR_LANG = _resolve_ocr_language()
 
 app = Flask(__name__)
 
-MAX_FILE_SIZE_MB    = 20
-ALLOWED_EXTENSIONS  = {"png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp", "pdf"}
+MAX_FILE_SIZE_MB   = 20
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp", "pdf"}
+_PSM_MODES         = (11, 6, 3, 4)
 
 
 def allowed_file(filename: str) -> bool:
@@ -105,45 +102,163 @@ def allowed_file(filename: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 3 — Image pre-processing for better OCR accuracy
+# ✅ FIX 1 — OpenCV preprocessing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _preprocess(img: Image.Image) -> Image.Image:
-    """
-    Prepare an image for Tesseract:
-      1. Convert to grayscale (reduces colour noise)
-      2. Auto-contrast (handles uneven lighting on photos of ID cards)
-      3. Sharpen (improves edge definition for OCR)
-      4. Boost contrast (makes text stand out from background)
-    """
-    img = img.convert("L")                          # grayscale
-    img = ImageOps.autocontrast(img, cutoff=2)      # auto-levels
-    img = ImageEnhance.Sharpness(img).enhance(2.0)  # sharpen
-    img = ImageEnhance.Contrast(img).enhance(1.5)   # boost contrast
-    return img
+def _pil_to_cv2(img: Image.Image) -> np.ndarray:
+    return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+
+def _cv2_to_pil(arr: np.ndarray) -> Image.Image:
+    if len(arr.shape) == 2:
+        return Image.fromarray(arr)
+    return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
+
+
+def _deskew(grey: np.ndarray) -> np.ndarray:
+    try:
+        edges = cv2.Canny(grey, 50, 150, apertureSize=3)
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, threshold=80,
+            minLineLength=grey.shape[1] // 4, maxLineGap=20
+        )
+        if lines is None or len(lines) == 0:
+            return grey
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x2 != x1:
+                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                if abs(angle) < 20:
+                    angles.append(angle)
+        if not angles:
+            return grey
+        median_angle = float(np.median(angles))
+        if abs(median_angle) < 0.5:
+            return grey
+        h, w = grey.shape
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), median_angle, 1.0)
+        return cv2.warpAffine(grey, M, (w, h),
+                              flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE)
+    except Exception:
+        return grey
+
+
+def _upscale_if_small(grey: np.ndarray, min_width: int = 1200) -> np.ndarray:
+    h, w = grey.shape
+    if w < min_width:
+        scale = min_width / w
+        grey  = cv2.resize(grey, (int(w * scale), int(h * scale)),
+                           interpolation=cv2.INTER_CUBIC)
+    return grey
+
+
+def _denoise(grey: np.ndarray) -> np.ndarray:
+    try:
+        return cv2.fastNlMeansDenoising(grey, None, h=10,
+                                        templateWindowSize=7,
+                                        searchWindowSize=21)
+    except Exception:
+        return grey
+
+
+def _clahe(grey: np.ndarray) -> np.ndarray:
+    try:
+        return cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey)
+    except Exception:
+        return grey
+
+
+def _binarise_otsu(grey: np.ndarray) -> np.ndarray:
+    try:
+        _, binary = cv2.threshold(grey, 0, 255,
+                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return binary
+    except Exception:
+        return grey
+
+
+def _binarise_adaptive(grey: np.ndarray) -> np.ndarray:
+    try:
+        return cv2.adaptiveThreshold(grey, 255,
+                                     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY, 31, 10)
+    except Exception:
+        return grey
+
+
+def _morph_clean(binary: np.ndarray) -> np.ndarray:
+    try:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    except Exception:
+        return binary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX 2 — Try multiple PSM modes, return best result
+# ✅ FIX 2 — Multi-strategy preprocessing variants
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ocr_best_psm(img: Image.Image) -> str:
-    """
-    Run Tesseract with PSM 6, 3, and 11, return the result with most text.
+def _build_variants(img: Image.Image) -> list[Image.Image]:
+    variants: list[Image.Image] = []
 
-    PSM 6  = assume a uniform block of text
-    PSM 3  = fully automatic page segmentation (general purpose)
-    PSM 11 = sparse text — find as much text as possible (best for ID cards)
+    # Strategy C — PIL only (always available)
+    try:
+        pil = img.convert("L")
+        pil = ImageOps.autocontrast(pil, cutoff=2)
+        pil = ImageEnhance.Sharpness(pil).enhance(2.5)
+        pil = ImageEnhance.Contrast(pil).enhance(1.8)
+        variants.append(pil)
+    except Exception:
+        pass
 
-    Uses the resolved multi-language string (eng+fra or eng).
-    """
+    if not CV2_AVAILABLE:
+        return variants or [img]
+
+    try:
+        grey = cv2.cvtColor(_pil_to_cv2(img), cv2.COLOR_BGR2GRAY)
+
+        # Strategy A — CLAHE + adaptive (best for phone photos)
+        try:
+            g = _morph_clean(_binarise_adaptive(_clahe(_denoise(_deskew(_upscale_if_small(grey.copy()))))))
+            variants.insert(0, _cv2_to_pil(g))
+        except Exception:
+            pass
+
+        # Strategy B — CLAHE + Otsu (best for clean scans)
+        try:
+            g = _binarise_otsu(_clahe(_denoise(_deskew(_upscale_if_small(grey.copy())))))
+            variants.append(_cv2_to_pil(g))
+        except Exception:
+            pass
+
+        # Strategy D — upscaled original
+        try:
+            g = _upscale_if_small(grey.copy(), min_width=2400)
+            variants.append(_cv2_to_pil(g))
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+    return variants or [img]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ FIX 3 — Multi-PSM OCR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ocr_one(img: Image.Image) -> str:
     best = ""
-    for psm in (6, 3, 11):
+    for psm in _PSM_MODES:
         try:
             result = pytesseract.image_to_string(
-                img, lang=OCR_LANG, config=f"--psm {psm}"
+                img, lang=OCR_LANG, config=f"--psm {psm} --oem 3"
             ).strip()
-            if len(result) > len(best):
+            if len(result.replace(" ", "").replace("\n", "")) > \
+               len(best.replace(" ", "").replace("\n", "")):
                 best = result
         except Exception as exc:
             logger.debug("PSM %d failed: %s", psm, exc)
@@ -151,32 +266,21 @@ def _ocr_best_psm(img: Image.Image) -> str:
 
 
 def ocr_image(image: Image.Image) -> str:
-    """
-    OCR a single PIL image with preprocessing and multi-PSM.
-    Tries preprocessed version first; if poor result also tries raw.
-    """
-    processed = _preprocess(image)
-    text = _ocr_best_psm(processed)
-
-    # If preprocessing gave poor result, also try the original colour image
-    if len(text) < 20:
-        raw_text = _ocr_best_psm(image)
-        if len(raw_text) > len(text):
-            text = raw_text
-
-    return text
+    """OCR with all preprocessing strategies; return best result."""
+    best = ""
+    for variant in _build_variants(image):
+        text = _ocr_one(variant)
+        if len(text.replace(" ", "").replace("\n", "")) > \
+           len(best.replace(" ", "").replace("\n", "")):
+            best = text
+    return best
 
 
 def ocr_pdf(file_bytes: bytes) -> str:
-    """
-    Convert PDF pages to images, OCR each page with preprocessing.
-    Renders at 300 DPI for good quality.
-    """
     if not PDF_SUPPORT:
         return "[ERROR] PDF OCR not available — install pdf2image and poppler."
     pages = convert_from_bytes(file_bytes, dpi=300)
-    texts = [ocr_image(page) for page in pages]
-    return "\n\n--- Page Break ---\n\n".join(texts)
+    return "\n\n--- Page Break ---\n\n".join(ocr_image(p) for p in pages)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,12 +292,13 @@ def health():
     try:
         version = pytesseract.get_tesseract_version().version
     except Exception as e:
-        return jsonify({"status": "error", "error": f"Tesseract not found: {str(e)}"}), 500
+        return jsonify({"status": "error", "error": f"Tesseract not found: {e}"}), 500
     return jsonify({
         "status":      "ok",
         "ocr_engine":  "tesseract",
         "ocr_lang":    OCR_LANG,
         "pdf_support": PDF_SUPPORT,
+        "cv2_available": CV2_AVAILABLE,
         "version":     version,
     })
 
@@ -204,7 +309,7 @@ def ocr_endpoint():
         return jsonify({"success": False, "error": "No file provided — use key 'file'"}), 400
 
     uploaded = request.files["file"]
-    if uploaded.filename == "":
+    if not uploaded.filename:
         return jsonify({"success": False, "error": "Empty filename"}), 400
     if not allowed_file(uploaded.filename):
         return jsonify({"success": False, "error": "Unsupported file type"}), 415
@@ -246,11 +351,12 @@ def ocr_batch():
     results = []
     for uploaded in files:
         if not allowed_file(uploaded.filename):
-            results.append({"filename": uploaded.filename, "success": False, "error": "Unsupported file type"})
+            results.append({"filename": uploaded.filename,
+                            "success": False, "error": "Unsupported file type"})
             continue
         try:
             file_bytes = uploaded.read()
-            ext = uploaded.filename.rsplit(".", 1)[1].lower()
+            ext        = uploaded.filename.rsplit(".", 1)[1].lower()
             if ext == "pdf":
                 text  = ocr_pdf(file_bytes)
                 pages = text.count("--- Page Break ---") + 1
@@ -259,23 +365,22 @@ def ocr_batch():
                 text  = ocr_image(image)
                 pages = 1
             results.append({
-                "filename": uploaded.filename,
-                "success":  True,
-                "pages":    pages,
-                "lang":     OCR_LANG,
-                "text":     text.strip(),
+                "filename": uploaded.filename, "success": True,
+                "pages": pages, "lang": OCR_LANG, "text": text.strip(),
             })
         except Exception as e:
-            results.append({"filename": uploaded.filename, "success": False, "error": str(e)})
+            results.append({"filename": uploaded.filename,
+                            "success": False, "error": str(e)})
 
     return jsonify({"results": results})
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("OCR_PORT", 5050))
-    print(f"\n✅  TalentScreen OCR Service running on http://localhost:{port}")
-    print(f"    OCR language : {OCR_LANG}")
-    print(f"    PDF support  : {'enabled' if PDF_SUPPORT else 'disabled (pip install pdf2image)'}")
-    print(f"    PSM modes    : 6, 3, 11 (tries all, returns best)")
-    print(f"    Preprocessing: grayscale + auto-contrast + sharpening\n")
+    print(f"\n✅  OCR Service v6.0.0 on http://localhost:{port}")
+    print(f"    OCR language  : {OCR_LANG}")
+    print(f"    PDF support   : {'enabled' if PDF_SUPPORT else 'disabled'}")
+    print(f"    OpenCV        : {'enabled — advanced preprocessing' if CV2_AVAILABLE else 'disabled — pip install opencv-python'}")
+    print(f"    PSM modes     : {_PSM_MODES}")
+    print(f"    Preprocessing : deskew + denoise + CLAHE + adaptive/Otsu\n")
     app.run(host="0.0.0.0", port=port, debug=False)

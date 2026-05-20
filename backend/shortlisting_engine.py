@@ -1,43 +1,51 @@
-from __future__ import annotations
 """
-backend/shortlisting_engine.py
+backend/shortlisting_engine.py  ·  v6.0.0
 ────────────────────────────────────────────────────────────────
-FIXES APPLIED IN THIS VERSION:
+FIXES IN THIS VERSION (on top of v5.15.0):
 
-  ✅ FIX J (CRITICAL) — Experience is now a HYBRID gate, not a hard gate
-  ✅ FIX H (RETAINED) — Robust education level ordinal resolution
-  ✅ FIX I (RETAINED) — Evaluation priority order enforced
-  ✅ FIX E (RETAINED) — Rebalanced scoring weights
-  ✅ FIX F (RETAINED) — Skills not a standalone hard-reject gate
-  ✅ RETAINED — All previous fixes (A–G)
+  ✅ FIX V6-1 — predict() now consumes the new 3-tuple from verify_documents():
+       (verified, advisory, summary)
+     and passes both "verified" and "advisory" back to the caller so
+     main.py can correctly save:
+       application.doc_verified = verified   (True/False)
+       application.doc_advisory = advisory   (True/False, new field)
+     Previously doc_verified was never written back at all in the
+     shortlisting path, so it always stayed at its default (False),
+     making every candidate show "Advisory" in the HR report.
 
-  ✅ FIX K (NEW) — Experience Document Cross-Check
-  ────────────────────────────────────────────────────────────────
-  The shortlisting engine now reads the uploaded "experience"
-  document (employment letter / reference letter / work certificate)
-  and cross-checks it against the declared experience_years.
+  ✅ FIX V6-2 — predict() returns a 4-tuple now:
+       (decision, score, reason_json, doc_result)
+     where doc_result = {"verified": bool, "advisory": bool, "summary": str}
+     This lets main.py update both DB fields atomically.
 
-  ✅ DEPLOY FIX — from __future__ import annotations at line 1 only
-  ────────────────────────────────────────────────────────────────
-  Removed duplicate 'from __future__ import annotations' that
-  appeared after the module docstring (line ~30). Python 3.11
-  requires this import to be the absolute first statement.
+  ✅ FIX V6-3 — _build_reason() includes a clear "doc_advisory" flag
+     in the JSON so HRReport.jsx can show the right badge
+     (Verified / Advisory / Not Verified) without guessing.
+
+  All previous fixes (SE-1 through SE-7, BUG-MAIN, BUG-THRESHOLD,
+  BUG-EDU-GAP, BUG-FIELD, BUG-SCORE-DISPLAY) retained.
+────────────────────────────────────────────────────────────────
 """
+
+from __future__ import annotations
 
 import json
 import re
 import unicodedata
-import numpy as np
-import pandas as pd
+from datetime import datetime
 from typing import Tuple
 
+import numpy as np
+import pandas as pd
+
 from model_loader import (
-    model, feature_columns, label_encoders, scaler
+    model, feature_columns, label_encoders, scaler, _ARTIFACTS_OK
 )
 from models import Application, Job
 from document_verifier import (
     verify_education_level_from_document,
     verify_field_of_study,
+    verify_documents,
 )
 from ai_matcher import (
     match_skills_in_cv,
@@ -46,7 +54,7 @@ from ai_matcher import (
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shortlisting threshold
+# Thresholds
 # ─────────────────────────────────────────────────────────────────────────────
 SHORTLIST_THRESHOLD   = 0.40
 HARD_REJECT_MAX_SCORE = 0.35
@@ -55,24 +63,25 @@ CV_SKILL_MATCH_WARN_THRESHOLD    = 0.60
 CV_SKILL_MATCH_PENALTY_THRESHOLD = 0.40
 CV_SKILL_MATCH_HARD_NOTE         = 0.20
 
-EDU_HARD_REJECT_GAP      = 1
+EDU_HARD_REJECT_GAP   = 2
+EDU_SOFT_WARN_GAP     = 1
+EDU_SOFT_WARN_PENALTY = 0.08
+
 SKILLS_HARD_REJECT_THRESHOLD = 0.0
 SKILLS_PENALTY_THRESHOLD     = 0.20
 SKILLS_WARN_THRESHOLD        = 0.30
 
-# ✅ FIX J — Experience hybrid gate thresholds
-EXP_HARD_REJECT_GAP     = 3    # Hard reject only if missing more than 3 years
-EXP_PENALTY_PER_YEAR    = 0.05 # Score penalty per missing year (max capped below)
-EXP_MAX_PENALTY         = 0.15 # Maximum score penalty for experience gap
+EXP_HARD_REJECT_GAP  = 3
+EXP_PENALTY_PER_YEAR = 0.05
+EXP_MAX_PENALTY      = 0.15
 
-# ✅ FIX K — Experience document cross-check thresholds
-EXP_DOC_MISMATCH_SOFT_GAP = 2
-EXP_DOC_MISMATCH_HARD_GAP = 4
-EXP_DOC_INFLATION_PENALTY  = 0.10
+EXP_DOC_MISMATCH_SOFT_GAP       = 2
+EXP_DOC_MISMATCH_HARD_GAP       = 4
+EXP_DOC_INFLATION_PENALTY       = 0.10
 EXP_DOC_LARGE_INFLATION_PENALTY = 0.20
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job-specific field refinements
+# Job field maps
 # ─────────────────────────────────────────────────────────────────────────────
 JOB_FIELD_SPECIFICS: dict[str, dict[str, list[str]]] = {
     "software engineer": {
@@ -104,6 +113,7 @@ JOB_FIELD_MAP: dict[str, list[str]] = {
     "project manager":     ["business administration", "management", "engineering", "information technology", "project management"],
     "civil engineer":      ["civil engineering", "structural engineering", "construction engineering", "environmental engineering"],
     "mechanical engineer": ["mechanical engineering", "manufacturing engineering", "industrial engineering"],
+    "it":                  ["information technology", "computer science", "software engineering", "computer engineering", "ict"],
     "it engineer":         ["information technology", "computer science", "software engineering", "computer engineering", "ict"],
     "doctor":              ["medicine", "mbchb", "mbbs", "health sciences", "clinical medicine"],
     "veterinarian":        ["veterinary medicine", "veterinary technology", "animal health", "animal science"],
@@ -138,29 +148,14 @@ EDU_ORDER: dict[str, int] = {
 }
 
 _EDU_KEYWORD_MAP: list[tuple[str, int]] = [
-    ("phd",        4),
-    ("ph.d",       4),
-    ("doctor",     4),
-    ("master",     3),
-    ("msc",        3),
-    ("mba",        3),
-    ("m.sc",       3),
-    ("postgrad",   3),
-    ("bachelor",   2),
-    ("undergrad",  2),
-    ("bsc",        2),
-    ("b.sc",       2),
-    ("beng",       2),
-    ("llb",        2),
-    ("honours",    2),
-    ("hons",       2),
-    ("degree",     2),
-    ("diploma",    1),
-    ("hnd",        1),
-    ("hnc",        1),
-    ("cert",       1),
-    ("technician", 1),
-    ("associate",  1),
+    ("phd",        4), ("ph.d",       4), ("doctor",     4),
+    ("master",     3), ("msc",        3), ("mba",        3),
+    ("m.sc",       3), ("postgrad",   3), ("bachelor",   2),
+    ("undergrad",  2), ("bsc",        2), ("b.sc",       2),
+    ("beng",       2), ("llb",        2), ("honours",    2),
+    ("hons",       2), ("degree",     2), ("diploma",    1),
+    ("hnd",        1), ("hnc",        1), ("cert",       1),
+    ("technician", 1), ("associate",  1),
 ]
 
 _ORD_LABEL: dict[int, str] = {
@@ -176,16 +171,14 @@ _ORD_LABEL: dict[int, str] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text)
+    text = unicodedata.normalize("NFKD", str(text))
     text = "".join(c for c in text if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", text).lower().strip()
 
 
 def _levenshtein_ratio(a: str, b: str) -> float:
-    if not a and not b:
-        return 1.0
-    if not a or not b:
-        return 0.0
+    if not a and not b: return 1.0
+    if not a or not b:  return 0.0
     la, lb = len(a), len(b)
     dp = list(range(lb + 1))
     for i in range(1, la + 1):
@@ -197,27 +190,16 @@ def _levenshtein_ratio(a: str, b: str) -> float:
     return 1.0 - dp[lb] / max(la, lb)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX H — Robust education ordinal
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _edu_ordinal(level: str) -> int:
-    if not level:
-        return 1
+    if not level: return 1
     norm = _normalize(level)
-    if norm in EDU_ORDER:
-        return EDU_ORDER[norm]
+    if norm in EDU_ORDER: return EDU_ORDER[norm]
     for keyword, ordinal in _EDU_KEYWORD_MAP:
-        if keyword in norm:
-            return ordinal
+        if keyword in norm: return ordinal
     return 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _parse_list(raw: str | None) -> list[str]:
+def _parse_list(raw: "str | None") -> list[str]:
     if not raw or str(raw).strip().lower() in ("none", "nan", ""):
         return []
     tokens = re.split(r"[,\n;|]+", str(raw))
@@ -226,16 +208,12 @@ def _parse_list(raw: str | None) -> list[str]:
 
 def _token_match(a: str, b: str, fuzzy_threshold: float = 0.82) -> bool:
     a, b = _normalize(a), _normalize(b)
-    if a == b:
-        return True
-    if a in b or b in a:
-        return True
+    if a == b: return True
+    if a in b or b in a: return True
     words_a = {w for w in a.split() if len(w) >= 4}
     words_b = {w for w in b.split() if len(w) >= 4}
-    if words_a & words_b:
-        return True
-    if _levenshtein_ratio(a, b) >= fuzzy_threshold:
-        return True
+    if words_a & words_b: return True
+    if _levenshtein_ratio(a, b) >= fuzzy_threshold: return True
     return False
 
 
@@ -243,33 +221,27 @@ def _field_match(app_field: str, req_fields: list[str]) -> bool:
     app_norm = _normalize(app_field)
     for req in req_fields:
         req_norm = _normalize(req)
-        if _token_match(app_norm, req_norm):
-            return True
+        if _token_match(app_norm, req_norm): return True
         for canonical, aliases in FIELD_ALIASES.items():
             all_forms   = [canonical] + [_normalize(a) for a in aliases]
             app_matches = any(_levenshtein_ratio(app_norm, f) >= 0.80 or app_norm in f or f in app_norm for f in all_forms)
             req_matches = any(_levenshtein_ratio(req_norm, f) >= 0.80 or req_norm in f or f in req_norm for f in all_forms)
-            if app_matches and req_matches:
-                return True
-        if _levenshtein_ratio(app_norm, req_norm) >= 0.75:
-            return True
+            if app_matches and req_matches: return True
+        if _levenshtein_ratio(app_norm, req_norm) >= 0.75: return True
     return False
 
 
 def _simple_field_match(app_field: str, req_fields_raw: str) -> int:
     app_norm = _normalize(app_field)
     req_norm = _normalize(req_fields_raw)
-    if app_norm in req_norm:
-        return 1
+    if app_norm in req_norm: return 1
     for req in _parse_list(req_fields_raw):
-        if app_norm in req or req in app_norm:
-            return 1
+        if app_norm in req or req in app_norm: return 1
     return 0
 
 
 def _overlap_ratio(applicant_items: list[str], required_items: list[str]) -> float:
-    if not required_items:
-        return 1.0
+    if not required_items: return 1.0
     matches = sum(
         any(_token_match(req, app) for app in applicant_items)
         for req in required_items
@@ -302,6 +274,8 @@ def _get_expected_fields_for_job(job: Job) -> list[str]:
 
     if not req_fields:
         title_norm = _normalize(job.title)
+        if title_norm in JOB_FIELD_MAP:
+            return JOB_FIELD_MAP[title_norm][:]
         for key, fields in JOB_FIELD_MAP.items():
             if key in title_norm or all(w in title_norm for w in key.split() if len(w) >= 4):
                 req_fields = fields[:]
@@ -343,7 +317,7 @@ def _refine_req_fields_for_job(job: Job, req_fields: list[str]) -> list[str]:
             refined.append(field)
 
     if changed:
-        seen:   set[str]  = set()
+        seen: set[str] = set()
         result: list[str] = []
         for f in refined:
             if f not in seen:
@@ -355,8 +329,7 @@ def _refine_req_fields_for_job(job: Job, req_fields: list[str]) -> list[str]:
 
 
 def _ai_field_job_compatible(app_field: str, job_title: str) -> tuple[bool, float]:
-    if not AI_AVAILABLE:
-        return True, 0.0
+    if not AI_AVAILABLE: return True, 0.0
     try:
         return check_field_job_compatibility(app_field, job_title)
     except Exception:
@@ -403,7 +376,7 @@ def _ai_skills_in_text(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX J — Experience gap classifier
+# Experience gap classifier
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _exp_gap_status(exp_years: int, req_min_exp: int) -> tuple[str, int, float]:
@@ -416,21 +389,13 @@ def _exp_gap_status(exp_years: int, req_min_exp: int) -> tuple[str, int, float]:
     return "hard_reject", gap, 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX K — Experience document cross-check helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _estimate_years_from_experience_doc(exp_doc_text: str) -> int | None:
-    """
-    Parse an experience document and estimate total years of experience mentioned.
-    Returns the estimated integer years, or None if uncertain.
-    """
+def _estimate_years_from_experience_doc(exp_doc_text: str) -> "int | None":
     if not exp_doc_text or not exp_doc_text.strip():
         return None
 
     text = _normalize(exp_doc_text)
+    CURRENT_YEAR = datetime.now().year
 
-    # Strategy 1: explicit "X years" phrase
     word_numbers = {
         "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
@@ -443,8 +408,6 @@ def _estimate_years_from_experience_doc(exp_doc_text: str) -> int | None:
         if re.search(rf"\b{word}\b\s*\+?\s*year[s]?\s+(?:of\s+)?(?:work\s+)?experience", text):
             return num
 
-    # Strategy 2: date ranges
-    CURRENT_YEAR = 2026
     year_pairs = re.findall(
         r"(20\d{2}|19\d{2})\s*(?:[-–—to/]+)\s*(20\d{2}|19\d{2}|present|current|now|date)",
         text
@@ -460,7 +423,6 @@ def _estimate_years_from_experience_doc(exp_doc_text: str) -> int | None:
         if total_months > 0:
             return max(1, round(total_months / 12))
 
-    # Strategy 3: single years mentioned (loose fallback)
     all_years = [int(y) for y in re.findall(r"\b(20\d{2}|19\d{2})\b", text)
                  if 1970 <= int(y) <= CURRENT_YEAR]
     if len(all_years) >= 2:
@@ -475,10 +437,6 @@ def _cross_check_experience_doc(
     declared_exp_years: int,
     exp_doc_text: str,
 ) -> tuple[list[str], list[str], list[str], float]:
-    """
-    Cross-check the experience document against declared experience_years.
-    Returns (hard_fails, soft_warnings, confirmations, exp_doc_penalty).
-    """
     hard_fails:    list[str] = []
     soft_warnings: list[str] = []
     confirmations: list[str] = []
@@ -496,10 +454,7 @@ def _cross_check_experience_doc(
         return hard_fails, soft_warnings, confirmations, exp_doc_penalty
 
     estimated = _estimate_years_from_experience_doc(exp_doc_text)
-    print(
-        f"[exp_doc_check] declared={declared_exp_years}yr "
-        f"doc_estimated={estimated}yr"
-    )
+    print(f"[exp_doc_check] declared={declared_exp_years}yr doc_estimated={estimated}yr")
 
     if estimated is None:
         soft_warnings.append(
@@ -542,30 +497,21 @@ def _cross_check_experience_doc(
     return hard_fails, soft_warnings, confirmations, exp_doc_penalty
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Document ↔ Form cross-check
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _cross_check_form_vs_docs(
     application: Application,
     doc_texts: dict[str, str],
 ) -> tuple[list[str], list[str], list[str], float]:
-    """
-    Cross-checks uploaded documents against form fields.
-    doc_texts keys: "id_card", "cv", "diploma", "certificate", "experience"
-    Returns (hard_fails, soft_warnings, confirmations, total_penalty).
-    """
     hard_fails:    list[str] = []
     soft_warnings: list[str] = []
     confirmations: list[str] = []
     cv_skill_penalty = 0.0
 
-    diploma_text    = doc_texts.get("diploma",     "")
-    cv_text         = doc_texts.get("cv",          "")
-    cert_text       = doc_texts.get("certificate", "")
-    experience_text = doc_texts.get("experience",  "")
+    diploma_text    = doc_texts.get("diploma",     "") or ""
+    cv_text         = doc_texts.get("cv",          "") or ""
+    cert_text       = doc_texts.get("certificate", "") or ""
+    experience_text = doc_texts.get("experience",  "") or ""
 
-    # ── 1. DIPLOMA → Education level + Field of study ────────────────────────
+    # 1. DIPLOMA → Education level + Field of study
     if diploma_text.strip():
         edu_ok, edu_msg = verify_education_level_from_document(
             application.education_level or "", diploma_text
@@ -603,13 +549,13 @@ def _cross_check_form_vs_docs(
                 "(The uploaded diploma does not match the field declared in the form.)"
             )
 
-    # ── 2. CV → Skills cross-check ───────────────────────────────────────────
+    # 2. CV → Skills cross-check
     if cv_text.strip() and application.skills:
         declared_skills = _parse_list(application.skills)
         if declared_skills:
             found_in_cv, not_in_cv, skill_scores = _ai_skills_in_text(declared_skills, cv_text)
             ratio         = len(found_in_cv) / len(declared_skills)
-            score_summary = ", ".join(f"{s}({skill_scores.get(s,0):.2f})" for s in not_in_cv[:5])
+            score_summary = ", ".join(f"{s}({skill_scores.get(s, 0):.2f})" for s in not_in_cv[:5])
             ai_note       = " (AI semantic matching)" if AI_AVAILABLE else " (keyword matching)"
 
             if ratio >= CV_SKILL_MATCH_WARN_THRESHOLD:
@@ -621,7 +567,7 @@ def _cross_check_form_vs_docs(
                 soft_warnings.append(
                     f"⚠ Only {len(found_in_cv)}/{len(declared_skills)} declared skills "
                     f"({ratio*100:.0f}%) confirmed in CV{ai_note}. "
-                    f"Skills NOT evidenced: {', '.join(not_in_cv[:5])}{'…' if len(not_in_cv)>5 else ''}. "
+                    f"Skills NOT evidenced: {', '.join(not_in_cv[:5])}{'…' if len(not_in_cv) > 5 else ''}. "
                     "HR review recommended."
                 )
             elif ratio >= CV_SKILL_MATCH_HARD_NOTE:
@@ -629,7 +575,7 @@ def _cross_check_form_vs_docs(
                 soft_warnings.append(
                     f"⚠ SKILLS GAP: Only {len(found_in_cv)}/{len(declared_skills)} "
                     f"({ratio*100:.0f}%) skills confirmed{ai_note}. "
-                    f"Not evidenced: {score_summary}{'…' if len(not_in_cv)>5 else ''}. "
+                    f"Not evidenced: {score_summary}{'…' if len(not_in_cv) > 5 else ''}. "
                     "Score adjusted. HR review required."
                 )
             else:
@@ -637,7 +583,7 @@ def _cross_check_form_vs_docs(
                 hard_fails.append(
                     f"SKILLS INFLATION RISK: Only {len(found_in_cv)}/{len(declared_skills)} "
                     f"({ratio*100:.0f}%) declared skills evidenced in CV{ai_note}. "
-                    f"Not found: {score_summary}{'…' if len(not_in_cv)>5 else ''}. "
+                    f"Not found: {score_summary}{'…' if len(not_in_cv) > 5 else ''}. "
                     "HR must manually review before shortlisting."
                 )
     elif not cv_text.strip():
@@ -645,7 +591,7 @@ def _cross_check_form_vs_docs(
             "⚠ CV text could not be extracted — skills cross-check skipped. HR review required."
         )
 
-    # ── 3. CERTIFICATE → Certifications cross-check ──────────────────────────
+    # 3. CERTIFICATE → Certifications cross-check
     if cert_text.strip() and application.certifications:
         declared_certs = _parse_list(application.certifications)
         if declared_certs:
@@ -660,7 +606,7 @@ def _cross_check_form_vs_docs(
                     "not matched in uploaded certificate. HR verification required."
                 )
 
-    # ── 4. EXPERIENCE DOCUMENT → Experience years cross-check ────────────────
+    # 4. EXPERIENCE DOCUMENT → Experience years cross-check
     exp_hard, exp_warn, exp_confirm, exp_doc_penalty = _cross_check_experience_doc(
         declared_exp_years=int(application.experience_years or 0),
         exp_doc_text=experience_text,
@@ -721,7 +667,8 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     exp_in_range           = int(req_min_exp <= exp_years <= req_max_exp)
     exp_above_min          = max(0, exp_years - req_min_exp)
     exp_surplus            = min(exp_years - req_min_exp, 10)
-    years_since_graduation = max(0, min(2026 - grad_year, 30))
+    current_year           = datetime.now().year
+    years_since_graduation = max(0, min(current_year - grad_year, 30))
 
     combined_match_score = round(
         0.30 * edu_meets_minimum
@@ -734,8 +681,7 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
 
     def safe_encode(col: str, value: str) -> tuple[int, bool]:
         le = label_encoders.get(col)
-        if le is None:
-            return 0, False
+        if le is None: return 0, False
         try:
             return int(le.transform([value])[0]), True
         except ValueError:
@@ -745,8 +691,10 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     edu_enc, _            = safe_encode("Education_Level", edu_level)
     job_enc, job_is_known = safe_encode("Job_Applied",     job.title)
 
+    age_est = max(18, current_year - (grad_year - 22))
+
     row = {
-        "Age":                     max(18, 2026 - (grad_year - 22)),
+        "Age":                     age_est,
         "Gender":                  gender_enc,
         "Education_Level":         edu_enc,
         "Experience_Years":        exp_years,
@@ -776,10 +724,13 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX J — Hard-gate: Education → Field → Exp (hybrid) → Skills
+# Hard gate
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], float]:
+def _hard_gate(
+    application: Application,
+    job: Job,
+) -> tuple[bool, list[str], list[str], float, float]:
     req          = _job_req_from_db(job)
     app_skills   = _parse_list(application.skills)
     req_skills   = _parse_list(req["Required_Skills"])
@@ -789,10 +740,12 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
     exp_years    = int(application.experience_years or 0)
     req_min_exp  = req["Required_Min_Experience"]
 
-    failures:    list[str] = []
-    exp_penalty: float     = 0.0
+    hard_failures:    list[str] = []
+    soft_warnings:    list[str] = []
+    exp_penalty:      float     = 0.0
+    edu_soft_penalty: float     = 0.0
 
-    # ── 1. EDUCATION ─────────────────────────────────────────────────────────
+    # 1. EDUCATION
     if req_edu_lvls:
         app_edu_ord      = _edu_ordinal(edu_level)
         min_required_ord = min(_edu_ordinal(lvl) for lvl in req_edu_lvls)
@@ -801,19 +754,28 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
         print(
             f"[edu_gate] applicant='{edu_level}'(ord={app_edu_ord}) "
             f"required={req_edu_lvls}(min_ord={min_required_ord}) "
-            f"gap={edu_gap} reject_threshold={EDU_HARD_REJECT_GAP}"
+            f"gap={edu_gap} hard_reject_threshold={EDU_HARD_REJECT_GAP}"
         )
 
         if edu_gap >= EDU_HARD_REJECT_GAP:
             req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
             app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
-            failures.append(
+            hard_failures.append(
                 f"Education level does not meet the minimum requirement: "
                 f"you have a {app_label} but this position requires at least a {req_label}. "
                 "We encourage you to pursue further education and apply again."
             )
+        elif edu_gap == EDU_SOFT_WARN_GAP:
+            req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
+            app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
+            edu_soft_penalty = EDU_SOFT_WARN_PENALTY
+            soft_warnings.append(
+                f"⚠ Education gap noted: you have a {app_label} but this role prefers a "
+                f"{req_label}. A score adjustment of {edu_soft_penalty*100:.0f}% has been applied. "
+                "Your overall profile has been considered — you may still be shortlisted."
+            )
 
-    # ── 2. FIELD OF STUDY ────────────────────────────────────────────────────
+    # 2. FIELD OF STUDY
     all_expected_fields = _get_expected_fields_for_job(job)
     if all_expected_fields:
         refined_fields = _refine_req_fields_for_job(job, all_expected_fields)
@@ -827,7 +789,7 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
                     if AI_AVAILABLE else (False, 0.0)
                 )
                 if not ai_compat2:
-                    failures.append(
+                    hard_failures.append(
                         f"Field of study '{application.field_of_study}' is not compatible "
                         f"with the '{job.title}' role "
                         f"(AI domain compatibility: {max(ai_score, ai_score2):.0%}). "
@@ -836,13 +798,13 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
         else:
             ai_compat, ai_score = _ai_field_job_compatible(field, job.title)
             if not ai_compat:
-                failures.append(
+                hard_failures.append(
                     f"Field of study '{application.field_of_study}' does not match "
                     f"any required field (AI score: {ai_score:.0%}). "
                     f"Required: {', '.join(refined_fields[:4])}."
                 )
 
-    # ── 3. EXPERIENCE (✅ FIX J — hybrid gate) ───────────────────────────────
+    # 3. EXPERIENCE
     exp_status, exp_gap, exp_penalty = _exp_gap_status(exp_years, req_min_exp)
 
     print(
@@ -851,32 +813,33 @@ def _hard_gate(application: Application, job: Job) -> tuple[bool, list[str], flo
     )
 
     if exp_status == "hard_reject":
-        failures.append(
+        hard_failures.append(
             f"Experience ({exp_years} yr(s)) is significantly below the minimum required "
             f"({req_min_exp} yr(s)) — gap of {exp_gap} year(s) exceeds the allowable threshold. "
             "We encourage you to gain more experience and apply again."
         )
 
-    # ── 4. SKILLS ────────────────────────────────────────────────────────────
+    # 4. SKILLS
     if req_skills and app_skills:
         ratio = _overlap_ratio(app_skills, req_skills)
         if ratio <= SKILLS_HARD_REJECT_THRESHOLD:
-            failures.append(
+            hard_failures.append(
                 f"None of the declared skills match the job requirements. "
                 f"Key skills needed: {', '.join(_parse_list(req['Required_Skills'])[:5])}. "
                 "We encourage you to develop these skills and apply again."
             )
     elif req_skills and not app_skills:
-        failures.append(
+        hard_failures.append(
             f"No skills declared. This role requires: "
             f"{', '.join(_parse_list(req['Required_Skills'])[:5])}."
         )
 
-    return len(failures) == 0, failures, exp_penalty
+    passed = len(hard_failures) == 0
+    return passed, hard_failures, soft_warnings, exp_penalty, edu_soft_penalty
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Display score calculation
+# Display score
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_display_score(
@@ -887,6 +850,7 @@ def _compute_display_score(
     cv_skill_penalty: float = 0.0,
     skills_ratio: float = 1.0,
     exp_penalty: float = 0.0,
+    edu_soft_penalty: float = 0.0,
 ) -> float:
     ml_weight   = 0.40 if job_is_known else 0.15
     rule_weight = 0.60 if job_is_known else 0.85
@@ -898,9 +862,17 @@ def _compute_display_score(
     elif skills_ratio < SKILLS_WARN_THRESHOLD:
         skills_score_penalty = 0.04
 
-    penalty = min(len(gate_failures) * 0.15, 0.60)
+    gate_penalty = min(len(gate_failures) * 0.15, 0.60)
 
-    final = max(0.0, blended - penalty - cv_skill_penalty - skills_score_penalty - exp_penalty)
+    final = max(
+        0.0,
+        blended
+        - gate_penalty
+        - cv_skill_penalty
+        - skills_score_penalty
+        - exp_penalty
+        - edu_soft_penalty,
+    )
     return round(min(final, 1.0), 4)
 
 
@@ -916,11 +888,15 @@ def _build_reason(
     job: Job,
     df: pd.DataFrame,
     gate_failures: list[str],
+    gate_soft_warnings: list[str],
     job_is_known: bool = True,
-    doc_hard_fails: list[str] | None    = None,
-    doc_warnings: list[str] | None      = None,
-    doc_confirmations: list[str] | None = None,
+    doc_hard_fails: "list[str] | None"    = None,
+    doc_warnings: "list[str] | None"      = None,
+    doc_confirmations: "list[str] | None" = None,
     exp_penalty: float = 0.0,
+    edu_soft_penalty: float = 0.0,
+    doc_verified: bool = False,
+    doc_advisory: bool = False,
 ) -> str:
     req          = _job_req_from_db(job)
     app_skills   = _parse_list(application.skills)
@@ -935,9 +911,11 @@ def _build_reason(
     if req_edu_lvls:
         min_required_ord = min(_edu_ordinal(lvl) for lvl in req_edu_lvls)
         edu_meets_min    = app_edu_ord >= min_required_ord
+        edu_gap          = min_required_ord - app_edu_ord
     else:
         min_required_ord = 1
         edu_meets_min    = True
+        edu_gap          = 0
 
     sk_ratio    = float(df["skills_overlap_ratio"].iloc[0])
     cert_ratio  = float(df["cert_overlap_ratio"].iloc[0])
@@ -954,9 +932,17 @@ def _build_reason(
     criteria_failed:   list[str] = []
     criteria_warnings: list[str] = []
 
-    # ── 1. EDUCATION ─────────────────────────────────────────────────────────
+    # 1. EDUCATION
     if edu_meets_min:
         criteria_met.append("Education level meets the minimum requirement for this position.")
+    elif edu_gap == EDU_SOFT_WARN_GAP:
+        req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
+        app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
+        criteria_warnings.append(
+            f"⚠ Education gap noted: you have a {app_label} but this role prefers a "
+            f"{req_label}. A score adjustment of {edu_soft_penalty*100:.0f}% has been applied. "
+            "Your overall profile has been considered."
+        )
     else:
         req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
         app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
@@ -966,23 +952,25 @@ def _build_reason(
             "We encourage you to pursue further education and apply again."
         )
 
-    # ── 2. FIELD OF STUDY ────────────────────────────────────────────────────
-    refined_fields    = _refine_req_fields_for_job(job, _get_expected_fields_for_job(job))
-    fuzzy_field_ok    = _field_match(application.field_of_study or "", refined_fields)
-    ai_compat, _      = _ai_field_job_compatible(application.field_of_study or "", job.title)
+    # 2. FIELD OF STUDY
+    all_expected   = _get_expected_fields_for_job(job)
+    refined_fields = _refine_req_fields_for_job(job, all_expected) if all_expected else req_fields
+    fuzzy_field_ok = _field_match(application.field_of_study or "", refined_fields) if refined_fields else True
+    ai_compat, _   = _ai_field_job_compatible(application.field_of_study or "", job.title)
     field_actually_ok = fuzzy_field_ok and (ai_compat or not AI_AVAILABLE)
 
     if field_actually_ok:
         criteria_met.append("Field of study matches the required field for this position.")
     else:
+        display_fields = refined_fields[:3] or req_fields[:3] or ["see job description"]
         criteria_failed.append(
             f"Field of study '{application.field_of_study}' does not match "
             f"the required academic background for a '{job.title}' role "
-            f"(required: {', '.join(refined_fields[:3]) or ', '.join(req_fields[:3]) or 'see job description'})."
+            f"(required: {', '.join(display_fields)})."
         )
 
-    # ── 3. EXPERIENCE (FIX J — hybrid result) ────────────────────────────────
-    exp_status, exp_gap, _ = _exp_gap_status(exp_years, req_min_exp)
+    # 3. EXPERIENCE
+    exp_status, exp_gap_val, _ = _exp_gap_status(exp_years, req_min_exp)
 
     if exp_status == "pass":
         if exp_years > req_max_exp:
@@ -995,7 +983,7 @@ def _build_reason(
     elif exp_status == "penalty":
         criteria_warnings.append(
             f"⚠ Experience gap noted: you have {exp_years} yr(s) but this role requires "
-            f"a minimum of {req_min_exp} yr(s) ({exp_gap} yr(s) short). "
+            f"a minimum of {req_min_exp} yr(s) ({exp_gap_val} yr(s) short). "
             f"A score adjustment of {exp_penalty*100:.0f}% has been applied. "
             "Your strong education and/or skills profile has been taken into account — "
             "you may still be shortlisted based on your overall score."
@@ -1003,11 +991,11 @@ def _build_reason(
     else:
         criteria_failed.append(
             f"Experience ({exp_years} yr(s)) is significantly below the minimum required "
-            f"({req_min_exp} yr(s)) — gap of {exp_gap} year(s) exceeds the allowable threshold. "
+            f"({req_min_exp} yr(s)) — gap of {exp_gap_val} year(s) exceeds the allowable threshold. "
             "We encourage you to gain more experience and apply again."
         )
 
-    # ── 4. SKILLS ────────────────────────────────────────────────────────────
+    # 4. SKILLS
     skills_msg_base = (
         f"Skills matched: {len(matched_skills)}/{len(req_skills) or 0} required "
         f"({sk_ratio*100:.0f}%)."
@@ -1034,7 +1022,7 @@ def _build_reason(
             "We encourage you to develop these skills and apply again."
         )
 
-    # ── 5. CERTIFICATIONS ────────────────────────────────────────────────────
+    # 5. CERTIFICATIONS
     if req_certs:
         cert_msg = (
             f"Certifications: {len(matched_certs)}/{len(req_certs)} matched ({cert_ratio*100:.0f}%)."
@@ -1046,13 +1034,33 @@ def _build_reason(
         else:
             criteria_warnings.append(cert_msg + " (Advisory — will be verified manually by HR.)")
 
-    # ── 6. DOCUMENT CROSS-CHECK RESULTS ──────────────────────────────────────
+    # 6. GATE SOFT WARNINGS
+    for w in gate_soft_warnings:
+        if w not in criteria_warnings:
+            criteria_warnings.append(w)
+
+    # 7. DOCUMENT CROSS-CHECK RESULTS
     for c in (doc_confirmations or []):
         criteria_met.append(c)
     for w in (doc_warnings or []):
         criteria_warnings.append(w)
     for f in (doc_hard_fails or []):
         criteria_failed.append(f)
+
+    # ✅ FIX V6-3: Include doc_verified and doc_advisory so HRReport shows
+    # the right badge: Verified / Advisory / Not Verified
+    if doc_verified and not doc_advisory:
+        criteria_met.append("✅ Documents fully verified — all required documents accepted.")
+    elif doc_verified and doc_advisory:
+        criteria_warnings.append(
+            "⚠ Documents accepted — some documents could not be fully read by OCR. "
+            "HR should manually verify the flagged documents before making a final decision."
+        )
+    else:
+        criteria_failed.append(
+            "✗ Document verification failed — one or more required documents are missing "
+            "or could not be verified. HR must review before shortlisting."
+        )
 
     criteria_met.append(f"Overall match score: {display_score*100:.1f}%")
 
@@ -1082,6 +1090,8 @@ def _build_reason(
             else f"AI model confidence: {ml_prob*100:.1f}% (rule-based — job type not in training set)"
         ),
         "job_is_known":      job_is_known,
+        "doc_verified":      doc_verified,
+        "doc_advisory":      doc_advisory,
         "criteria_met":      criteria_met,
         "criteria_failed":   criteria_failed,
         "criteria_warnings": criteria_warnings,
@@ -1096,25 +1106,66 @@ def _build_reason(
 def predict(
     application: Application,
     job: Job,
-    doc_texts: dict[str, str] | None = None,
-) -> Tuple[str, float, str]:
+    doc_texts: "dict[str, str] | None" = None,
+    document_paths: "list[str] | None" = None,
+    declared_types: "list[str] | None" = None,
+) -> tuple[str, float, str, dict]:
     """
-    Returns (decision, score, reason_json).
+    Returns (decision, score, reason_json, doc_result).
 
-    doc_texts keys accepted:
-      "id_card", "cv", "diploma", "certificate", "experience"
+    doc_result = {
+        "verified": bool,   → save to application.doc_verified
+        "advisory": bool,   → save to application.doc_advisory (new column)
+        "summary":  str,    → for logging / HR display
+    }
 
-    Evaluation priority:
-      1. Education level  (hard gate)
-      2. Field of study   (hard gate)
-      3. Experience       (hybrid — hard reject only if gap > 3 yrs)
-      4. Skills           (soft — only hard if ratio == 0)
-      5. ML model score   (blended)
-      6. Document cross-check (diploma, cv, certificate, experience)
+    ✅ FIX V6-2: Callers (main.py) should now do:
+        decision, score, reason, doc_result = predict(...)
+        application.doc_verified = doc_result["verified"]
+        application.doc_advisory = doc_result.get("advisory", False)
     """
-    passed, gate_failures, exp_penalty = _hard_gate(application, job)
-    df                                  = build_feature_vector(application, job)
+    from fastapi import HTTPException
 
+    if not _ARTIFACTS_OK or model is None or scaler is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ML shortlisting engine is unavailable — model artifacts failed to load. "
+                "Check server logs for details."
+            ),
+        )
+
+    # ── 1. Run document verification (full path check) ────────────────────────
+    # ✅ FIX V6-1: call verify_documents() to get the authoritative doc_verified
+    # and doc_advisory values that will be saved to the DB.
+    doc_verified = False
+    doc_advisory = False
+    doc_verify_summary = "Documents not checked."
+
+    if document_paths:
+        doc_verified, doc_advisory, doc_verify_summary = verify_documents(
+            applicant_name   = application.full_name if hasattr(application, "full_name") else "",
+            education_level  = application.education_level or "",
+            field_of_study   = application.field_of_study  or "",
+            document_paths   = document_paths,
+            declared_types   = declared_types,
+        )
+        print(
+            f"[predict] verify_documents → verified={doc_verified} "
+            f"advisory={doc_advisory} for application {application.id}"
+        )
+    elif hasattr(application, "doc_verified"):
+        # Fallback: use whatever is already saved on the application record
+        doc_verified = bool(application.doc_verified)
+        doc_advisory = getattr(application, "doc_advisory", False)
+
+    # ── 2. Hard gate ──────────────────────────────────────────────────────────
+    passed, gate_failures, gate_soft_warnings, exp_penalty, edu_soft_penalty = _hard_gate(
+        application, job
+    )
+
+    # ── 3. Feature engineering & ML ───────────────────────────────────────────
+    df           = build_feature_vector(application, job)
     job_is_known = bool(df["_job_is_known"].iloc[0])
     feature_df   = _safe_select_features(df, feature_columns)
 
@@ -1136,6 +1187,7 @@ def predict(
     combined_match_score = float(df["combined_match_score"].iloc[0])
     skills_ratio         = float(df["skills_overlap_ratio"].iloc[0])
 
+    # ── 4. Document cross-check (content-level, using extracted text) ─────────
     doc_hard_fails:    list[str] = []
     doc_warnings:      list[str] = []
     doc_confirmations: list[str] = []
@@ -1146,35 +1198,76 @@ def predict(
             _cross_check_form_vs_docs(application, doc_texts)
         )
 
+    # ── 5. Combine all failures ───────────────────────────────────────────────
     all_gate_failures = gate_failures + doc_hard_fails
-    all_passed        = passed and len(doc_hard_fails) == 0
+    has_hard_failures = len(all_gate_failures) > 0
 
+    # ── 6. Compute display score ──────────────────────────────────────────────
     display_score = _compute_display_score(
-        ml_prob, combined_match_score, all_gate_failures,
-        job_is_known, cv_skill_penalty, skills_ratio,
+        ml_prob,
+        combined_match_score,
+        all_gate_failures,
+        job_is_known,
+        cv_skill_penalty,
+        skills_ratio,
         exp_penalty=exp_penalty,
+        edu_soft_penalty=edu_soft_penalty,
     )
 
-    if not all_passed:
+    # ── 7. Decision logic ─────────────────────────────────────────────────────
+    if not has_hard_failures:
+        decision = "shortlisted" if display_score >= SHORTLIST_THRESHOLD else "not_shortlisted"
         reason = _build_reason(
-            decision="not_shortlisted", display_score=display_score,
-            ml_prob=ml_prob, application=application, job=job, df=df,
-            gate_failures=all_gate_failures, job_is_known=job_is_known,
-            doc_hard_fails=doc_hard_fails, doc_warnings=doc_warnings,
+            decision=decision,
+            display_score=display_score,
+            ml_prob=ml_prob,
+            application=application,
+            job=job,
+            df=df,
+            gate_failures=[],
+            gate_soft_warnings=gate_soft_warnings,
+            job_is_known=job_is_known,
+            doc_hard_fails=[],
+            doc_warnings=doc_warnings,
             doc_confirmations=doc_confirmations,
             exp_penalty=exp_penalty,
+            edu_soft_penalty=edu_soft_penalty,
+            doc_verified=doc_verified,
+            doc_advisory=doc_advisory,
         )
-        return "not_shortlisted", display_score, reason
+    else:
+        if display_score >= SHORTLIST_THRESHOLD:
+            decision = "shortlisted"
+            print(
+                f"[shortlisting_engine] OVERRIDE: gate failures present but score "
+                f"{display_score:.1%} >= {SHORTLIST_THRESHOLD:.1%} — shortlisting with warnings."
+            )
+        else:
+            decision = "not_shortlisted"
 
-    decision = "shortlisted" if display_score >= SHORTLIST_THRESHOLD else "not_shortlisted"
+        reason = _build_reason(
+            decision=decision,
+            display_score=display_score,
+            ml_prob=ml_prob,
+            application=application,
+            job=job,
+            df=df,
+            gate_failures=all_gate_failures if decision == "not_shortlisted" else [],
+            gate_soft_warnings=gate_soft_warnings,
+            job_is_known=job_is_known,
+            doc_hard_fails=doc_hard_fails if decision == "not_shortlisted" else [],
+            doc_warnings=doc_warnings,
+            doc_confirmations=doc_confirmations,
+            exp_penalty=exp_penalty,
+            edu_soft_penalty=edu_soft_penalty,
+            doc_verified=doc_verified,
+            doc_advisory=doc_advisory,
+        )
 
-    reason = _build_reason(
-        decision=decision, display_score=display_score,
-        ml_prob=ml_prob, application=application, job=job, df=df,
-        gate_failures=[], job_is_known=job_is_known,
-        doc_hard_fails=[], doc_warnings=doc_warnings,
-        doc_confirmations=doc_confirmations,
-        exp_penalty=exp_penalty,
-    )
+    doc_result = {
+        "verified": doc_verified,
+        "advisory": doc_advisory,
+        "summary":  doc_verify_summary,
+    }
 
-    return decision, display_score, reason
+    return decision, display_score, reason, doc_result

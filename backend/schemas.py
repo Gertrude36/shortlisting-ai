@@ -7,6 +7,13 @@ FIXES APPLIED:
   ✅ FIX 3 — deadline changed from Optional[date] to Optional[datetime].
   ✅ FIX 4 — field_validator on JobResponse.deadline safely coerces legacy date values.
   ✅ FIX 5 — DocumentOut accepts "experience" doc_type automatically (plain str).
+  ✅ FIX 6 — RegisterRequest now accepts optional hr_code field.
+             Backend validates it against HR_INVITE_CODE env var.
+             Applicant registration never needs hr_code.
+  ✅ FIX 7 (NEW) — CandidateListItem now exposes ALL applicant fields so
+             HR can see complete candidate data: phone, address, date_of_birth,
+             gender, skills, certifications, graduation_year, documents,
+             and profile_complete flag.
   ✅ DEPLOY FIX — from __future__ import annotations at line 1.
 """
 from __future__ import annotations
@@ -23,9 +30,10 @@ from pydantic import BaseModel, EmailStr, field_validator
 
 class RegisterRequest(BaseModel):
     full_name: str
-    email: EmailStr
-    password: str
-    role: str = "applicant"
+    email:     EmailStr
+    password:  str
+    role:      str        = "applicant"
+    hr_code:   Optional[str] = None   # ✅ FIX 6: Required only when role == "hr"
 
     @field_validator("full_name")
     @classmethod
@@ -57,16 +65,16 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email:    EmailStr
     password: str
 
 
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: str = "bearer"
-    role: str
-    user_id: int
-    full_name: str
+    token_type:   str = "bearer"
+    role:         str
+    user_id:      int
+    full_name:    str
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -74,22 +82,22 @@ class TokenResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════
 
 class JobCreate(BaseModel):
-    title: str
-    description: Optional[str]              = None
-    location: Optional[str]                 = None
-    employment_type: Optional[str]          = None
-    job_level: Optional[str]                = None
-    number_of_posts: Optional[int]          = 1
-    deadline: Optional[datetime]            = None
-    responsibilities: Optional[str]         = None
+    title:                     str
+    description:               Optional[str]  = None
+    location:                  Optional[str]  = None
+    employment_type:           Optional[str]  = None
+    job_level:                 Optional[str]  = None
+    number_of_posts:           Optional[int]  = 1
+    deadline:                  Optional[datetime] = None
+    responsibilities:          Optional[str]  = None
     required_education_levels: str
-    required_fields: str
-    required_min_experience: int            = 0
-    required_max_experience: int            = 20
-    required_skills: str
-    required_certifications: Optional[str]  = None
-    preferred_qualifications: Optional[str] = None
-    about_role: Optional[str]               = None
+    required_fields:           str
+    required_min_experience:   int            = 0
+    required_max_experience:   int            = 20
+    required_skills:           str
+    required_certifications:   Optional[str]  = None
+    preferred_qualifications:  Optional[str]  = None
+    about_role:                Optional[str]  = None
 
     @field_validator("number_of_posts")
     @classmethod
@@ -100,25 +108,25 @@ class JobCreate(BaseModel):
 
 
 class JobResponse(BaseModel):
-    id: int
-    title: str
-    description: Optional[str]
-    location: Optional[str]
-    employment_type: Optional[str]
-    job_level: Optional[str]
-    number_of_posts: Optional[int]
-    deadline: Optional[datetime]
-    responsibilities: Optional[str]
+    id:                        int
+    title:                     str
+    description:               Optional[str]
+    location:                  Optional[str]
+    employment_type:           Optional[str]
+    job_level:                 Optional[str]
+    number_of_posts:           Optional[int]
+    deadline:                  Optional[datetime]
+    responsibilities:          Optional[str]
     required_education_levels: str
-    required_fields: str
-    required_min_experience: int
-    required_max_experience: int
-    required_skills: str
-    required_certifications: Optional[str]
-    preferred_qualifications: Optional[str]
-    about_role: Optional[str]
-    is_active: bool
-    created_at: datetime
+    required_fields:           str
+    required_min_experience:   int
+    required_max_experience:   int
+    required_skills:           str
+    required_certifications:   Optional[str]
+    preferred_qualifications:  Optional[str]
+    about_role:                Optional[str]
+    is_active:                 bool
+    created_at:                datetime
 
     @field_validator("deadline", mode="before")
     @classmethod
@@ -139,17 +147,17 @@ class JobResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════
 
 class ApplicationCreate(BaseModel):
-    job_id: int
-    address: Optional[str]        = None
-    phone: Optional[str]          = None
-    date_of_birth: Optional[str]  = None
-    gender: str
+    job_id:          int
+    address:         Optional[str] = None
+    phone:           Optional[str] = None
+    date_of_birth:   Optional[str] = None
+    gender:          str
     education_level: str
-    field_of_study: str
+    field_of_study:  str
     graduation_year: int
-    experience_years: int         = 0
-    skills: str
-    certifications: Optional[str] = None
+    experience_years: int          = 0
+    skills:          str
+    certifications:  Optional[str] = None
 
     @field_validator("experience_years")
     @classmethod
@@ -160,64 +168,73 @@ class ApplicationCreate(BaseModel):
 
 
 class DocumentOut(BaseModel):
-    """
-    Generic document output schema.
-    doc_type is a plain str so it accepts ALL DocumentType enum values:
-      id_card | cv | diploma | certificate | experience
-    No schema change is needed when new doc types are added to the enum.
-    """
-    id: int
-    doc_type: str
+    id:            int
+    doc_type:      str
     original_name: str
-    uploaded_at: datetime
+    uploaded_at:   datetime
 
     model_config = {"from_attributes": True}
 
 
 class ApplicationResponse(BaseModel):
-    id: int
-    job_id: int
-    applicant_id: int
-    address: Optional[str]
-    phone: Optional[str]
-    gender: str
-    education_level: str
-    field_of_study: str
-    graduation_year: int
+    id:               int
+    job_id:           int
+    applicant_id:     int
+    address:          Optional[str]
+    phone:            Optional[str]
+    gender:           str
+    education_level:  str
+    field_of_study:   str
+    graduation_year:  int
     experience_years: int
-    skills: str
-    certifications: Optional[str]
-    decision: str
-    ai_score: Optional[float]
-    ai_reason: Optional[str]
-    doc_verified: bool
-    # ✅ FIX 1 (CRITICAL): Must be Optional because drafts have submitted_at=None.
-    submitted_at: Optional[datetime] = None
-    shortlisted_at: Optional[datetime] = None
-    documents: List[DocumentOut] = []
+    skills:           str
+    certifications:   Optional[str]
+    decision:         str
+    ai_score:         Optional[float]
+    ai_reason:        Optional[str]
+    doc_verified:     bool
+    submitted_at:     Optional[datetime] = None
+    shortlisted_at:   Optional[datetime] = None
+    documents:        List[DocumentOut]  = []
 
     model_config = {"from_attributes": True}
 
 
 # ═══════════════════════════════════════════════════════════════
 # HR — candidate list item
+# ✅ FIX 7: Now includes ALL applicant fields so HR sees complete data
 # ═══════════════════════════════════════════════════════════════
 
 class CandidateListItem(BaseModel):
-    application_id: int
-    applicant_id: int
-    full_name: str
-    email: str
-    job_title: str
-    education_level: str
-    field_of_study: str
+    application_id:   int
+    applicant_id:     int
+    full_name:        str
+    email:            str
+    job_title:        str
+
+    # ── Application form fields ──────────────────────────────
+    education_level:  str
+    field_of_study:   str
+    graduation_year:  int
     experience_years: int
-    decision: str
-    ai_score: Optional[float]
-    ai_reason: Optional[str]
-    doc_verified: bool
-    # ✅ FIX 2: Optional for defensive consistency.
-    submitted_at: Optional[datetime] = None
+    skills:           str
+    certifications:   Optional[str]  = None
+
+    # ── Profile / personal fields ────────────────────────────
+    gender:           Optional[str]  = None
+    phone:            Optional[str]  = None
+    address:          Optional[str]  = None
+    date_of_birth:    Optional[str]  = None
+
+    # ── AI / decision fields ─────────────────────────────────
+    decision:         str
+    ai_score:         Optional[float]
+    ai_reason:        Optional[str]
+    doc_verified:     bool
+    submitted_at:     Optional[datetime] = None
+
+    # ── Documents list ───────────────────────────────────────
+    documents:        List[DocumentOut] = []
 
     model_config = {"from_attributes": True}
 
@@ -229,9 +246,9 @@ class CandidateListItem(BaseModel):
 class ShortlistResult(BaseModel):
     application_id: int
     applicant_name: str
-    job_title: str
-    decision: str
-    ai_score: float
-    doc_verified: bool
+    job_title:      str
+    decision:       str
+    ai_score:       float
+    doc_verified:   bool
     identity_match: bool = False
-    reason: str
+    reason:         str
