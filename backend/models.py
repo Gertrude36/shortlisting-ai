@@ -1,42 +1,26 @@
 """
-backend/models.py  ·  v2.1.0
+backend/models.py  ·  v2.2.0
 ────────────────────────────────────────────────────────────────
-ALL PREVIOUS FIXES RETAINED (FIX MODEL-1 through FIX MODEL-7).
+ALL PREVIOUS FIXES RETAINED (FIX MODEL-1 through FIX MODEL-13).
 
-NEW FIXES IN v2.1.0:
+NEW IN v2.2.0:
 
-  ✅ FIX MODEL-8 — Removed server_default=None from User.phone and
-     User.address. In PostgreSQL, server_default=None is a no-op and
-     is silently ignored, but it causes SQLAlchemy to emit a spurious
-     DEFAULT NULL clause that confuses Alembic and some PG versions.
-     nullable=True already implies NULL as the default; no server_default
-     is needed and passing None is misleading.
+  ✅ FIX MODEL-14 (CRITICAL — 500 FIX) — Added national_id column to the
+     User model. main.py v6.6.0 references current_user.national_id in
+     /auth/me, PUT /profile, and _build_profile_response(), but models.py
+     never defined the column on the ORM class. SQLAlchemy's attribute
+     lookup raised:
 
-  ✅ FIX MODEL-9 — Added server_default="false" (PostgreSQL) / "0" (SQLite)
-     compatibility note: server_default="0" works for both SQLite BOOLEAN
-     and PostgreSQL BOOLEAN because PostgreSQL accepts 0/1 for bool columns.
-     doc_verified and doc_advisory already had this — confirmed correct.
+       AttributeError: 'User' object has no attribute 'national_id'
 
-  ✅ FIX MODEL-10 — Added explicit __repr__ methods to all models for
-     cleaner debug logs (makes 500-error tracebacks far easier to read).
+     which was caught by the CORSFallback middleware and logged, then
+     returned as a 500. The frontend received 500 on GET /auth/me after
+     every login, which prevented AuthContext from confirming the user
+     was authenticated — so the app stayed on the login page even though
+     the login POST itself returned 200 OK.
 
-  ✅ FIX MODEL-11 — Added index=True to Application.job_id and
-     Application.applicant_id. Without indexes, the /applications/my
-     and /hr/candidates queries do full-table scans on PostgreSQL, which
-     causes slow responses that time out on Render free tier → 500.
-     Also indexed Application.submitted_at for the frequent IS NOT NULL
-     filter used in both applicant and HR views.
-
-  ✅ FIX MODEL-12 — Added index=True to Document.application_id and
-     ProfileDocument.user_id. Every document lookup joins on these columns;
-     without indexes, large tables cause timeouts on Render free tier.
-
-  ✅ FIX MODEL-13 — Application.submitted_at default changed from
-     default=None to no default at all (omitted). SQLAlchemy's default=None
-     is a Python-side default that fires on INSERT, overwriting an explicit
-     None passed by application code. The correct pattern is to leave it
-     unset (nullable=True is enough) and set it explicitly in the route
-     when submitting.
+     Fix: add national_id = Column(String(50), nullable=True) to User,
+     consistent with the runtime migration in ensure_user_profile_columns().
 """
 from __future__ import annotations
 
@@ -85,8 +69,17 @@ class User(Base):
     # ✅ FIX MODEL-1: profile fields stored on User (persistent, no application needed)
     # ✅ FIX MODEL-8: Removed server_default=None — nullable=True already implies NULL.
     #                 server_default=None is a no-op in PostgreSQL and confuses Alembic.
-    phone   = Column(String(50),  nullable=True)
-    address = Column(String(255), nullable=True)
+    phone      = Column(String(50),  nullable=True)
+    address    = Column(String(255), nullable=True)
+
+    # ✅ FIX MODEL-14 (CRITICAL): national_id was referenced in main.py v6.6.0
+    # (in /auth/me, PUT /profile, and _build_profile_response) but was missing
+    # from the ORM model. This caused:
+    #   AttributeError: 'User' object has no attribute 'national_id'
+    # on every GET /auth/me call after login → 500 → frontend stuck on login page.
+    # The runtime migration in ensure_user_profile_columns() already adds the DB
+    # column; this line registers it with SQLAlchemy's ORM so attribute access works.
+    national_id = Column(String(50),  nullable=True)
 
     role = Column(
         SAEnum(UserRole, native_enum=False),
@@ -156,7 +149,6 @@ class Application(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # ✅ FIX MODEL-11: index=True on FK columns used in WHERE/JOIN on every request.
-    #    Without these, PostgreSQL does full-table scans → timeouts on Render → 500.
     applicant_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     job_id       = Column(Integer, ForeignKey("jobs.id"),  nullable=False, index=True)
 
@@ -187,9 +179,7 @@ class Application(Base):
     doc_advisory = Column(Boolean, default=False, server_default="0")
 
     # ✅ FIX MODEL-5: timezone=True on all DateTime columns
-    # ✅ FIX MODEL-13: No default= here. default=None fires on INSERT and overwrites
-    #    an explicit submitted_at=None passed by the route, causing confusion.
-    #    nullable=True is sufficient — set submitted_at explicitly in the route.
+    # ✅ FIX MODEL-13: No default= here. nullable=True is sufficient.
     submitted_at   = Column(DateTime(timezone=True), nullable=True)
     shortlisted_at = Column(DateTime(timezone=True), nullable=True)
 
