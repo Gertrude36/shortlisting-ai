@@ -11,9 +11,9 @@ import api from '../api/axios'
 
 // ── Brand tokens (matches GI Recruitment Network) ───────────
 const B = {
-  navy:        '#0f172a',   // navbar background
-  navyMid:     '#1e293b',   // slightly lighter navy
-  blue:        '#2563eb',   // brand primary
+  navy:        '#0f172a',
+  navyMid:     '#1e293b',
+  blue:        '#2563eb',
   blueDark:    '#1d4ed8',
   blueLight:   '#3b82f6',
   blueXLight:  '#dbeafe',
@@ -27,7 +27,7 @@ const B = {
   emeraldLight:'#d1fae5',
   red:         '#dc2626',
   redLight:    '#fee2e2',
-  text:        '#0f172a',   // near-black — high contrast on projector
+  text:        '#0f172a',
   textMid:     '#334155',
   textLight:   '#64748b',
   border:      '#cbd5e1',
@@ -43,96 +43,382 @@ const JOB_LEVELS = [
   '7.I','7.II','7.III',
 ]
 
+// ── Rwanda-localised Job Templates ──────────────────────────
 const JOB_TEMPLATES = {
-  'Veterinary Officer': {
-    description: 'We are seeking a qualified Veterinary Officer to provide professional animal health services, disease surveillance, and veterinary public health support across our operations.',
-    about_role: 'The Veterinary Officer will be responsible for diagnosing and treating animal diseases, conducting health inspections, implementing disease control programs, and ensuring compliance with veterinary public health standards.',
-    responsibilities: ['Diagnose and treat diseases in livestock and companion animals','Conduct disease surveillance and report outbreaks to relevant authorities','Perform post-mortem examinations and interpret laboratory results','Administer vaccinations and supervise disease prevention programs','Inspect meat, dairy, and animal products for public health compliance','Advise farmers on animal nutrition, breeding, and husbandry practices','Maintain veterinary records and prepare clinical and field reports','Collaborate with government agencies on zoonotic disease control'],
-    required_education_levels: "Bachelor's, Master's, PhD",
-    required_degrees: ['Bachelor of Veterinary Medicine (BVM)','Bachelor of Veterinary Science (BVSc)',"Bachelor's in Animal Health and Production",'Master of Veterinary Medicine (MVM)','Master of Science in Veterinary Epidemiology','PhD in Veterinary Sciences'],
-    required_fields: 'Veterinary Medicine, Animal Health, Veterinary Science, Animal Science',
-    required_min_experience: 2, required_max_experience: 15,
-    required_skills: ['Animal diagnosis and treatment','Surgical procedures (soft tissue and orthopaedic)','Livestock disease surveillance','Zoonotic disease control','Meat and dairy inspection','Laboratory sample collection and interpretation','Vaccination program management','Veterinary record keeping','One Health approach','Emergency animal care'],
-    required_certifications: ['Registered Veterinarian License (Veterinary Board)','Certificate of Competence in Animal Health'],
-    preferred_qualifications: ['Postgraduate training in Epidemiology or Public Health','Experience with GIS-based disease mapping','Training in HACCP or food safety systems','Familiarity with FAO/OIE disease reporting standards'],
+
+  'Agronomist': {
+    description:
+      'We are seeking a qualified Agronomist to provide technical expertise in crop production, soil management, and agricultural extension services that boost smallholder productivity across Rwanda.',
+    about_role:
+      'The Agronomist will work closely with farming communities, cooperatives, and district agriculture teams to improve crop yields, introduce climate-smart practices, and implement Rwanda\'s Crop Intensification Programme and land-use consolidation initiatives.',
+    responsibilities: [
+      'Conduct soil and crop assessments and recommend appropriate agronomic interventions',
+      'Provide technical guidance on crop intensification, fertiliser use, and seed selection',
+      'Facilitate farmer training and field demonstrations on modern farming techniques',
+      'Monitor and evaluate crop performance and report findings to programme managers',
+      'Collaborate with RAB, district agronomy officers, and development partners',
+      'Support the design and implementation of irrigation and water harvesting schemes',
+      'Prepare agronomic reports and extension materials in Kinyarwanda and English',
+      'Promote climate-smart agriculture and agroforestry practices',
+    ],
+    required_education_levels: "Bachelor's, Master's",
+    required_degrees: [
+      'Bachelor of Science in Agronomy (University of Rwanda – College of Agriculture)',
+      'Bachelor of Science in Agriculture (INES-Ruhengeri)',
+      'Bachelor of Science in Crop Science (University of Rwanda)',
+      'Bachelor of Science in Agricultural Sciences (AUCA)',
+      "Bachelor's in Soil Science and Land Management (University of Rwanda)",
+      'Master of Science in Agronomy (University of Rwanda)',
+      'Master of Science in Crop Production and Management',
+    ],
+    required_fields:
+      'Agronomy, Crop Science, Agriculture, Soil Science, Agricultural Sciences, Horticulture',
+    required_min_experience: 2,
+    required_max_experience: 12,
+    required_skills: [
+      'Crop production and management (maize, beans, cassava, Irish potato, sorghum)',
+      'Soil fertility assessment and fertiliser recommendation',
+      'Integrated Pest and Disease Management (IPDM)',
+      'Farmer field school (FFS) facilitation',
+      'Climate-smart agriculture practices',
+      'Agricultural data collection and analysis (KoBoToolbox, ODK)',
+      'Irrigation system design and management',
+      'GIS-based field mapping and reporting',
+      'Post-harvest handling and storage advisory',
+      'Report writing in English and Kinyarwanda',
+    ],
+    required_certifications: [
+      'Rwanda Agriculture Board (RAB) professional registration',
+      'Certificate of Competence in Agricultural Extension (TVET or RAB)',
+    ],
+    preferred_qualifications: [
+      'Experience working with NGOs or development partners (USAID, FAO, WFP, GIZ)',
+      'Training in Climate-Smart Agriculture (CSA) or Conservation Agriculture',
+      "Familiarity with Rwanda's Crop Intensification Programme (CIP) and Land Use Consolidation",
+      'Motorbike licence (B1) — field positions often require district travel',
+      'Knowledge of agricultural value chains and cooperative management',
+    ],
     employment_type: 'Full-time',
   },
+
   'Software Engineer': {
-    description: 'We are looking for a talented Software Engineer to design, develop, and maintain high-quality, scalable software systems that power our core products.',
-    about_role: 'As a Software Engineer you will own the full development lifecycle — from requirements analysis and architecture design to implementation, testing, and production deployment.',
-    responsibilities: ['Design and implement scalable, maintainable backend and frontend services','Write clean, well-tested, and thoroughly documented code','Participate in architecture decisions and technical design reviews','Conduct and respond to code reviews with constructive feedback','Investigate, debug, and resolve production incidents','Collaborate with product managers, designers, and QA engineers','Contribute to CI/CD pipeline improvements and DevOps practices','Mentor junior engineers and share technical knowledge'],
+    description:
+      'We are looking for a talented Software Engineer to design, develop, and maintain scalable software systems that power our digital products and services in the Rwandan and East African market.',
+    about_role:
+      'As a Software Engineer you will own the full development lifecycle — from requirements analysis and architecture design through implementation, testing, and production deployment — contributing to Rwanda\'s fast-growing digital economy.',
+    responsibilities: [
+      'Design and implement scalable backend and frontend services aligned with product requirements',
+      'Write clean, well-tested, and documented code following agreed coding standards',
+      'Participate in architecture decisions and technical design reviews',
+      'Conduct and respond to code reviews with constructive feedback',
+      'Investigate, debug, and resolve production incidents with minimal downtime',
+      'Collaborate with product managers, UI/UX designers, and QA engineers',
+      'Contribute to CI/CD pipeline improvements and DevOps practices',
+      'Mentor junior engineers and share technical knowledge within the team',
+    ],
     required_education_levels: "Bachelor's, Master's",
-    required_degrees: ['Bachelor of Science in Computer Science','Bachelor of Science in Software Engineering','Bachelor of Science in Information Technology','Bachelor of Engineering in Computer Engineering','Master of Science in Computer Science','Master of Science in Software Engineering'],
-    required_fields: 'Computer Science, Software Engineering, Information Technology, Computer Engineering',
-    required_min_experience: 2, required_max_experience: 12,
-    required_skills: ['Python or Java or Node.js (backend development)','React or Vue.js (frontend development)','SQL and NoSQL databases (PostgreSQL, MongoDB)','RESTful API design and development','Git version control and branching strategies','Docker and containerisation','Unit testing and test-driven development (TDD)','Cloud platforms (AWS, GCP, or Azure)','Agile/Scrum methodologies','Data structures and algorithms'],
+    required_degrees: [
+      'Bachelor of Science in Computer Science (University of Rwanda – College of Science and Technology)',
+      'Bachelor of Science in Software Engineering (AUCA – Adventist University of Central Africa)',
+      'Bachelor of Science in Information Technology (INES-Ruhengeri)',
+      'Bachelor of Science in Computer Engineering (University of Rwanda)',
+      'Bachelor of Science in Information Systems (Carnegie Mellon University Africa, Kigali)',
+      'Master of Science in Computer Science (CMU Africa)',
+      'Master of Science in Software Engineering (University of Rwanda)',
+    ],
+    required_fields:
+      'Computer Science, Software Engineering, Information Technology, Computer Engineering, Information Systems',
+    required_min_experience: 2,
+    required_max_experience: 12,
+    required_skills: [
+      'Python or Java or Node.js (backend development)',
+      'React or Vue.js (frontend development)',
+      'SQL and NoSQL databases (PostgreSQL, MongoDB)',
+      'RESTful API design and development',
+      'Git version control and branching strategies (GitHub / GitLab)',
+      'Docker and containerisation',
+      'Unit testing and test-driven development (TDD)',
+      'Cloud platforms (AWS, GCP, or Azure)',
+      'Agile / Scrum methodologies',
+      'Data structures and algorithms',
+    ],
     required_certifications: [],
-    preferred_qualifications: ['AWS Certified Developer or Solutions Architect','Kubernetes (CKA/CKAD) certification','Contributions to open-source projects','Experience with microservices architecture','GraphQL API experience'],
+    preferred_qualifications: [
+      'AWS Certified Developer or Solutions Architect',
+      'Google Associate Cloud Engineer or Professional Cloud Developer',
+      'Kubernetes (CKA / CKAD) certification',
+      'Experience integrating mobile money APIs (MTN MoMo, Airtel Money)',
+      'Contributions to open-source projects or local tech community (Kigali Dev, Rwanda ICT Chamber)',
+    ],
     employment_type: 'Full-time',
   },
+
   'Accountant': {
-    description: 'We are looking for a meticulous and experienced Accountant to manage financial records, ensure regulatory compliance, and support strategic financial planning.',
-    about_role: 'The Accountant will maintain the integrity of our financial reporting systems, manage month-end and year-end processes, oversee tax compliance, and provide financial analysis to support management decision-making.',
-    responsibilities: ['Prepare, review, and analyse monthly, quarterly, and annual financial statements','Manage accounts payable, accounts receivable, and general ledger entries','Perform bank reconciliations and ensure timely resolution of discrepancies','Prepare and file corporate tax returns and ensure VAT compliance','Support internal and external audit processes with documentation','Develop and monitor departmental budgets and forecasts','Analyse financial variances and present findings to senior management','Implement and strengthen internal financial controls'],
+    description:
+      'We are looking for a meticulous Accountant to manage financial records, ensure compliance with Rwanda Revenue Authority (RRA) regulations, and support strategic financial planning.',
+    about_role:
+      'The Accountant will maintain the integrity of financial reporting systems, manage month-end and year-end processes, oversee RRA tax compliance, and provide financial analysis to support management decision-making in line with IFRS and Rwandan GAAP.',
+    responsibilities: [
+      'Prepare, review, and analyse monthly, quarterly, and annual financial statements',
+      'Manage accounts payable, accounts receivable, and general ledger entries',
+      'Perform bank reconciliations and ensure timely resolution of discrepancies',
+      'Prepare and file corporate tax returns (CIT), VAT, and PAYE declarations via RRA e-Tax portal',
+      'Support internal and external audit processes with complete documentation',
+      'Develop and monitor departmental budgets and multi-year forecasts',
+      'Analyse financial variances and present findings to senior management',
+      'Implement and strengthen internal financial controls in line with MINECOFIN guidelines',
+    ],
     required_education_levels: "Bachelor's, Master's",
-    required_degrees: ['Bachelor of Commerce in Accounting','Bachelor of Science in Accounting and Finance','Bachelor of Business Administration (Accounting option)','Bachelor of Arts in Economics and Finance','Master of Science in Accounting','Master of Business Administration (Finance)'],
-    required_fields: 'Accounting, Finance, Business Administration, Economics',
-    required_min_experience: 2, required_max_experience: 15,
-    required_skills: ['Financial reporting (IFRS/GAAP)','General ledger management','Tax preparation and compliance (corporate, VAT, PAYE)','Accounts payable and receivable','Bank reconciliation','Advanced Microsoft Excel (pivot tables, VLOOKUP, financial models)','Accounting software (QuickBooks, Sage, SAP, or Oracle)','Budgeting and financial forecasting','Internal controls and audit support','Cash flow management'],
-    required_certifications: ['Certified Public Accountant (CPA)','Association of Chartered Certified Accountants (ACCA)'],
-    preferred_qualifications: ['Chartered Management Accountant (CMA) designation','Experience with SAP ERP or Oracle Financials','IFRS specialist certification','CFA Level I or above'],
+    required_degrees: [
+      'Bachelor of Commerce in Accounting (University of Rwanda – School of Business)',
+      'Bachelor of Business Administration — Accounting Option (AUCA)',
+      'Bachelor of Science in Accounting and Finance (INES-Ruhengeri)',
+      'Bachelor of Arts in Economics and Finance (Kigali Independent University – ULK)',
+      'Master of Science in Accounting and Finance (University of Rwanda)',
+      'Master of Business Administration — Finance Concentration (CMU Africa / KIM)',
+    ],
+    required_fields:
+      'Accounting, Finance, Business Administration, Economics, Commerce',
+    required_min_experience: 2,
+    required_max_experience: 15,
+    required_skills: [
+      'Financial reporting (IFRS / Rwanda GAAP)',
+      'General ledger management',
+      'RRA e-Tax portal — CIT, VAT, and PAYE filing',
+      'Accounts payable and receivable management',
+      'Bank reconciliation',
+      'Advanced Microsoft Excel (pivot tables, VLOOKUP, financial models)',
+      'Accounting software (QuickBooks, Sage, or SAP)',
+      'Budgeting and financial forecasting',
+      'Internal controls and audit support',
+      'Cash flow management and treasury operations',
+    ],
+    required_certifications: [
+      'CPA Rwanda — Institute of Certified Public Accountants of Rwanda (ICPAR)',
+      'Association of Chartered Certified Accountants (ACCA) — at least affiliate level',
+    ],
+    preferred_qualifications: [
+      'Full ACCA or ICPAR fellowship',
+      'Chartered Management Accountant (CMA) designation',
+      'Experience with Sage Evolution or SAP ERP in an NGO or corporate context',
+      'Knowledge of MINECOFIN IFMIS / e-Government financial systems',
+      'CFA Level I or above',
+    ],
     employment_type: 'Full-time',
   },
+
   'Registered Nurse': {
-    description: 'We are hiring a compassionate and skilled Registered Nurse to deliver high-quality patient care within a multidisciplinary clinical team.',
-    about_role: 'The Registered Nurse will assess, plan, implement, and evaluate patient care plans in collaboration with physicians and allied health professionals.',
-    responsibilities: ['Conduct comprehensive patient assessments and document findings accurately','Develop, implement, and evaluate individualised nursing care plans','Administer medications, IV therapy, and therapeutic treatments','Monitor patient vitals and respond promptly to changes in condition','Perform wound care, catheterisation, and other clinical procedures','Coordinate patient care with physicians, specialists, and allied health staff','Educate patients and families on diagnoses, medications, and discharge planning','Respond to medical emergencies and participate in resuscitation efforts'],
+    description:
+      'We are hiring a compassionate and skilled Registered Nurse to deliver high-quality patient care within a multidisciplinary clinical team in accordance with Rwanda Nursing Council standards.',
+    about_role:
+      'The Registered Nurse will assess, plan, implement, and evaluate patient care plans in collaboration with physicians and allied health professionals, adhering to Rwanda Biomedical Centre (RBC) clinical guidelines and the Rwanda Health Sector Strategic Plan.',
+    responsibilities: [
+      'Conduct comprehensive patient assessments and document findings accurately in patient records',
+      'Develop, implement, and evaluate individualised nursing care plans',
+      'Administer medications, IV therapy, and therapeutic treatments as prescribed',
+      'Monitor patient vitals and respond promptly to changes in clinical condition',
+      'Perform wound care, catheterisation, nasogastric tube insertion, and other clinical procedures',
+      'Coordinate patient care with physicians, specialists, and allied health staff',
+      'Educate patients and families on diagnoses, medications, and discharge planning in Kinyarwanda and English',
+      'Respond to medical emergencies and participate in resuscitation efforts per ACLS / BLS protocols',
+    ],
     required_education_levels: "Diploma, Bachelor's, Master's",
-    required_degrees: ['Diploma in Nursing','Bachelor of Science in Nursing (BSN)','Bachelor of Nursing (BN)','Advanced Diploma in Midwifery and Nursing','Master of Science in Nursing (MSN)','Master of Nursing (MN)'],
-    required_fields: 'Nursing, Midwifery, Health Sciences, Clinical Medicine',
-    required_min_experience: 1, required_max_experience: 20,
-    required_skills: ['Clinical patient assessment','Medication administration and pharmacology','IV therapy and venipuncture','Wound care and dressing techniques','Basic Life Support (BLS) and CPR','Electronic Health Records (EHR/EMR)','Infection prevention and control','Patient and family education','Care plan development','Emergency triage protocols'],
-    required_certifications: ['Registered Nurse License (Nursing Council)','Basic Life Support (BLS) Certification','Valid Practicing Certificate'],
-    preferred_qualifications: ['Advanced Cardiac Life Support (ACLS)','Paediatric Advanced Life Support (PALS)','ICU or critical care nursing experience','Specialty certification (oncology, perioperative, psychiatric)'],
+    required_degrees: [
+      'Advanced Diploma in Nursing (University of Rwanda – College of Medicine)',
+      'Bachelor of Science in Nursing (University of Rwanda)',
+      'Bachelor of Science in Nursing (INES-Ruhengeri)',
+      'Bachelor of Science in Nursing (Kibogora Polytechnic University)',
+      'Advanced Diploma in Midwifery and Nursing (CARAES Ndera / Gitwe College)',
+      'Master of Science in Nursing (University of Rwanda)',
+    ],
+    required_fields:
+      'Nursing, Midwifery, Clinical Medicine, Health Sciences',
+    required_min_experience: 1,
+    required_max_experience: 20,
+    required_skills: [
+      'Clinical patient assessment and triage',
+      'Medication administration, pharmacology, and controlled-drug protocols',
+      'IV therapy and venipuncture',
+      'Wound care and dressing techniques',
+      'Basic Life Support (BLS) and Cardio-Pulmonary Resuscitation (CPR)',
+      'Electronic Health Records (OpenMRS / Rwanda Health Information System – RHIS)',
+      'Infection Prevention and Control (IPC) — hand hygiene, PPE, waste management',
+      'Patient and family education (Kinyarwanda proficiency essential)',
+      'Nursing care plan development',
+      'Emergency triage protocols — START / SALT triage systems',
+    ],
+    required_certifications: [
+      'Valid Rwanda Nursing Council (RNC) practising licence',
+      'Basic Life Support (BLS) Certification (Rwanda Red Cross or equivalent)',
+      'Rwanda Biomedical Centre (RBC) recognised clinical competency certificate',
+    ],
+    preferred_qualifications: [
+      'Advanced Cardiac Life Support (ACLS) certification',
+      'Paediatric Advanced Life Support (PALS) certification',
+      'ICU / critical care or theatre nursing experience',
+      'Training in HIV/AIDS care, TB DOTS, or maternal and child health (MCH) programmes',
+      'Community health insurance (Mutuelle de Santé) documentation experience',
+    ],
     employment_type: 'Full-time',
   },
+
   'Data Analyst': {
-    description: 'We are seeking a detail-oriented Data Analyst to transform complex datasets into clear, actionable insights that drive strategic business decisions.',
-    about_role: 'In this role you will work closely with business stakeholders to define analytical requirements, build data pipelines, create interactive dashboards, and present findings that directly influence strategy.',
-    responsibilities: ['Collect, clean, and validate large structured and unstructured datasets','Write complex SQL queries and Python scripts for data extraction and transformation','Build interactive dashboards and visualisations in Tableau or Power BI','Conduct statistical analyses to identify trends, anomalies, and opportunities','Define and track KPIs in collaboration with product and business teams','Develop and maintain automated reporting pipelines','Present findings and recommendations to both technical and non-technical audiences','Collaborate with data engineers to improve data quality and availability'],
+    description:
+      'We are seeking a detail-oriented Data Analyst to transform complex datasets into clear, actionable insights that drive strategic decisions across our operations in Rwanda and the broader East African region.',
+    about_role:
+      "In this role you will work closely with business stakeholders to define analytical requirements, build data pipelines, create interactive dashboards, and present findings that directly influence strategy — supporting Rwanda's data-driven Vision 2050 priorities.",
+    responsibilities: [
+      'Collect, clean, and validate large structured and unstructured datasets from internal and external sources',
+      'Write complex SQL queries and Python / R scripts for data extraction and transformation',
+      'Build interactive dashboards and visualisations in Power BI or Tableau',
+      'Conduct statistical analyses to identify trends, anomalies, and business opportunities',
+      'Define and track KPIs in collaboration with product, operations, and management teams',
+      'Develop and maintain automated reporting pipelines to reduce manual effort',
+      'Present findings and recommendations to technical and non-technical audiences including donors and investors',
+      'Collaborate with data engineers to improve data quality, governance, and availability',
+    ],
     required_education_levels: "Bachelor's, Master's",
-    required_degrees: ['Bachelor of Science in Statistics','Bachelor of Science in Mathematics','Bachelor of Science in Computer Science','Bachelor of Science in Data Science','Bachelor of Science in Economics','Master of Science in Data Science','Master of Science in Statistics'],
-    required_fields: 'Statistics, Mathematics, Computer Science, Data Science, Economics, Information Systems',
-    required_min_experience: 1, required_max_experience: 10,
-    required_skills: ['SQL (PostgreSQL, MySQL, or BigQuery)','Python (pandas, NumPy, matplotlib, seaborn)','Data visualisation (Tableau or Power BI)','Statistical analysis and hypothesis testing','Advanced Microsoft Excel','Data cleaning and wrangling','A/B testing and experimental design','ETL processes and data pipelines','Storytelling with data','Business acumen and stakeholder communication'],
+    required_degrees: [
+      'Bachelor of Science in Statistics (University of Rwanda – College of Business and Economics)',
+      'Bachelor of Science in Mathematics (University of Rwanda)',
+      'Bachelor of Science in Computer Science (University of Rwanda / AUCA)',
+      'Bachelor of Science in Data Science (Carnegie Mellon University Africa)',
+      'Bachelor of Science in Economics (University of Rwanda – College of Business)',
+      'Master of Science in Data Science (CMU Africa / University of Rwanda)',
+      'Master of Science in Statistics (University of Rwanda)',
+    ],
+    required_fields:
+      'Statistics, Mathematics, Computer Science, Data Science, Economics, Information Systems',
+    required_min_experience: 1,
+    required_max_experience: 10,
+    required_skills: [
+      'SQL (PostgreSQL, MySQL, or BigQuery)',
+      'Python (pandas, NumPy, matplotlib, seaborn) or R',
+      'Data visualisation (Power BI or Tableau)',
+      'Statistical analysis and hypothesis testing',
+      'Advanced Microsoft Excel (Power Query, pivot tables)',
+      'Data cleaning and wrangling',
+      'A/B testing and experimental design',
+      'ETL processes and data pipelines',
+      'Storytelling with data for non-technical audiences',
+      'Survey data analysis (STATA, SPSS, or equivalent)',
+    ],
     required_certifications: [],
-    preferred_qualifications: ['Google Professional Data Analytics Certificate','Tableau Desktop Specialist or Certified Data Analyst','Experience with cloud data warehouses (Snowflake, BigQuery, Redshift)','Knowledge of machine learning basics (scikit-learn)','Microsoft Power BI Data Analyst (PL-300) certification'],
+    preferred_qualifications: [
+      'Google Professional Data Analytics Certificate',
+      'Microsoft Power BI Data Analyst (PL-300) certification',
+      'Experience with NISR (National Institute of Statistics Rwanda) datasets or DHS data',
+      'Familiarity with M&E frameworks (logframe, results-based management) for NGO / donor reporting',
+      'Knowledge of cloud data warehouses (BigQuery, Snowflake, or Redshift)',
+    ],
     employment_type: 'Full-time',
   },
+
   'Human Resources Officer': {
-    description: 'We are looking for a proactive HR Officer to manage talent acquisition, employee relations, performance management, and HR compliance across the organisation.',
-    about_role: 'The HR Officer will support the full employee lifecycle — from recruitment and onboarding to performance reviews, training, and offboarding.',
-    responsibilities: ['Manage end-to-end recruitment including job posting, screening, interviewing, and onboarding','Maintain and update HR information systems and employee records','Coordinate performance appraisal cycles and support managers in the process','Handle employee relations issues, grievances, and disciplinary procedures','Develop and implement HR policies in line with labour legislation','Coordinate training and development programs for all staff levels','Process payroll inputs and liaise with the Finance department','Ensure compliance with employment law and statutory reporting'],
+    description:
+      'We are looking for a proactive HR Officer to manage talent acquisition, employee relations, performance management, and HR compliance in line with Rwanda Labour Law (Law No. 66/2018).',
+    about_role:
+      'The HR Officer will support the full employee lifecycle — from recruitment and onboarding to performance reviews, training, and offboarding — ensuring practices align with RSSB obligations, the Rwanda Labour Code, and organisational policy.',
+    responsibilities: [
+      'Manage end-to-end recruitment including job posting on Rwandan job boards, screening, interviewing, and onboarding',
+      'Maintain and update HR information systems and employee records in line with RSSB registration requirements',
+      'Coordinate performance appraisal cycles and support managers throughout the process',
+      'Handle employee relations issues, grievances, and disciplinary procedures per Labour Law No. 66/2018',
+      'Develop and implement HR policies aligned with Rwanda employment legislation and MIFOTRA guidelines',
+      'Coordinate training and professional development programmes for all staff levels',
+      'Process monthly payroll inputs and submit RSSB pension and RAMA / MMI medical deductions accurately',
+      'Liaise with RSSB, RRA (PAYE), and MIFOTRA for statutory compliance and reporting',
+    ],
     required_education_levels: "Bachelor's, Master's",
-    required_degrees: ['Bachelor of Arts in Human Resource Management','Bachelor of Business Administration (HR option)','Bachelor of Science in Organisational Psychology','Bachelor of Commerce in Industrial Relations','Master of Human Resource Management','Master of Business Administration (HR specialisation)'],
-    required_fields: 'Human Resource Management, Business Administration, Organisational Psychology, Industrial Relations',
-    required_min_experience: 2, required_max_experience: 12,
-    required_skills: ['Talent acquisition and recruitment','HRIS systems (SAP HR, Workday, or BambooHR)','Performance management systems','Labour law and employment legislation','Employee relations and conflict resolution','Payroll processing','Training needs analysis and L&D coordination','HR policy development','Onboarding and offboarding management','Data reporting and HR analytics'],
-    required_certifications: ['Professional in Human Resources (PHR) or Senior PHR (SPHR)','SHRM Certified Professional (SHRM-CP)'],
-    preferred_qualifications: ['Certified Human Resource Professional (CHRP)','Experience with SAP SuccessFactors or Workday','CIPD Level 5 or above qualification','Training in Employment Equity and Diversity'],
+    required_degrees: [
+      'Bachelor of Arts in Human Resource Management (University of Rwanda – School of Business)',
+      'Bachelor of Business Administration — HR Option (AUCA / KIM)',
+      'Bachelor of Science in Organisational Psychology (University of Rwanda)',
+      'Bachelor of Commerce in Industrial Relations (INES-Ruhengeri)',
+      'Master of Human Resource Management (University of Rwanda)',
+      'Master of Business Administration — HR Specialisation (CMU Africa / KIM)',
+    ],
+    required_fields:
+      'Human Resource Management, Business Administration, Organisational Psychology, Industrial Relations, Public Administration',
+    required_min_experience: 2,
+    required_max_experience: 12,
+    required_skills: [
+      'Talent acquisition and recruitment for Rwandan and East African talent pools',
+      'HRIS systems (SmartHR, BambooHR, or SAP HR)',
+      'Rwanda Labour Law (Law No. 66/2018) and statutory compliance',
+      'RSSB pension and health scheme administration',
+      'RRA PAYE processing and e-Tax declaration',
+      'Performance management systems and appraisal facilitation',
+      'Employee relations and conflict resolution',
+      'Training needs analysis and L&D coordination',
+      'HR policy development and employee handbook management',
+      'HR data reporting and analytics (Excel / Power BI)',
+    ],
+    required_certifications: [
+      'Professional in Human Resources (PHR) or Senior PHR (SPHR) — HRCI',
+      'SHRM Certified Professional (SHRM-CP)',
+    ],
+    preferred_qualifications: [
+      'CIPD Level 5 or above qualification',
+      'Certified Human Resource Professional (CHRP) — Africa or East African HR body',
+      'Experience with RSSB online portal and MIFOTRA declaration systems',
+      'Training in Gender Mainstreaming and Diversity aligned with Rwanda Gender Monitoring Office (GMO) standards',
+      'Fluency in Kinyarwanda, English, and French (trilingual is a strong advantage)',
+    ],
     employment_type: 'Full-time',
   },
+
   'Project Manager': {
-    description: 'We are seeking an experienced Project Manager to lead cross-functional teams and deliver high-impact initiatives on time, within scope, and on budget.',
-    about_role: 'As Project Manager you will own end-to-end project delivery — from initiation and planning through execution, monitoring, and closure.',
-    responsibilities: ['Define and document project scope, goals, deliverables, and success metrics','Develop comprehensive project plans including WBS, timelines, and resource allocation','Lead, motivate, and coordinate cross-functional project teams','Identify, assess, and proactively mitigate project risks and issues','Manage project budget, track expenditures, and report financial variances','Facilitate sprint planning, daily stand-ups, retrospectives, and stakeholder reviews','Maintain project documentation including RAID logs, status reports, and change requests','Conduct post-implementation reviews and capture lessons learned'],
+    description:
+      'We are seeking an experienced Project Manager to lead cross-functional teams and deliver high-impact initiatives on time, within scope, and on budget in Rwanda and the East African region.',
+    about_role:
+      "As Project Manager you will own end-to-end project delivery — from initiation and planning through execution, monitoring, and closure — working with government institutions, donors, and private-sector partners to achieve measurable development and business outcomes aligned with Rwanda's NST1 and Vision 2050.",
+    responsibilities: [
+      'Define and document project scope, goals, deliverables, and success metrics aligned with donor / stakeholder requirements',
+      'Develop comprehensive project plans including WBS, Gantt charts, and resource allocation using MS Project or Asana',
+      'Lead, motivate, and coordinate cross-functional and cross-district project teams',
+      'Identify, assess, and proactively mitigate project risks and issues through RAID log management',
+      'Manage project budget, track expenditures, and report financial variances to finance and donors',
+      'Facilitate sprint planning, stand-ups, retrospectives, and stakeholder review meetings',
+      'Maintain project documentation: RAID logs, donor progress reports, change requests, and lessons-learned registers',
+      'Conduct post-implementation reviews and capture lessons learned for organisational knowledge management',
+    ],
     required_education_levels: "Bachelor's, Master's",
-    required_degrees: ['Bachelor of Business Administration (Project Management option)','Bachelor of Science in Engineering','Bachelor of Science in Information Technology','Master of Business Administration (MBA)','Master of Science in Project Management','Master of Science in Engineering Management'],
-    required_fields: 'Business Administration, Project Management, Engineering, Computer Science, Information Technology',
-    required_min_experience: 3, required_max_experience: 20,
-    required_skills: ['Project planning and scheduling (MS Project, Jira, Asana)','Risk management and mitigation planning','Budget management and cost control','Stakeholder management and executive communication','Agile and Scrum methodologies','Waterfall and hybrid project delivery frameworks','Change management','Team leadership and conflict resolution','Resource allocation and capacity planning','Status reporting and documentation'],
-    required_certifications: ['Project Management Professional (PMP)','PRINCE2 Practitioner'],
-    preferred_qualifications: ['Certified Scrum Master (CSM) or SAFe Agilist','ITIL Foundation certification','Six Sigma Green Belt or Black Belt','Experience managing budgets above $500,000'],
+    required_degrees: [
+      'Bachelor of Business Administration — Project Management (University of Rwanda / KIM)',
+      'Bachelor of Science in Engineering (University of Rwanda – College of Science and Technology)',
+      'Bachelor of Science in Information Technology (AUCA / INES-Ruhengeri)',
+      'Master of Business Administration — MBA (CMU Africa / KIM / University of Rwanda)',
+      'Master of Science in Project Management (University of Rwanda)',
+      'Master of Arts in Development Studies (University of Rwanda / SFB)',
+    ],
+    required_fields:
+      'Business Administration, Project Management, Engineering, Computer Science, Information Technology, Development Studies, Public Administration',
+    required_min_experience: 3,
+    required_max_experience: 20,
+    required_skills: [
+      'Project planning and scheduling (MS Project, Asana, or Jira)',
+      'Risk management and RAID log maintenance',
+      'Budget management, cost control, and donor financial reporting',
+      'Stakeholder management and executive / government communication',
+      'Agile and Scrum methodologies',
+      'Waterfall and hybrid project delivery frameworks',
+      'Change management and adaptive management approaches',
+      'Team leadership and conflict resolution in multicultural teams',
+      'Results-Based Management (RBM) and logframe development',
+      'Donor reporting (USAID, EU, World Bank, GIZ, or DFID / FCDO formats)',
+    ],
+    required_certifications: [
+      'Project Management Professional (PMP) — PMI',
+      'PRINCE2 Practitioner',
+    ],
+    preferred_qualifications: [
+      'Certified Scrum Master (CSM) or SAFe Agilist',
+      'ITIL Foundation certification',
+      'Experience managing MINECOFIN / LODA / RDB-funded projects',
+      "Familiarity with Rwanda's EDPRS / NST1 and Vision 2050 strategic frameworks",
+      'Budget management experience above USD 500,000 in donor-funded programmes',
+    ],
     employment_type: 'Full-time',
   },
 }
@@ -147,7 +433,7 @@ const inputStyle = {
   border:       `2px solid ${B.border}`,
   background:   B.white,
   color:        B.text,
-  fontSize:     '0.95rem',        // larger for projector
+  fontSize:     '0.95rem',
   fontWeight:   500,
   boxSizing:    'border-box',
   outline:      'none',
@@ -269,7 +555,6 @@ function SectionHeader({ icon, title, subtitle, color = B.blue, step }) {
       borderBottom:  `2px solid ${B.borderLight}`,
       marginBottom:  20,
     }}>
-      {/* Step badge */}
       {step && (
         <div style={{
           width:          28,
@@ -288,7 +573,6 @@ function SectionHeader({ icon, title, subtitle, color = B.blue, step }) {
           {step}
         </div>
       )}
-      {/* Icon box */}
       <div style={{
         width:          40,
         height:         40,
@@ -430,7 +714,6 @@ export default function HRJobCreate() {
     }
   }
 
-  // Card shared style
   const cardStyle = {
     background:   B.white,
     border:       `1.5px solid ${B.borderLight}`,
@@ -448,7 +731,7 @@ export default function HRJobCreate() {
       <div className="page-wrapper" style={{ background: B.bg, minHeight: '100vh' }}>
         <Navbar />
 
-        {/* ── Page header — matches site navy→blue gradient ── */}
+        {/* ── Page header ── */}
         <div style={{
           background: `linear-gradient(135deg, ${B.navy} 0%, #1e3a5f 45%, ${B.blue} 100%)`,
           padding:    '44px 20px 40px',
@@ -765,7 +1048,7 @@ export default function HRJobCreate() {
                   />
 
                   <InfoBanner color={B.sky}>
-                    Add each accepted degree in full — e.g. <strong>"Bachelor of Science in Accounting"</strong>.
+                    Add each accepted degree in full — e.g. <strong>"Bachelor of Science in Accounting (University of Rwanda)"</strong>.
                     The AI matches these exactly against applicant submissions.
                   </InfoBanner>
 
@@ -775,7 +1058,7 @@ export default function HRJobCreate() {
                     icon={<GraduationCap size={14} />}
                     tags={form.required_degrees}
                     onChange={setArr('required_degrees')}
-                    placeholder="e.g. Bachelor of Commerce in Accounting"
+                    placeholder="e.g. Bachelor of Commerce in Accounting (University of Rwanda)"
                     color={B.sky}
                   />
 
@@ -831,7 +1114,6 @@ export default function HRJobCreate() {
                     </div>
                   </div>
 
-                  {/* Auto-disqualification warning */}
                   <div style={{
                     padding:      '12px 16px',
                     background:   '#fffbeb',
@@ -870,7 +1152,7 @@ export default function HRJobCreate() {
                   />
 
                   <InfoBanner color={B.violet}>
-                    Be specific — write <strong>"Anaesthesia monitoring"</strong> not just <em>"Medical skills"</em>.
+                    Be specific — write <strong>"RRA e-Tax VAT filing"</strong> not just <em>"Tax skills"</em>.
                     Applicants matching fewer than <strong>30%</strong> of skills are automatically disqualified.
                   </InfoBanner>
 
@@ -880,7 +1162,7 @@ export default function HRJobCreate() {
                     icon={<Wrench size={14} />}
                     tags={form.required_skills}
                     onChange={setArr('required_skills')}
-                    placeholder="e.g. Financial reporting (IFRS/GAAP)"
+                    placeholder="e.g. RRA e-Tax portal — CIT, VAT, and PAYE filing"
                     color={B.violet}
                   />
                 </div>
@@ -901,7 +1183,7 @@ export default function HRJobCreate() {
                     icon={<Award size={14} />}
                     tags={form.required_certifications}
                     onChange={setArr('required_certifications')}
-                    placeholder="e.g. Certified Public Accountant (CPA)"
+                    placeholder="e.g. CPA Rwanda (ICPAR)"
                     color={B.amber}
                   />
 
@@ -911,7 +1193,7 @@ export default function HRJobCreate() {
                     icon={<Star size={14} />}
                     tags={form.preferred_qualifications}
                     onChange={setArr('preferred_qualifications')}
-                    placeholder="e.g. CFA Level I or above"
+                    placeholder="e.g. CIPD Level 5 or above"
                     color={B.emerald}
                   />
                 </div>
@@ -983,7 +1265,6 @@ export default function HRJobCreate() {
                   overflowY:    'auto',
                   boxShadow:    '0 2px 10px rgba(15,23,42,.07)',
                 }}>
-                  {/* Preview header */}
                   <div style={{
                     display:       'flex',
                     alignItems:    'center',
@@ -1063,7 +1344,6 @@ export default function HRJobCreate() {
                       </>
                     )}
 
-                    {/* Switch to preview tab CTA */}
                     <button
                       type="button"
                       onClick={() => setActiveTab('preview')}
@@ -1182,7 +1462,6 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* Preview actions */}
                 <div style={{ marginTop: 36, paddingTop: 24, borderTop: `2px solid ${B.borderLight}`, display: 'flex', gap: 14 }}>
                   <button
                     onClick={() => setActiveTab('form')}
