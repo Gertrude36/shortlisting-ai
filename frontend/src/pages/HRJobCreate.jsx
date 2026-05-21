@@ -48,13 +48,7 @@ function degreeTier(degreeStr) {
   return 2
 }
 
-const TIER_LABELS = {
-  1: 'Diploma',
-  2: "Bachelor's",
-  3: "Master's",
-  4: 'PhD',
-}
-
+const TIER_LABELS = { 1: 'Diploma', 2: "Bachelor's", 3: "Master's", 4: 'PhD' }
 const TIER_COLORS = {
   1: { bg: '#fef3c7', border: '#d97706', text: '#78350f' },
   2: { bg: '#dbeafe', border: '#2563eb', text: '#1e3a8a' },
@@ -63,7 +57,6 @@ const TIER_COLORS = {
 }
 
 // ── Per-degree experience calculation ─────────────────────────
-// PhD -3 | Master's -1 | Bachelor's 0 | Diploma +3
 function calcExpForDegree(tier, baseMin, baseMax) {
   const adjustments = { 4: -3, 3: -1, 2: 0, 1: 3 }
   const adj = adjustments[tier] ?? 0
@@ -71,7 +64,7 @@ function calcExpForDegree(tier, baseMin, baseMax) {
   return Math.min(adjusted, baseMax)
 }
 
-// ── Serialize for backend: "DegreeName [min X yrs]" pipe-joined ─
+// ── Serialize for backend ─────────────────────────────────────
 function serializeDegreesWithExp(degrees, baseMin, baseMax) {
   return degrees
     .map(d => {
@@ -80,20 +73,6 @@ function serializeDegreesWithExp(degrees, baseMin, baseMax) {
       return `${d} [min ${exp} yr${exp !== 1 ? 's' : ''}]`
     })
     .join(' | ')
-}
-
-// ── Parse serialized string back into {degree, exp} pairs ─────
-// Input:  "BSc CS [min 1 yr] | Advanced Diploma in IT [min 4 yrs]"
-// Output: [{degree: "BSc CS", exp: 1}, {degree: "Advanced Diploma in IT", exp: 4}]
-function parseDegreesWithExp(serialized) {
-  if (!serialized) return []
-  return serialized.split(' | ').map(chunk => {
-    const match = chunk.match(/^(.*?)\s*\[min (\d+) yrs?\]\s*$/)
-    if (match) {
-      return { degree: match[1].trim(), exp: parseInt(match[2], 10) }
-    }
-    return { degree: chunk.trim(), exp: null }
-  }).filter(x => x.degree)
 }
 
 // ── 60 JOB TEMPLATES ─────────────────────────────────────────
@@ -1228,7 +1207,7 @@ const RWANDA_JOBS_DATA = [
   },
 ]
 
-// ── Helpers ─────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────
 function getEducationLevel(level) {
   const map = { "Bachelor's": "Bachelor's", "Master's": "Master's", "Diploma": "Diploma", "PhD": "PhD" }
   return map[level] || "Bachelor's"
@@ -1345,38 +1324,42 @@ function fmtDeadlinePreview(dtStr) {
   catch { return dtStr }
 }
 
-// ── ExpBadge — clean coloured badge for a given exp value ────
-function ExpBadge({ exp }) {
-  const bg    = exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight  : exp <= 5 ? B.amberLight  : B.redLight
-  const bdr   = exp === 0 ? B.emerald      : exp <= 2 ? B.blue        : exp <= 5 ? B.amber        : B.red
-  const clr   = exp === 0 ? B.emerald      : exp <= 2 ? B.blueDark    : exp <= 5 ? B.amber        : B.red
-  const label = exp === 0 ? 'Entry-level (0 yrs)' : `Min ${exp} yr${exp !== 1 ? 's' : ''} experience`
+// ── NumberedList — clean numbered row component (like screenshot) ──
+function NumberedList({ items, color = B.blue, badgeRenderer }) {
+  if (!items || !items.length) return null
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      padding: '4px 12px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 800,
-      background: bg, border: `1.5px solid ${bdr}50`, color: clr, whiteSpace: 'nowrap',
-    }}>
-      <Clock size={11} /> {label}
-    </span>
+    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+      {items.map((item, i) => (
+        <div key={i} style={{
+          display: 'flex', alignItems: 'center', gap: 14,
+          padding: '14px 18px',
+          background: i % 2 === 0 ? B.white : B.bg,
+          borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
+        }}>
+          {/* Circle number */}
+          <div style={{
+            width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
+            border: `2px solid ${B.border}`, background: B.white,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '0.82rem', fontWeight: 800, color: B.textMid,
+          }}>
+            {i + 1}
+          </div>
+          {/* Content */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 600, lineHeight: 1.5 }}>
+              {typeof item === 'string' ? item : item.label}
+            </div>
+            {/* Optional badge rendered below the text */}
+            {badgeRenderer && badgeRenderer(item, i)}
+          </div>
+        </div>
+      ))}
+    </div>
   )
 }
 
-// ── TierBadge — coloured tier label ─────────────────────────
-function TierBadge({ tier }) {
-  const colors = TIER_COLORS[tier]
-  return (
-    <span style={{
-      padding: '2px 9px', borderRadius: 99, fontSize: '0.7rem', fontWeight: 800,
-      background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text,
-      whiteSpace: 'nowrap',
-    }}>
-      {TIER_LABELS[tier]}
-    </span>
-  )
-}
-
-// ── DegreeExpMatrix — live per-degree experience table ────────
+// ── DegreeExpMatrix — live preview in form (compact table) ────
 function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
   if (!degrees.length) return null
   return (
@@ -1385,16 +1368,15 @@ function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
         📊 Degree × Experience Matrix — auto-calculated
       </div>
       <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
-        {/* Header */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 180px', background: B.navy, padding: '8px 14px', gap: 12 }}>
           <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
           <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
           <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Experience Required</span>
         </div>
-        {/* Rows — one row per degree */}
         {degrees.map((d, i) => {
           const tier = degreeTier(d)
           const exp  = calcExpForDegree(tier, baseMin, baseMax)
+          const colors = TIER_COLORS[tier]
           return (
             <div key={i} style={{
               display: 'grid', gridTemplateColumns: '1fr 100px 180px',
@@ -1404,18 +1386,27 @@ function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
             }}>
               <span style={{ fontSize: '0.83rem', color: B.text, fontWeight: 600 }}>{d}</span>
               <div style={{ display: 'flex', justifyContent: 'center' }}>
-                <TierBadge tier={tier} />
+                <span style={{ padding: '2px 9px', borderRadius: 99, fontSize: '0.7rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
+                  {TIER_LABELS[tier]}
+                </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <ExpBadge exp={exp} />
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  padding: '4px 12px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 800, whiteSpace: 'nowrap',
+                  background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : B.redLight,
+                  border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
+                  color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
+                }}>
+                  <Clock size={11} /> {exp === 0 ? 'Entry-level (0 yrs)' : `Min ${exp} yr${exp !== 1 ? 's' : ''}`}
+                </span>
               </div>
             </div>
           )
         })}
-        {/* Legend */}
         <div style={{ padding: '10px 14px', background: '#f8fafc', borderTop: `1px solid ${B.borderLight}`, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
           <strong style={{ color: B.textMid }}>Auto-adjustment rule:</strong>&nbsp;
-          PhD → base−3 yrs &nbsp;·&nbsp; Master's → base−1 yr &nbsp;·&nbsp; Bachelor's → base yrs &nbsp;·&nbsp; Diploma → base+3 yrs &nbsp;(all capped at {baseMax} yrs max)
+          PhD → base−3 yrs · Master's → base−1 yr · Bachelor's → base yrs · Diploma → base+3 yrs (all capped at {baseMax} yrs max)
         </div>
       </div>
     </div>
@@ -1481,13 +1472,11 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
-      // Serialize degrees with per-tier experience thresholds for the AI shortlister
       const enrichedDegrees = serializeDegreesWithExp(
         form.required_degrees,
         Number(form.required_min_experience),
         Number(form.required_max_experience),
       )
-
       await api.post('/jobs', {
         title:                     form.title,
         description:               form.description,
@@ -1529,6 +1518,16 @@ export default function HRJobCreate() {
 
   const bMin = Number(form.required_min_experience)
   const bMax = Number(form.required_max_experience)
+
+  // ── Exp badge colour helper ──────────────────────────────────
+  const expBadgeStyle = (exp) => ({
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    padding: '3px 12px', borderRadius: 99, fontSize: '0.76rem', fontWeight: 800, whiteSpace: 'nowrap',
+    background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : B.redLight,
+    border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
+    color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
+    marginTop: 6,
+  })
 
   return (
     <>
@@ -1667,10 +1666,7 @@ export default function HRJobCreate() {
                     Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the live matrix below.
                   </InfoBanner>
                   <TagInput label="Accepted Degrees / Qualifications" hint="— one per entry, press Enter" icon={<GraduationCap size={14} />} tags={form.required_degrees} onChange={setArr('required_degrees')} placeholder="e.g. Bachelor of Commerce in Accounting" color={B.sky} />
-
-                  {/* ── LIVE DEGREE × EXPERIENCE MATRIX ── */}
                   <DegreeExpMatrix degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
-
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
                       <label style={labelStyle}>Minimum Education Level <span style={{ color: B.red }}>*</span></label>
@@ -1705,35 +1701,24 @@ export default function HRJobCreate() {
                     </div>
                   </div>
 
-                  {/* ── CLEAR EXPERIENCE SUMMARY PANEL ── */}
+                  {/* Experience summary panel */}
                   <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
                     <div style={{ padding: '10px 16px', background: B.navy, fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.8)', textTransform: 'uppercase', letterSpacing: '.07em' }}>
                       Effective experience thresholds for this job
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr' }}>
                       {[
-                        { tier: 4, label: 'PhD', exp: Math.max(0, bMin - 3) },
-                        { tier: 3, label: "Master's", exp: Math.max(0, bMin - 1) },
-                        { tier: 2, label: "Bachelor's", exp: bMin },
-                        { tier: 1, label: 'Diploma', exp: Math.min(bMin + 3, bMax) },
+                        { tier: 4, label: 'PhD',       exp: Math.max(0, bMin - 3) },
+                        { tier: 3, label: "Master's",  exp: Math.max(0, bMin - 1) },
+                        { tier: 2, label: "Bachelor's",exp: bMin },
+                        { tier: 1, label: 'Diploma',   exp: Math.min(bMin + 3, bMax) },
                       ].map(({ tier, label, exp }, i) => {
                         const colors = TIER_COLORS[tier]
                         return (
-                          <div key={tier} style={{
-                            padding: '14px 16px', textAlign: 'center',
-                            borderLeft: i > 0 ? `1px solid ${B.borderLight}` : 'none',
-                            background: B.white,
-                          }}>
+                          <div key={tier} style={{ padding: '14px 16px', textAlign: 'center', borderLeft: i > 0 ? `1px solid ${B.borderLight}` : 'none', background: B.white }}>
                             <div style={{ fontSize: '0.72rem', fontWeight: 800, color: colors.text, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>{label}</div>
-                            <div style={{
-                              fontSize: '1.6rem', fontWeight: 900, color: colors.text,
-                              lineHeight: 1, marginBottom: 4,
-                            }}>
-                              {exp}
-                            </div>
-                            <div style={{ fontSize: '0.72rem', color: B.textLight, fontWeight: 600 }}>
-                              yr{exp !== 1 ? 's' : ''} min
-                            </div>
+                            <div style={{ fontSize: '1.6rem', fontWeight: 900, color: colors.text, lineHeight: 1, marginBottom: 4 }}>{exp}</div>
+                            <div style={{ fontSize: '0.72rem', color: B.textLight, fontWeight: 600 }}>yr{exp !== 1 ? 's' : ''} min</div>
                             <div style={{ marginTop: 8 }}>
                               <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: '0.68rem', fontWeight: 700, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text }}>
                                 {exp === 0 ? 'Entry-level' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
@@ -1792,33 +1777,40 @@ export default function HRJobCreate() {
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
 
-                    {/* ── SIDEBAR: clean per-degree experience list ── */}
+                    {/* Sidebar degrees preview — numbered list style */}
                     {form.required_degrees.length > 0 && (
                       <div style={{ marginBottom: 14 }}>
                         <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
-                          Education &amp; Experience
+                          Qualifications
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 8, overflow: 'hidden' }}>
                           {form.required_degrees.slice(0, 5).map((d, i) => {
                             const tier = degreeTier(d)
                             const exp  = calcExpForDegree(tier, bMin, bMax)
-                            const colors = TIER_COLORS[tier]
                             return (
-                              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 7, background: colors.bg, border: `1.5px solid ${colors.border}30` }}>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ fontSize: '0.76rem', fontWeight: 700, color: colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d}</div>
-                                  <div style={{ fontSize: '0.68rem', color: colors.text, opacity: 0.75, marginTop: 1 }}>{TIER_LABELS[tier]}</div>
+                              <div key={i} style={{
+                                display: 'flex', alignItems: 'center', gap: 12,
+                                padding: '11px 14px',
+                                background: i % 2 === 0 ? B.white : B.bg,
+                                borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
+                              }}>
+                                <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, border: `2px solid ${B.border}`, background: B.white, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 800, color: B.textMid }}>
+                                  {i + 1}
                                 </div>
-                                <div style={{ flexShrink: 0 }}>
-                                  <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: '0.7rem', fontWeight: 800, background: 'white', border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
-                                    {exp === 0 ? '0 yrs' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
+                                <div>
+                                  <div style={{ fontSize: '0.8rem', color: B.text, fontWeight: 600 }}>{d}</div>
+                                  <span style={expBadgeStyle(exp)}>
+                                    <Clock size={10} />
+                                    {exp === 0 ? '0 Years of relevant experience' : `${exp} Year${exp !== 1 ? 's' : ''} of relevant experience`}
                                   </span>
                                 </div>
                               </div>
                             )
                           })}
                           {form.required_degrees.length > 5 && (
-                            <div style={{ fontSize: '.72rem', color: B.textLight, paddingLeft: 4 }}>+{form.required_degrees.length - 5} more degrees</div>
+                            <div style={{ padding: '8px 14px', fontSize: '.72rem', color: B.textLight, borderTop: `1px solid ${B.borderLight}`, background: B.bg }}>
+                              +{form.required_degrees.length - 5} more qualifications
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1846,79 +1838,113 @@ export default function HRJobCreate() {
               <div style={{ background: B.white, border: `1.5px solid ${B.borderLight}`, borderRadius: 14, padding: '40px 44px', maxWidth: 760, margin: '0 auto', width: '100%', boxShadow: '0 2px 12px rgba(15,23,42,.08)' }}>
                 <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.blue, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 22 }}>Job Posting Preview</div>
                 {form.title && <h2 style={{ fontSize: '1.65rem', fontWeight: 900, color: B.text, marginBottom: 14, letterSpacing: '-.02em' }}>{form.title}</h2>}
+
+                {/* Meta badges */}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
                   {form.location && <span style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 14px', borderRadius: 99, background: B.bg, border: `1.5px solid ${B.border}`, color: B.textMid, fontSize: '.8rem', fontWeight: 700 }}><MapPin size={12} /> {form.location}</span>}
                   {form.employment_type && <span style={{ padding: '4px 14px', borderRadius: 99, background: B.blueXLight, border: `1.5px solid ${B.blue}40`, color: B.blueDark, fontSize: '.8rem', fontWeight: 700 }}>{form.employment_type}</span>}
                   {form.job_level && <span style={{ padding: '4px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}40`, color: B.violet, fontSize: '.8rem', fontWeight: 700 }}>Level {form.job_level}</span>}
                   {form.number_of_posts && <span style={{ padding: '4px 14px', borderRadius: 99, background: B.emeraldLight, border: `1.5px solid ${B.emerald}40`, color: B.emerald, fontSize: '.8rem', fontWeight: 700 }}>{form.number_of_posts} Opening{form.number_of_posts > 1 ? 's' : ''}</span>}
                 </div>
-                {form.deadline && <div style={{ padding: '10px 16px', borderRadius: 8, background: '#fff7ed', border: '1.5px solid #fed7aa', color: '#9a3412', fontSize: '0.83rem', fontWeight: 700, display: 'flex', gap: 7, alignItems: 'center', marginBottom: 22 }}><Timer size={14} /> Application Deadline: {fmtDeadlinePreview(form.deadline)}</div>}
-                {form.description && <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.95rem', marginBottom: 22 }}>{form.description}</p>}
-                {form.about_role && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>About the Role</h3><p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.92rem', marginBottom: 16 }}>{form.about_role}</p></>)}
-                {form.responsibilities.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Key Responsibilities</h3><ul style={{ margin: 0, paddingLeft: 22, color: B.textMid, lineHeight: 1.9, fontSize: '0.9rem' }}>{form.responsibilities.map((r, i) => <li key={i}>{r}</li>)}</ul></>)}
 
-                {/* ── PREVIEW: clean per-degree table — one row per degree ── */}
+                {/* Deadline */}
+                {form.deadline && <div style={{ padding: '10px 16px', borderRadius: 8, background: '#fff7ed', border: '1.5px solid #fed7aa', color: '#9a3412', fontSize: '0.83rem', fontWeight: 700, display: 'flex', gap: 7, alignItems: 'center', marginBottom: 22 }}><Timer size={14} /> Application Deadline: {fmtDeadlinePreview(form.deadline)}</div>}
+
+                {/* Description */}
+                {form.description && <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.95rem', marginBottom: 22 }}>{form.description}</p>}
+                {form.about_role && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>About the Role</h3>
+                    <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.92rem', marginBottom: 16 }}>{form.about_role}</p>
+                  </>
+                )}
+
+                {/* ── KEY RESPONSIBILITIES — numbered list ── */}
+                {form.responsibilities.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14, marginTop: 26 }}>Key Responsibilities</h3>
+                    <NumberedList items={form.responsibilities} />
+                  </>
+                )}
+
+                {/* ── QUALIFICATIONS — numbered list with exp badge ── */}
                 {form.required_degrees.length > 0 && (
                   <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14, marginTop: 30 }}>Education &amp; Experience Requirements</h3>
-                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
-                      {/* Column headers */}
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 200px', background: B.navy, padding: '10px 18px', gap: 12 }}>
-                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree / Qualification</span>
-                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
-                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Experience Required</span>
-                      </div>
-                      {/* One row per degree — clean degree name + its own exp badge */}
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 4, marginTop: 30 }}>Qualifications</h3>
+                    {form.required_fields && (
+                      <p style={{ color: B.textLight, fontSize: '0.82rem', marginBottom: 12 }}>
+                        Accepted fields of study: <strong style={{ color: B.textMid }}>{form.required_fields}</strong>
+                      </p>
+                    )}
+                    {/* Numbered list — one row per degree, exp badge below the degree name */}
+                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
                       {form.required_degrees.map((d, i) => {
-                        const tier   = degreeTier(d)
-                        const exp    = calcExpForDegree(tier, bMin, bMax)
-                        const colors = TIER_COLORS[tier]
+                        const tier = degreeTier(d)
+                        const exp  = calcExpForDegree(tier, bMin, bMax)
                         return (
                           <div key={i} style={{
-                            display: 'grid', gridTemplateColumns: '1fr 100px 200px',
-                            padding: '13px 18px', gap: 12, alignItems: 'center',
+                            display: 'flex', alignItems: 'center', gap: 16,
+                            padding: '14px 20px',
                             background: i % 2 === 0 ? B.white : B.bg,
-                            borderTop: `1px solid ${B.borderLight}`,
+                            borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
                           }}>
-                            {/* Degree name — clean, no brackets */}
+                            {/* Circle number — matches screenshot style */}
+                            <div style={{
+                              width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                              border: `2px solid ${B.border}`, background: B.white,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: '0.85rem', fontWeight: 800, color: B.textMid,
+                            }}>
+                              {i + 1}
+                            </div>
+                            {/* Degree name + experience badge */}
                             <div>
-                              <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 700 }}>{d}</div>
-                            </div>
-                            {/* Tier badge */}
-                            <div style={{ display: 'flex', justifyContent: 'center' }}>
-                              <span style={{ padding: '3px 10px', borderRadius: 99, fontSize: '0.72rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
-                                {TIER_LABELS[tier]}
-                              </span>
-                            </div>
-                            {/* Experience badge — specific to THIS degree's tier */}
-                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                              <div style={{ fontSize: '0.92rem', color: B.text, fontWeight: 600 }}>{d}</div>
                               <span style={{
                                 display: 'inline-flex', alignItems: 'center', gap: 5,
-                                padding: '5px 14px', borderRadius: 99, fontSize: '0.82rem', fontWeight: 800, whiteSpace: 'nowrap',
-                                background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : B.redLight,
-                                border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
-                                color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
+                                marginTop: 6, padding: '3px 12px', borderRadius: 6,
+                                fontSize: '0.76rem', fontWeight: 700,
+                                background: B.navyMid, color: B.white,
                               }}>
-                                <Clock size={12} />
-                                {exp === 0 ? 'Entry-level (0 yrs exp)' : `Min ${exp} yr${exp !== 1 ? 's' : ''} experience`}
+                                <Clock size={11} />
+                                {exp === 0 ? '0 Years of relevant experience' : `${exp} Year${exp !== 1 ? 's' : ''} of relevant experience`}
                               </span>
                             </div>
                           </div>
                         )
                       })}
                     </div>
-                    {form.required_fields && (
-                      <p style={{ color: B.textLight, fontSize: '0.83rem', marginTop: 6 }}>
-                        Accepted fields of study: <strong style={{ color: B.textMid }}>{form.required_fields}</strong>
-                      </p>
-                    )}
+                    <div style={{ marginTop: 8, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
+                      <strong style={{ color: B.textMid }}>Note:</strong> Experience requirements adjust by qualification level — PhD (base−3 yrs) · Master's (base−1 yr) · Bachelor's (base) · Diploma (base+3 yrs)
+                    </div>
                   </>
                 )}
 
-                {form.required_skills.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Skills</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_skills.map((s, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}50`, color: B.violet, fontSize: '0.82rem', fontWeight: 700 }}>{s}</span>)}</div></>)}
-                {form.required_certifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications &amp; Licences</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_certifications.map((c, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.amberLight, border: `1.5px solid ${B.amber}50`, color: B.amber, fontSize: '0.82rem', fontWeight: 700 }}>{c}</span>)}</div></>)}
-                {form.preferred_qualifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Preferred Qualifications</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.preferred_qualifications.map((p, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.emeraldLight, border: `1.5px solid ${B.emerald}50`, color: B.emerald, fontSize: '0.82rem', fontWeight: 700 }}>{p}</span>)}</div></>)}
+                {/* ── REQUIRED SKILLS ── */}
+                {form.required_skills.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Competencies</h3>
+                    <NumberedList items={form.required_skills} />
+                  </>
+                )}
 
+                {/* ── REQUIRED CERTIFICATIONS ── */}
+                {form.required_certifications.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications &amp; Licences</h3>
+                    <NumberedList items={form.required_certifications} />
+                  </>
+                )}
+
+                {/* ── PREFERRED QUALIFICATIONS ── */}
+                {form.preferred_qualifications.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Preferred Qualifications</h3>
+                    <NumberedList items={form.preferred_qualifications} />
+                  </>
+                )}
+
+                {/* Actions */}
                 <div style={{ marginTop: 36, paddingTop: 24, borderTop: `2px solid ${B.borderLight}`, display: 'flex', gap: 14 }}>
                   <button onClick={() => setActiveTab('form')} style={{ padding: '11px 22px', borderRadius: 8, border: `2px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, cursor: 'pointer', fontSize: '0.9rem' }}>← Back to Edit</button>
                   <button disabled={loading} onClick={submit} style={{ padding: '11px 28px', borderRadius: 8, border: 'none', background: `linear-gradient(135deg, ${B.blue} 0%, ${B.blueDark} 100%)`, color: B.white, fontWeight: 800, cursor: 'pointer', fontSize: '0.9rem', boxShadow: '0 4px 14px rgba(37,99,235,.4)', display: 'flex', alignItems: 'center', gap: 8 }}>
