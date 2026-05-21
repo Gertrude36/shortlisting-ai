@@ -1,19 +1,19 @@
 /**
- * ApplicantDashboard.jsx
+ * ApplicantDashboard.jsx — v3.0.0
  *
  * FIXES:
- *  ✅ Profile completeness is read directly from AuthContext (user.phone,
- *     user.address). No separate fetch of applications needed to derive
- *     profile fields — new users with 0 applications now work correctly.
+ *  ✅ FIX-DASH-1 — Profile completeness now includes documents check.
+ *     Previously only phone + address were checked. If a user saved phone
+ *     and address but never uploaded documents, the dashboard still showed
+ *     "profile complete" and let them browse — then the apply page blocked
+ *     them. Now all three gates (phone, address, required docs) are checked
+ *     consistently using profileDocuments from AuthContext.
  *
- *  ✅ Only ONE warning banner is shown (ProfileWarningBanner). The second
- *     redundant "Important:" alert box has been removed entirely.
+ *  ✅ FIX-DASH-2 — profileDocuments comes from AuthContext (already fetched
+ *     by verifyToken). No extra /profile/documents fetch in the dashboard.
  *
- *  ✅ national_id removed from completeness check. Only phone + address
- *     are required profile fields.
- *
- *  ✅ After the profile modal closes, verifyToken() re-fetches /auth/me
- *     which returns the latest phone/address — no extra API calls needed.
+ *  ✅ FIX-DASH-3 — After profile-updated event, calls verifyToken() to
+ *     re-fetch /auth/me AND /profile/documents so all gates update together.
  */
 import React, { useEffect, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
@@ -30,18 +30,26 @@ import { useAuth } from '../context/AuthContext'
 import api from '../api/axios'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Profile completeness — only phone + address required
+// Profile completeness — phone + address + required documents
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getProfileIssues(user = {}) {
+const REQUIRED_DOC_KEYS = ['id_card', 'cv', 'diploma']
+
+function getProfileIssues(user = {}, profileDocuments = []) {
   const issues = []
   if (!user.phone)   issues.push('Phone number')
   if (!user.address) issues.push('Location / Address')
+
+  const uploadedTypes = new Set((profileDocuments || []).map(d => d.doc_type))
+  const missingDocs   = REQUIRED_DOC_KEYS.filter(k => !uploadedTypes.has(k))
+  if (missingDocs.length > 0) {
+    issues.push('Documents')
+  }
   return issues
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Single profile warning banner (replaces the 3 separate warnings)
+// Profile warning banner
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProfileWarningBanner({ issues, onOpenProfile }) {
@@ -110,7 +118,7 @@ function ProfileWarningBanner({ issues, onOpenProfile }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Profile status pill in the hero
+// Profile status pill
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProfileStatusPill({ issues }) {
@@ -139,7 +147,7 @@ function ProfileStatusPill({ issues }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Locked browse button shown when profile is incomplete
+// Locked browse button
 // ─────────────────────────────────────────────────────────────────────────────
 
 function BlockedBrowseButton({ onOpenProfile }) {
@@ -147,8 +155,7 @@ function BlockedBrowseButton({ onOpenProfile }) {
     <button
       onClick={() => {
         toast.error('Please complete your profile before applying for positions.', {
-          duration: 4000,
-          icon: '🔒',
+          duration: 4000, icon: '🔒',
         })
         onOpenProfile()
       }}
@@ -170,15 +177,16 @@ function BlockedBrowseButton({ onOpenProfile }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function ApplicantDashboard() {
-  const { user, verifyToken } = useAuth()
+  // ✅ FIX-DASH-2: get profileDocuments from context — already fetched
+  const { user, profileDocuments, verifyToken } = useAuth()
 
   const [applications, setApplications] = useState([])
   const [loading,      setLoading]      = useState(true)
   const [expandedRow,  setExpandedRow]  = useState(null)
   const [jobsMap,      setJobsMap]      = useState({})
 
-  // ✅ Profile completeness is derived directly from AuthContext — no extra fetch
-  const profileIssues  = getProfileIssues(user)
+  // ✅ FIX-DASH-1: include documents in completeness check
+  const profileIssues   = getProfileIssues(user, profileDocuments)
   const profileComplete = profileIssues.length === 0
 
   const fetchApplications = useCallback(() => {
@@ -204,8 +212,8 @@ export default function ApplicantDashboard() {
     window.dispatchEvent(new Event('open-profile-modal'))
   }
 
-  // After the profile modal saves, re-verify the token so AuthContext
-  // picks up the updated phone/address from /auth/me
+  // ✅ FIX-DASH-3: after profile-updated, re-run verifyToken to refresh
+  // both /auth/me (phone/address) and /profile/documents in one shot
   useEffect(() => {
     const handler = () => verifyToken()
     window.addEventListener('profile-updated', handler)
@@ -323,7 +331,6 @@ export default function ApplicantDashboard() {
         <div style={{ background: '#f9fafb', minHeight: '60vh', padding: '36px 20px' }}>
           <div className="container">
 
-            {/* ✅ ONE banner — no duplicate warnings */}
             <ProfileWarningBanner
               issues={profileIssues}
               onOpenProfile={openProfileModal}
@@ -394,15 +401,12 @@ export default function ApplicantDashboard() {
                     <thead>
                       <tr style={{ background: '#f3f4f6', borderBottom: '2px solid #e5e7eb' }}>
                         {['Job Title', 'Education', 'Experience', 'Decision', 'AI Score', 'Documents', 'AI Reasoning'].map(h => (
-                          <th
-                            key={h}
-                            style={{
-                              padding: '12px 16px', textAlign: 'left',
-                              fontSize: '.75rem', fontWeight: 700, color: '#374151',
-                              letterSpacing: '.05em', textTransform: 'uppercase',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
+                          <th key={h} style={{
+                            padding: '12px 16px', textAlign: 'left',
+                            fontSize: '.75rem', fontWeight: 700, color: '#374151',
+                            letterSpacing: '.05em', textTransform: 'uppercase',
+                            whiteSpace: 'nowrap',
+                          }}>
                             {h}
                           </th>
                         ))}

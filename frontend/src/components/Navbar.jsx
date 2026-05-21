@@ -1,30 +1,33 @@
 /**
- * frontend/src/components/Navbar.jsx  ·  v5.9.0
+ * frontend/src/components/Navbar.jsx  ·  v6.0.0
  *
- * FIXES in v5.9.0:
+ * FIXES vs v5.9.0:
  *
- *  ✅ FIX A — ProfileModal.handleSave() now calls updateProfile() with the
- *     correct shape: { fullName, national_id, address, phone, documents }.
- *     AuthContext v2.0.0 persists all of those fields, so the profile gate
- *     in ApplyPage re-evaluates immediately after a save — no extra fetches,
- *     no stale state, no repeated modals.
+ *  ✅ FIX-NAV-1 (CRITICAL) — profileComplete and `missing` now read from
+ *     `profileDocuments` (the separate array on AuthContext) instead of
+ *     `user.documents`. In AuthContext v3.0.0 profileDocuments is populated
+ *     by /profile/documents; user.documents does not exist and was always
+ *     undefined → profile was ALWAYS shown as incomplete regardless of uploads.
  *
- *  ✅ FIX B — Document uploads inside the modal happen BEFORE updateProfile()
- *     is called, so `documents` in the payload is always the final server
- *     list (not a mix of File objects and server docs).
+ *  ✅ FIX-NAV-2 (CRITICAL) — InfoRow for "Documents" now uses profileDocuments
+ *     from context instead of user.documents, so the sidebar shows the real
+ *     count instead of "Not set" forever.
  *
- *  ✅ FIX C — profileComplete and `missing` in the Navbar dropdown now check
- *     user.national_id correctly (AuthContext v2.0.0 always populates it).
+ *  ✅ FIX-NAV-3 — ProfileModal now receives and calls refreshDocuments() after
+ *     all uploads finish, so AuthContext.profileDocuments is updated before
+ *     updateProfile() is called and before the modal closes. This means the
+ *     Navbar dropdown immediately reflects the new document count.
  *
- *  ✅ FIX D — After a successful save the modal auto-closes (700 ms delay so
- *     the user sees the "Profile Saved!" confirmation), and the
- *     'profile-updated' event is fired exactly once so ApplyPage can react.
+ *  ✅ FIX-NAV-4 — updateProfile() call in handleSave now only sends
+ *     { phone, address, national_id } — fields the backend/AuthContext
+ *     actually handles. `fullName` and `documents` are no longer sent
+ *     (fullName is read-only; documents are managed via /profile/documents).
  *
- *  ✅ FIX E — ProfileModal no longer requires documents to be uploaded before
- *     saving if the user already has serverDocs for all required slots.
- *     This prevents "re-upload everything" friction for returning users.
+ *  ✅ FIX-NAV-5 — Removed the `phone` field being marked required in the
+ *     profile completeness check. phone is optional per backend schema;
+ *     only national_id, address, and required documents block the gate.
  *
- * All fixes from v5.8.2 (FIX 6 field-name alignment) are retained.
+ * All v5.9.0 visual design and non-broken logic is retained unchanged.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
@@ -47,6 +50,8 @@ const DOC_SLOTS = [
   { key: 'certificate', label: 'Other Certificates',    hint: 'Professional certifications',    icon: Award,         color: '#b86400', bg: '#fdf0d0', border: '#fbc86a', required: false },
   { key: 'experience',  label: 'Experience Document',   hint: 'Employment or reference letter', icon: BriefcaseIcon, color: '#0e7490', bg: '#ecfeff', border: '#67e8f9', required: false },
 ]
+
+const REQUIRED_DOC_KEYS = DOC_SLOTS.filter(s => s.required).map(s => s.key)
 
 function getDisplayName(user) {
   return user?.fullName || user?.full_name || ''
@@ -146,7 +151,7 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview }) {
               : <span style={{ fontSize: '.62rem', color: '#6b7280', fontWeight: 600, background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 3, padding: '1px 5px' }}>Optional</span>
             }
             {serverDoc && !file && (
-              <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved</span>
+              <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved ✓</span>
             )}
           </div>
           {hasFile
@@ -188,16 +193,17 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ProfileModal
 // ─────────────────────────────────────────────────────────────────────────────
-function ProfileModal({ user, updateProfile, onClose }) {
+
+function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
   const displayName = getDisplayName(user)
 
   const [form, setForm] = useState({
-    fullName:    displayName,
     national_id: user.national_id || '',
     address:     user.address     || '',
     phone:       user.phone       || '',
   })
   const [editingName, setEditingName] = useState(false)
+  const [fullName,    setFullName]    = useState(displayName)
   const [newFiles,    setNewFiles]    = useState({})
   const [serverDocs,  setServerDocs]  = useState({})
   const [loadingDocs, setLoadingDocs] = useState(true)
@@ -206,6 +212,7 @@ function ProfileModal({ user, updateProfile, onClose }) {
 
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
 
+  // Load existing profile documents from server on mount
   useEffect(() => {
     api.get('/profile/documents')
       .then(({ data }) => {
@@ -228,33 +235,32 @@ function ProfileModal({ user, updateProfile, onClose }) {
   const requiredTotal    = DOC_SLOTS.filter(s => s.required).length
   const requiredComplete = requiredDone === requiredTotal
 
-  const fieldsFilled = !!(form.national_id.trim() && form.address.trim() && form.fullName.trim())
+  const fieldsFilled = !!(form.national_id.trim() && form.address.trim() && fullName.trim())
   const isComplete   = fieldsFilled && requiredComplete
   const progress     = Math.round(
-    ([form.national_id, form.address, form.fullName].filter(v => v.trim()).length / 3) * 40 +
+    ([form.national_id, form.address, fullName].filter(v => v.trim()).length / 3) * 40 +
     (requiredDone / requiredTotal) * 60
   )
 
-  // ✅ FIX A + B: upload new files first, then call updateProfile() with the
-  // full confirmed document list so AuthContext gets the complete picture.
+  // ✅ FIX-NAV-3 + FIX-NAV-4: upload files first, refresh AuthContext docs,
+  // then call updateProfile with only the fields it actually handles.
   const handleSave = async () => {
-    if (!form.fullName.trim())    { toast.error('Full name is required');               return }
+    if (!fullName.trim())         { toast.error('Full name is required');               return }
     if (!form.national_id.trim()) { toast.error('National ID is required');             return }
     if (!form.address.trim())     { toast.error('Location is required');                return }
     if (!requiredComplete)        { toast.error('Please upload all required documents'); return }
 
     setSaving(true)
     try {
-      // Step 1 — upload any new local files to the profile documents endpoint
-      const uploadResults = await Promise.all(
-        Object.entries(newFiles).map(async ([docType, file]) => {
-          if (!file) return null
+      // Step 1 — upload any new local files
+      const uploadEntries = Object.entries(newFiles).filter(([, f]) => !!f)
+      await Promise.all(
+        uploadEntries.map(async ([docType, file]) => {
           const formData = new FormData()
           formData.append('doc_type', docType)
           formData.append('file', file)
           try {
-            const { data } = await api.post('/profile/documents', formData)
-            return { docType, serverDoc: data }
+            await api.post('/profile/documents', formData)
           } catch (err) {
             const msg = extractApiError(err, `Failed to upload ${docType}`)
             toast.error(msg)
@@ -263,26 +269,23 @@ function ProfileModal({ user, updateProfile, onClose }) {
         })
       )
 
-      // Merge newly-uploaded docs back into serverDocs map
-      const mergedServerDocs = { ...serverDocs }
-      uploadResults.forEach(result => {
-        if (result) mergedServerDocs[result.docType] = result.serverDoc
-      })
+      // ✅ FIX-NAV-3: refresh AuthContext.profileDocuments now so the
+      // dropdown count updates immediately when the modal closes
+      if (uploadEntries.length > 0) {
+        await refreshDocuments()
+      }
 
-      // Step 2 — build the final documents list from the merged map
-      const finalDocuments = Object.values(mergedServerDocs).filter(Boolean)
-
-      // Step 3 — persist everything via AuthContext (which calls PUT /profile)
-      // ✅ FIX A: pass all fields including national_id and documents
+      // Step 2 — persist text fields
+      // ✅ FIX-NAV-4: only send what the backend/AuthContext handle:
+      //   phone + address  → PUT /profile (saved to DB)
+      //   national_id      → localStorage only
+      // fullName is read-only on the backend; skip it.
       await updateProfile({
-        fullName:    form.fullName,
-        national_id: form.national_id,
-        address:     form.address,
         phone:       form.phone,
-        documents:   finalDocuments,
+        address:     form.address,
+        national_id: form.national_id,
       })
 
-      // ✅ FIX D: fire event once, then close after a short confirmation delay
       setNewFiles({})
       setDone(true)
       toast.success('Profile saved successfully!')
@@ -290,7 +293,7 @@ function ProfileModal({ user, updateProfile, onClose }) {
       setTimeout(onClose, 700)
 
     } catch {
-      // Individual errors already toasted above
+      // Individual errors already toasted in the upload loop
     } finally {
       setSaving(false)
     }
@@ -331,7 +334,7 @@ function ProfileModal({ user, updateProfile, onClose }) {
               </div>
               <div>
                 <h2 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 700, color: '#ffffff' }}>My Profile</h2>
-                <p style={{ margin: '2px 0 0', fontSize: '.8rem', color: 'rgba(255,255,255,.7)' }}>{form.fullName}</p>
+                <p style={{ margin: '2px 0 0', fontSize: '.8rem', color: 'rgba(255,255,255,.7)' }}>{fullName}</p>
               </div>
             </div>
             <button
@@ -388,14 +391,16 @@ function ProfileModal({ user, updateProfile, onClose }) {
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+              {/* Full Name — read-only unless editing */}
               <div>
-                <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>Full Name *</label>
+                <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>Full Name</label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <input
                     className="form-input"
-                    value={form.fullName}
+                    value={fullName}
                     disabled={!editingName}
-                    onChange={e => set('fullName', e.target.value)}
+                    onChange={e => setFullName(e.target.value)}
                     style={{ flex: 1, background: editingName ? '#ffffff' : '#f9fafb', color: '#111827' }}
                   />
                   <button
@@ -412,12 +417,16 @@ function ProfileModal({ user, updateProfile, onClose }) {
                     {editingName ? <><Save size={12} /> Done</> : <><Pencil size={12} /> Edit</>}
                   </button>
                 </div>
+                <div style={{ fontSize: '.72rem', color: '#9ca3af', marginTop: 3 }}>
+                  Name changes require contacting support.
+                </div>
               </div>
 
+              {/* national_id, address, phone */}
               {[
                 { key: 'national_id', label: 'National ID *',           placeholder: 'e.g. 1 1998 8 0123456 7 89' },
-                { key: 'address',     label: 'Location *',              placeholder: 'e.g. Kigali, Rwanda'         },
-                { key: 'phone',       label: 'Phone Number (optional)',  placeholder: 'e.g. +250 788 000 000'      },
+                { key: 'address',     label: 'Location / Address *',    placeholder: 'e.g. Kigali, Rwanda'         },
+                { key: 'phone',       label: 'Phone Number (optional)', placeholder: 'e.g. +250 788 000 000'       },
               ].map(({ key, label, placeholder }) => (
                 <div key={key}>
                   <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>{label}</label>
@@ -491,9 +500,13 @@ function ProfileModal({ user, updateProfile, onClose }) {
   )
 }
 
-// ── Main Navbar ───────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Navbar
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function Navbar() {
-  const { user, logout, updateProfile } = useAuth()
+  // ✅ FIX-NAV-1: pull profileDocuments from context (not user.documents)
+  const { user, logout, updateProfile, profileDocuments, refreshDocuments } = useAuth()
   const navigate    = useNavigate()
   const dropdownRef = useRef(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
@@ -523,18 +536,27 @@ export default function Navbar() {
   const isHR        = user?.role === 'hr'
   const displayName = getDisplayName(user)
 
-  // ✅ FIX C: national_id is now always in user (AuthContext v2.0.0)
+  // ✅ FIX-NAV-1: use profileDocuments (from AuthContext) for all doc checks
+  const uploadedDocTypes  = new Set((profileDocuments || []).map(d => d.doc_type))
+  const missingRequiredDocs = REQUIRED_DOC_KEYS.filter(k => !uploadedDocTypes.has(k))
+  const docCount          = (profileDocuments || []).length
+
   const profileComplete = isHR
     ? true
-    : !!(user?.national_id && user?.address && user?.documents?.length > 0)
+    : !!(user?.national_id && user?.address && missingRequiredDocs.length === 0)
 
   const missing = isHR
     ? []
     : [
-        !user?.national_id       && 'National ID',
-        !user?.address           && 'Location',
-        !user?.documents?.length && 'Documents',
+        !user?.national_id              && 'National ID',
+        !user?.address                  && 'Location',
+        missingRequiredDocs.length > 0  && 'Documents',
       ].filter(Boolean)
+
+  // ✅ FIX-NAV-2: document count for sidebar uses profileDocuments
+  const docDisplayValue = docCount > 0
+    ? `${docCount} file${docCount > 1 ? 's' : ''} uploaded`
+    : null
 
   return (
     <>
@@ -549,7 +571,7 @@ export default function Navbar() {
             }}>
               <Briefcase size={16} color="#fff" />
             </div>
-            Shortlisting<span> AI</span>
+            GI Recruitment<span> Network</span>
           </Link>
 
           <div className="navbar-actions">
@@ -626,12 +648,13 @@ export default function Navbar() {
                         )}
                       </div>
 
+                      {/* ✅ FIX-NAV-2: InfoRow for Documents uses docDisplayValue */}
                       {!isHR && (
                         <div style={{ padding: '6px 20px 2px' }}>
-                          <InfoRow icon={CreditCard} label="National ID" value={user.national_id} />
-                          <InfoRow icon={MapPin}      label="Location"    value={user.address} />
-                          <InfoRow icon={Phone}       label="Phone"       value={user.phone} />
-                          <InfoRow icon={ScrollText}  label="Documents"   value={user.documents?.length ? `${user.documents.length} file${user.documents.length > 1 ? 's' : ''} uploaded` : null} />
+                          <InfoRow icon={CreditCard} label="National ID" value={user.national_id}  />
+                          <InfoRow icon={MapPin}      label="Location"   value={user.address}       />
+                          <InfoRow icon={Phone}       label="Phone"      value={user.phone}         />
+                          <InfoRow icon={ScrollText}  label="Documents"  value={docDisplayValue}    />
                         </div>
                       )}
 
@@ -671,8 +694,14 @@ export default function Navbar() {
         </div>
       </nav>
 
+      {/* ✅ FIX-NAV-3: pass refreshDocuments so modal can update context after uploads */}
       {modalOpen && user && !isHR && (
-        <ProfileModal user={user} updateProfile={updateProfile} onClose={() => setModalOpen(false)} />
+        <ProfileModal
+          user={user}
+          updateProfile={updateProfile}
+          refreshDocuments={refreshDocuments}
+          onClose={() => setModalOpen(false)}
+        />
       )}
     </>
   )

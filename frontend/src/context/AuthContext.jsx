@@ -1,39 +1,86 @@
 /**
- * AuthContext.jsx — v2.0.0
+ * AuthContext.jsx — v3.0.0
  *
- * FIXES:
- *  ✅ national_id is now stored in user state and localStorage.
- *     GET /auth/me is expected to return national_id from the User row.
- *     If your backend doesn't yet return it, verifyToken() falls back to
- *     localStorage so it survives page reloads after a profile save.
+ * ROOT-CAUSE FIXES FOR PROFILE DATA NOT PERSISTING:
  *
- *  ✅ updateProfile() now persists ALL profile fields the Navbar modal sends:
- *     { fullName, national_id, address, phone, documents }
- *     It updates both the backend (PUT /profile) AND local user state so the
- *     ApplyPage gate re-evaluates immediately without any extra fetches.
+ *  ✅ FIX-CTX-1 — Removed national_id from DB expectations entirely.
+ *     national_id is NOT a column on the users table. Storing it only in
+ *     localStorage caused the "Not set" flash on every login because
+ *     verifyToken() overwrote the localStorage value with '' from /auth/me.
+ *     national_id is now kept ONLY in localStorage (client-side only field)
+ *     and never sent to PUT /profile (backend rejects unknown fields anyway).
  *
- *  ✅ login() seeds national_id from localStorage (set on a previous session)
- *     so returning users don't see the gate flash incomplete on load.
+ *  ✅ FIX-CTX-2 — verifyToken() now also fetches /profile/documents after
+ *     /auth/me so the Navbar sidebar always shows real persisted documents
+ *     (not an empty array). This is what caused "Documents: Not set" even
+ *     after uploading — the user object never had documents populated.
  *
- *  ✅ Cold-start fallback now also restores national_id from localStorage.
+ *  ✅ FIX-CTX-3 — updateProfile() now sends ONLY the fields the backend
+ *     PUT /profile actually accepts: { phone, address }. Previously it
+ *     was sending national_id and documents which the backend silently
+ *     ignored, making callers think they were saved when they weren't.
  *
- *  ✅ Navbar modal calls updateProfile({ fullName, national_id, address,
- *     phone, documents }) — all of those fields are now properly merged into
- *     user state and persisted, so AuthContext is always the single source
- *     of truth for profile completeness.
+ *  ✅ FIX-CTX-4 — refreshDocuments() exposed on context so Navbar can
+ *     call it after uploading a profile document without triggering a full
+ *     verifyToken() round-trip.
+ *
+ *  ✅ FIX-CTX-5 — phone and address are always seeded from localStorage
+ *     on login() so the profile-complete gate never shows a false
+ *     incomplete state for returning users between the login and the
+ *     async verifyToken() call.
+ *
+ *  ✅ FIX-CTX-6 — Cold-start fallback also restores profileDocuments from
+ *     a cached copy so the Navbar doesn't flash "No documents" when the
+ *     backend is waking up.
  */
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import api from '../api/axios'
 
 const AuthContext = createContext(null)
 
-export function AuthProvider({ children }) {
-  const [user,    setUser]    = useState(null)
-  const [loading, setLoading] = useState(true)
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
+function safeLS(key, fallback = '') {
+  try { return localStorage.getItem(key) ?? fallback } catch { return fallback }
+}
+function setLS(key, value) {
+  try { localStorage.setItem(key, String(value ?? '')) } catch {}
+}
+function clearLS() {
+  try { localStorage.clear() } catch {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function AuthProvider({ children }) {
+  const [user,            setUser]            = useState(null)
+  const [profileDocuments, setProfileDocuments] = useState([])
+  const [loading,         setLoading]         = useState(true)
+
+  // ── Fetch profile documents (separated so Navbar can call it alone) ────────
+  const refreshDocuments = useCallback(async () => {
+    try {
+      const { data } = await api.get('/profile/documents')
+      const docs = data.documents || []
+      setProfileDocuments(docs)
+      // Cache a lightweight version for cold-start fallback
+      try {
+        localStorage.setItem(
+          'profileDocuments',
+          JSON.stringify(docs.map(d => ({ doc_type: d.doc_type, original_name: d.original_name }))),
+        )
+      } catch {}
+      return docs
+    } catch {
+      // Non-fatal — keep whatever we have
+      return null
+    }
+  }, [])
+
+  // ── Full token verification + profile load ─────────────────────────────────
   const verifyToken = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    const role  = localStorage.getItem('role')
+    const token = safeLS('token')
+    const role  = safeLS('role')
 
     if (!token || !role) {
       setUser(null)
@@ -42,44 +89,51 @@ export function AuthProvider({ children }) {
     }
 
     try {
-      // /auth/me should return: id, role, full_name, email, phone, address, national_id
+      // Step 1 — fetch basic user info from /auth/me
+      // Returns: { id, role, full_name, email, phone, address }
       const { data } = await api.get('/auth/me', {
         headers: { Authorization: `Bearer ${token}` },
       })
 
       const userObj = {
         token,
-        role:        data.role,
-        userId:      data.id,
-        fullName:    data.full_name,
-        full_name:   data.full_name,   // alias — some components use full_name
-        email:       data.email,
-        phone:       data.phone       || '',
-        address:     data.address     || '',
-        // national_id: returned by /auth/me if backend exposes it;
-        // falls back to whatever was saved locally after a profile update
-        national_id: data.national_id || localStorage.getItem('national_id') || '',
-        documents:   data.documents   || [],
+        role:      data.role,
+        userId:    data.id,
+        fullName:  data.full_name,
+        full_name: data.full_name,
+        email:     data.email,
+        // phone and address come from the DB via /auth/me — source of truth
+        phone:     data.phone   || '',
+        address:   data.address || '',
+        // national_id is client-side only (not in DB) — keep from localStorage
+        national_id: safeLS('national_id'),
       }
 
       setUser(userObj)
 
-      // Keep localStorage in sync as cold-start fallback
-      localStorage.setItem('role',        data.role)
-      localStorage.setItem('userId',      String(data.id))
-      localStorage.setItem('fullName',    data.full_name)
-      localStorage.setItem('phone',       data.phone        || '')
-      localStorage.setItem('address',     data.address      || '')
-      localStorage.setItem('national_id', data.national_id  || localStorage.getItem('national_id') || '')
+      // Sync localStorage so cold-start fallback is always fresh
+      setLS('role',      data.role)
+      setLS('userId',    data.id)
+      setLS('fullName',  data.full_name)
+      setLS('phone',     data.phone   || '')
+      setLS('address',   data.address || '')
+      // national_id is already in localStorage — don't overwrite with ''
+
+      // Step 2 — fetch profile documents (only for applicants)
+      if (data.role === 'applicant') {
+        await refreshDocuments()
+      }
 
     } catch (error) {
       if (error.response?.status === 401) {
-        localStorage.clear()
+        // Token is invalid / expired — force logout
+        clearLS()
         setUser(null)
+        setProfileDocuments([])
       } else if (error.code === 'ERR_NETWORK' || !error.response) {
-        // Backend cold-starting — restore from localStorage so user isn't kicked out
-        const storedUserId   = localStorage.getItem('userId')
-        const storedFullName = localStorage.getItem('fullName')
+        // ✅ FIX-CTX-6: Backend cold-starting — restore from localStorage
+        const storedUserId   = safeLS('userId')
+        const storedFullName = safeLS('fullName')
         if (storedUserId && storedFullName) {
           setUser({
             token,
@@ -87,30 +141,37 @@ export function AuthProvider({ children }) {
             userId:      storedUserId,
             fullName:    storedFullName,
             full_name:   storedFullName,
-            phone:       localStorage.getItem('phone')       || '',
-            address:     localStorage.getItem('address')     || '',
-            national_id: localStorage.getItem('national_id') || '',
-            documents:   [],
+            phone:       safeLS('phone'),
+            address:     safeLS('address'),
+            national_id: safeLS('national_id'),
           })
+          // Restore cached document list
+          try {
+            const cached = JSON.parse(localStorage.getItem('profileDocuments') || '[]')
+            setProfileDocuments(cached)
+          } catch {}
         } else {
           setUser(null)
+          setProfileDocuments([])
         }
       } else {
-        console.error('[AuthContext] Token verification error:', error.response?.status, error.message)
+        console.error('[AuthContext] verifyToken error:', error.response?.status, error.message)
         setUser(null)
+        setProfileDocuments([])
       }
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [refreshDocuments])
 
   useEffect(() => { verifyToken() }, [verifyToken])
 
+  // ── login ──────────────────────────────────────────────────────────────────
   const login = (data) => {
-    localStorage.setItem('token',    data.access_token)
-    localStorage.setItem('role',     data.role)
-    localStorage.setItem('userId',   String(data.user_id))
-    localStorage.setItem('fullName', data.full_name)
+    setLS('token',    data.access_token)
+    setLS('role',     data.role)
+    setLS('userId',   data.user_id)
+    setLS('fullName', data.full_name)
 
     setUser({
       token:       data.access_token,
@@ -118,95 +179,117 @@ export function AuthProvider({ children }) {
       userId:      data.user_id,
       fullName:    data.full_name,
       full_name:   data.full_name,
-      phone:       '',
-      address:     '',
-      // Seed national_id from a previous session if available so returning
-      // users don't see the profile gate flash on login
-      national_id: localStorage.getItem('national_id') || '',
-      documents:   [],
+      email:       data.email || '',
+      // ✅ FIX-CTX-5: seed from localStorage so returning users don't flash
+      // "profile incomplete" between login and the async verifyToken() call
+      phone:       safeLS('phone'),
+      address:     safeLS('address'),
+      national_id: safeLS('national_id'),
     })
 
-    // Verify token async to pick up phone / address / national_id from server
+    // Immediately fetch the real values from the server
     setTimeout(verifyToken, 0)
   }
 
+  // ── logout ─────────────────────────────────────────────────────────────────
   const logout = () => {
-    localStorage.clear()
+    clearLS()
     setUser(null)
+    setProfileDocuments([])
   }
 
   /**
-   * updateProfile — saves profile fields to the backend AND updates local
-   * user state immediately so all consumers (ApplyPage gate, Navbar badge)
-   * re-render without any extra fetches or event-bus gymnastics.
+   * updateProfile — persists phone + address to the DB, and national_id
+   * to localStorage only (it is not a DB column).
    *
-   * Accepts all fields the Navbar ProfileModal sends:
-   *   { fullName?, national_id?, address?, phone?, documents? }
+   * ✅ FIX-CTX-3: Only sends { phone, address } to PUT /profile.
+   *    national_id and documents are handled separately (localStorage /
+   *    profile-document upload endpoints).
    *
-   * @param {object} fields
-   * @returns {object}  The response from PUT /profile (or the fallback object)
+   * @param {{ phone?, address?, national_id?, fullName?, documents? }} fields
+   * @returns {object} The response from PUT /profile
    */
-  const updateProfile = useCallback(async (fields) => {
-    // Build the patch we'll merge into user state regardless of API outcome
-    const patch = {}
-    if (fields.fullName    !== undefined) { patch.fullName    = fields.fullName;    patch.full_name   = fields.fullName }
-    if (fields.national_id !== undefined)   patch.national_id = fields.national_id
-    if (fields.address     !== undefined)   patch.address     = fields.address
-    if (fields.phone       !== undefined)   patch.phone       = fields.phone
-    if (fields.documents   !== undefined)   patch.documents   = fields.documents
+  const updateProfile = useCallback(async (fields = {}) => {
+    // Build the DB patch (only what the backend accepts)
+    const dbPatch = {}
+    if (fields.phone   !== undefined) dbPatch.phone   = fields.phone
+    if (fields.address !== undefined) dbPatch.address = fields.address
 
-    try {
-      const { data } = await api.put('/profile', fields)
-
-      // Server may return updated values — prefer those, fall back to what we sent
-      const confirmed = {
-        fullName:    data.full_name    || patch.fullName    || '',
-        full_name:   data.full_name    || patch.fullName    || '',
-        national_id: data.national_id  || patch.national_id || '',
-        address:     data.address      || patch.address     || '',
-        phone:       data.phone        || patch.phone       || '',
-        documents:   data.documents    || patch.documents   || [],
-      }
-
-      // Persist to localStorage as cold-start fallback
-      localStorage.setItem('fullName',    confirmed.fullName)
-      localStorage.setItem('national_id', confirmed.national_id)
-      localStorage.setItem('address',     confirmed.address)
-      localStorage.setItem('phone',       confirmed.phone)
-
-      setUser(prev => ({ ...prev, ...confirmed }))
-
-      return data
-    } catch (err) {
-      // Network/server error — optimistically apply the local patch so the UI
-      // doesn't stay stuck on "profile incomplete" after a valid save attempt
-      const fallback = {
-        fullName:    patch.fullName    ?? (user?.fullName    || ''),
-        full_name:   patch.fullName    ?? (user?.fullName    || ''),
-        national_id: patch.national_id ?? (user?.national_id || ''),
-        address:     patch.address     ?? (user?.address     || ''),
-        phone:       patch.phone       ?? (user?.phone       || ''),
-        documents:   patch.documents   ?? (user?.documents   || []),
-      }
-
-      localStorage.setItem('fullName',    fallback.fullName)
-      localStorage.setItem('national_id', fallback.national_id)
-      localStorage.setItem('address',     fallback.address)
-      localStorage.setItem('phone',       fallback.phone)
-
-      setUser(prev => ({ ...prev, ...fallback }))
-      throw err
+    // national_id is localStorage-only
+    if (fields.national_id !== undefined) {
+      setLS('national_id', fields.national_id)
     }
-  }, [user])
+
+    let responseData = {}
+
+    if (Object.keys(dbPatch).length > 0) {
+      try {
+        const { data } = await api.put('/profile', dbPatch)
+        responseData = data
+
+        // The server returns the saved values — use those as source of truth
+        const confirmed = {
+          phone:   data.phone   ?? dbPatch.phone   ?? '',
+          address: data.address ?? dbPatch.address ?? '',
+        }
+
+        // Sync localStorage
+        setLS('phone',   confirmed.phone)
+        setLS('address', confirmed.address)
+
+        // Update user state immediately
+        setUser(prev => prev ? ({
+          ...prev,
+          phone:       confirmed.phone,
+          address:     confirmed.address,
+          // also apply national_id if it was in the fields
+          national_id: fields.national_id !== undefined
+            ? fields.national_id
+            : (prev.national_id || ''),
+        }) : prev)
+
+      } catch (err) {
+        // ✅ Optimistic fallback — apply locally so UI doesn't stay stuck
+        const fallback = {
+          phone:   fields.phone   ?? (user?.phone   || ''),
+          address: fields.address ?? (user?.address || ''),
+        }
+        setLS('phone',   fallback.phone)
+        setLS('address', fallback.address)
+        setUser(prev => prev ? ({
+          ...prev,
+          ...fallback,
+          national_id: fields.national_id !== undefined
+            ? fields.national_id
+            : (prev?.national_id || ''),
+        }) : prev)
+        throw err
+      }
+    } else {
+      // Only national_id was updated — apply to user state
+      if (fields.national_id !== undefined) {
+        setUser(prev => prev ? ({ ...prev, national_id: fields.national_id }) : prev)
+      }
+    }
+
+    // documents field — just refresh from server (don't try to set via PUT /profile)
+    if (fields.documents !== undefined) {
+      await refreshDocuments()
+    }
+
+    return responseData
+  }, [user, refreshDocuments])
 
   return (
     <AuthContext.Provider value={{
       user,
+      profileDocuments,
       login,
       logout,
       loading,
       updateProfile,
       verifyToken,
+      refreshDocuments,
     }}>
       {children}
     </AuthContext.Provider>

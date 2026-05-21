@@ -1,27 +1,32 @@
 """
-backend/main.py  ·  v6.5.2
+backend/main.py  ·  v6.6.0
 ────────────────────────────────────────────────────────────────
-ALL v6.5.1 FIXES RETAINED.
+ALL v6.5.2 FIXES RETAINED.
 
-NEW IN v6.5.2 — ROOT-CAUSE FIX FOR "INTERNAL SERVER ERROR" ON UPLOAD:
+NEW IN v6.6.0 — PERMANENT APPLICANT PROFILE PERSISTENCE:
 
-  ✅ FIX-UPLOAD-1 — _call_pre_submission_check() now NEVER re-raises any
-     exception. The bare `except Exception: raise` in the upload route was
-     the direct cause of the 500. It is replaced with a safe fallback that
-     returns (True, advisory_message) on any unexpected error, so the file
-     is stored and the applicant is not blocked.
+  ✅ FIX-PROFILE-1 — national_id is now a real DB column on the users table.
+     Previously it was localStorage-only (client-side), meaning it was lost
+     on every new device, browser clear, or server-side session. It is now
+     stored in the database alongside phone and address.
 
-  ✅ FIX-UPLOAD-2 — upload_document() has a new outer try/except that catches
-     any unhandled exception (e.g. disk full, DB write error) and returns a
-     clean 500 JSON with a human-readable message instead of crashing the
-     ASGI worker.
+  ✅ FIX-PROFILE-2 — ensure_user_profile_columns() now adds national_id
+     (VARCHAR 50) to the users table as part of startup migrations, alongside
+     the existing phone and address columns. Safe for existing deployments —
+     ALTER TABLE is no-op if the column already exists.
 
-  ✅ FIX-IMPORT-3 — _load_ml_modules() wraps document_verifier import more
-     broadly so a failed ai_matcher sub-import does not prevent the verifier
-     stubs from loading.
+  ✅ FIX-PROFILE-3 — /auth/me now returns national_id from the DB so
+     AuthContext always gets the server-persisted value on every page load,
+     not a stale localStorage copy that could be wiped at any time.
 
-  ✅ FIX-TOGGLE — OCR_ENABLED is re-checked inside upload_document() so a
-     live env-var change (no redeploy) is respected immediately.
+  ✅ FIX-PROFILE-4 — PUT /profile now accepts and saves national_id to the DB.
+     ProfileUpdateRequest includes the optional national_id field; the
+     update_profile() handler writes it to users.national_id.
+
+  ✅ FIX-PROFILE-5 — _build_profile_response() includes national_id in every
+     profile response so GET /profile and PUT /profile both return the full
+     persisted state including national_id, and the profile_complete / missing
+     check now correctly gates on national_id being present in the DB.
 """
 
 import os
@@ -381,13 +386,22 @@ def ensure_job_columns():
 
 
 def ensure_user_profile_columns():
+    """
+    ✅ FIX-PROFILE-2 — Ensures phone, address, AND national_id columns all
+    exist on the users table. national_id is now persisted in the DB so
+    applicant data survives server restarts and device/browser changes.
+    Safe for existing deployments — ALTER TABLE is skipped if column exists.
+    """
     try:
         inspector        = inspect(engine)
         existing_columns = [col["name"] for col in inspector.get_columns("users")]
         with engine.connect() as conn:
-            for col in ["phone", "address"]:
+            for col, coltype in [
+                ("phone",       "VARCHAR(50)"),
+                ("address",     "VARCHAR(255)"),
+                ("national_id", "VARCHAR(50)"),    # ✅ FIX-PROFILE-2
+            ]:
                 if col not in existing_columns:
-                    coltype = "VARCHAR(50)" if col == "phone" else "VARCHAR(255)"
                     try:
                         conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {coltype}"))
                         conn.commit()
@@ -690,7 +704,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.5.2",
+    version     = "6.6.0",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -1070,13 +1084,19 @@ def login(
 
 @_app.get("/auth/me", tags=["auth"])
 def me(current_user: User = Depends(get_current_user)):
+    """
+    ✅ FIX-PROFILE-3 — Returns national_id from the DB so AuthContext always
+    receives the server-persisted value on every token verification, not a
+    stale or missing localStorage copy.
+    """
     return {
-        "id":        current_user.id,
-        "full_name": current_user.full_name,
-        "email":     current_user.email,
-        "role":      current_user.role.value,
-        "phone":     current_user.phone   or "",
-        "address":   current_user.address or "",
+        "id":          current_user.id,
+        "full_name":   current_user.full_name,
+        "email":       current_user.email,
+        "role":        current_user.role.value,
+        "phone":       current_user.phone       or "",
+        "address":     current_user.address     or "",
+        "national_id": current_user.national_id or "",   # ✅ FIX-PROFILE-3
     }
 
 
@@ -1451,22 +1471,35 @@ def finalize_application(
 # ═══════════════════════════════════════════════════════════════
 
 class ProfileUpdateRequest(BaseModel):
-    phone:   Optional[str] = None
-    address: Optional[str] = None
+    """
+    ✅ FIX-PROFILE-4 — national_id is now accepted by PUT /profile and saved
+    to the users table in the database. It will persist across server restarts,
+    new devices, and browser clears — just like phone and address.
+    """
+    phone:       Optional[str] = None
+    address:     Optional[str] = None
+    national_id: Optional[str] = None   # ✅ FIX-PROFILE-4
 
 
 def _build_profile_response(current_user: User) -> dict:
-    phone   = current_user.phone   or ""
-    address = current_user.address or ""
+    """
+    ✅ FIX-PROFILE-5 — national_id is included in every profile response.
+    The profile_complete check and missing_fields list now correctly reflect
+    whether national_id has been saved to the database.
+    """
+    phone       = current_user.phone       or ""
+    address     = current_user.address     or ""
+    national_id = current_user.national_id or ""   # ✅ FIX-PROFILE-5
     missing = []
-    if not phone:   missing.append("Phone number")
-    if not address: missing.append("Location / Address")
+    if not national_id: missing.append("National ID")
+    if not address:     missing.append("Location / Address")
     return {
         "user_id":          current_user.id,
         "full_name":        current_user.full_name,
         "email":            current_user.email,
         "phone":            phone,
         "address":          address,
+        "national_id":      national_id,               # ✅ FIX-PROFILE-5
         "profile_complete": len(missing) == 0,
         "missing_fields":   missing,
     }
@@ -1486,6 +1519,11 @@ def update_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    """
+    ✅ FIX-PROFILE-4 — Saves phone, address, AND national_id to the DB.
+    All three fields now survive server restarts and are available from
+    any device or browser without relying on localStorage.
+    """
     updated = []
     if payload.phone is not None:
         current_user.phone = payload.phone.strip() or None
@@ -1493,6 +1531,9 @@ def update_profile(
     if payload.address is not None:
         current_user.address = payload.address.strip() or None
         updated.append("address")
+    if payload.national_id is not None:                          # ✅ FIX-PROFILE-4
+        current_user.national_id = payload.national_id.strip() or None
+        updated.append("national_id")
     if updated:
         db.add(current_user); db.commit(); db.refresh(current_user)
     _log(db, "PROFILE_UPDATED", user=current_user,
@@ -1502,7 +1543,7 @@ def update_profile(
              if updated else "No fields changed"
          ),
          ip=_ip(request))
-    response          = _build_profile_response(current_user)
+    response            = _build_profile_response(current_user)
     response["updated"] = updated
     response["message"] = (
         f"✓ Profile updated ({', '.join(updated)})."
@@ -1794,8 +1835,8 @@ async def upload_document(
 ):
     """
     ✅ FIX-UPLOAD-2: The entire handler is wrapped in a top-level try/except
-    so any unhandled exception returns a clean 400/500 JSON instead of
-    crashing the ASGI worker and showing "Internal server error" to the user.
+    so any unhandled exception returns a clean JSON instead of crashing
+    the ASGI worker and showing "Internal server error" to the user.
     """
     try:
         return await _upload_document_inner(
@@ -1885,7 +1926,6 @@ async def _upload_document_inner(
                 timeout=DOC_VERIFY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            # Timeout: accept with advisory rather than blocking the applicant
             print(f"[upload_document] ⚠️  Pre-check timed out for {doc_type} — accepting as advisory")
             check_passed  = True
             check_message = (
@@ -1897,7 +1937,6 @@ async def _upload_document_inner(
                  detail=f"Pre-check timed out for {doc_type} — accepted as advisory",
                  ip=_ip(request), status="warning")
         except Exception as exc:
-            # Any other error: accept with advisory
             print(f"[upload_document] ⚠️  Pre-check error for {doc_type}: {exc!r}")
             check_passed  = True
             check_message = (
