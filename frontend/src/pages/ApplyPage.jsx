@@ -1,32 +1,22 @@
 /**
- * ApplyPage.jsx — v5.13.0
+ * ApplyPage.jsx — v5.14.0
  *
- * FIXES in v5.13.0:
+ * FIXES in v5.14.0:
  *
- *  ✅ FIX — attach-profile failures now properly reflected in UI state.
- *     Previously, when POST /applications/{id}/documents/attach-profile
- *     returned a 404 or any error, the doc was still shown as "success"
- *     (fromProfile: true) on the frontend. The user would then proceed to
- *     Submit and receive a confusing "Cannot submit — 1 required document(s)
- *     missing: CV / Resume" error from the backend (/finalize returns 400).
+ *  ✅ FIX AP-1 — Dispatch 'wb:upload-failed' event on network errors so
+ *     WakeBanner v5.1.0 FIX WB-1 actually triggers. Previously the event
+ *     was never dispatched, meaning the WakeBanner retry hint ("Upload
+ *     failed — please try again") never appeared after a mid-session
+ *     server sleep. The event is dispatched BEFORE rearmWakeGate() can
+ *     change the status to 'waking', ensuring WakeBanner.handleUploadFailed
+ *     sees status === 'awake' and shows the hint.
  *
- *     Root cause: attachAll() used Promise.allSettled and silently swallowed
- *     failures. The docStatus for that type was never updated from its
- *     pre-filled "success/fromProfile" state.
+ *     Implementation note: the dispatch is placed at the top of the
+ *     network-error branch in handleUpload's catch block, before any
+ *     state updates or queue mutations, so the WakeBanner reads the
+ *     correct 'awake' status on the same microtask tick.
  *
- *     Fix:
- *       1. On attach failure, docStatus for that type is reset to 'idle'
- *          (or 'error' if we have a useful message), so the upload slot
- *          appears and the user can re-upload the file.
- *       2. A toast warning is shown so the user knows which doc needs action.
- *       3. The profileDocIdsRef entry is cleared so it isn't re-attempted
- *          on finalize.
- *       4. A server-side guard in finalize_application (main.py) does a
- *          fresh db.expire_all() + DB query before checking missing docs,
- *          ensuring the check is always authoritative even if the UI state
- *          drifted. (See main.py v6.6.1 notes.)
- *
- * All v5.12.0 fixes retained unchanged.
+ * All v5.13.0 fixes retained unchanged.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -504,9 +494,7 @@ export default function ApplyPage() {
           if (data?.id) {
             uploadedDocIds.current[docType] = data.id
             delete profileDocIdsRef.current[docType]
-            // Doc already marked success/fromProfile — no state change needed
           } else {
-            // Unexpected: server returned 200 but no id — reset to idle
             throw new Error('attach-profile returned no document id')
           }
         } catch (err) {
@@ -518,11 +506,8 @@ export default function ApplyPage() {
             `(source=${source}, status=${httpStatus}): ${detail}`
           )
 
-          // ✅ FIX: Clear the profileDocIdsRef so we don't think it's attached
           delete profileDocIdsRef.current[docType]
 
-          // ✅ FIX: Reset docStatus to idle so the upload button appears.
-          // This is the key change — the user must re-upload this file manually.
           if (mountedRef.current) {
             setDocStatus(prev => ({
               ...prev,
@@ -536,10 +521,8 @@ export default function ApplyPage() {
               },
             }))
 
-            // Also clear any stale uploadedDocIds entry for this type
             delete uploadedDocIds.current[docType]
 
-            // Notify the user so they know action is needed
             const label = DOC_TYPES.find(d => d.key === docType)?.label || docType
             toast.error(
               `Could not pre-fill "${label}" from your profile — please upload it manually.`,
@@ -720,12 +703,21 @@ export default function ApplyPage() {
       }
 
       if (isNetwork) {
+        // ✅ FIX AP-1: Dispatch BEFORE state updates so WakeBanner reads
+        // status === 'awake' on the same tick (rearmWakeGate() in the axios
+        // interceptor hasn't flushed its React state update yet).
+        window.dispatchEvent(new Event('wb:upload-failed'))
+
         retryQueueRef.current[docType] = file
         if (mountedRef.current) {
           syncQueuedCount()
           setDocStatus(prev => ({
             ...prev,
-            [docType]: { status: 'queued', message: 'Server is starting up — your file will upload automatically.', fileName: file.name, isAdvisory: false, isNetwork: true, fromProfile: false },
+            [docType]: {
+              status: 'queued',
+              message: 'Server is starting up — your file will upload automatically.',
+              fileName: file.name, isAdvisory: false, isNetwork: true, fromProfile: false,
+            },
           }))
         }
         return
