@@ -31,7 +31,6 @@ const JOB_LEVELS = [
 ]
 
 // ── Degree tier detection ─────────────────────────────────────
-// Returns numeric tier: 1=Diploma, 2=Bachelor's, 3=Master's, 4=PhD
 function degreeTier(degreeStr) {
   const d = (degreeStr || '').toLowerCase()
   if (d.includes('phd') || d.includes('doctor of philosophy')) return 4
@@ -45,20 +44,17 @@ function degreeTier(degreeStr) {
     d.includes('mbbs') || d.includes('bvm') || d.includes('bvsc') || d.includes('b.arch') ||
     d.includes('b.pharm') || d.includes('pharmd') || d.includes('dvm') || d.includes('b.eng')
   ) return 2
-  // Advanced Diploma / Diploma
   if (d.includes('diploma') || d.includes('advanced diploma') || d.includes('pgde') || d.includes('pgdip')) return 1
-  return 2 // default to Bachelor's tier
+  return 2
 }
 
-// ── Tier label ────────────────────────────────────────────────
 const TIER_LABELS = {
-  1: 'Diploma / Advanced Diploma',
-  2: "Bachelor's Degree",
-  3: "Master's Degree",
-  4: 'PhD / Doctorate',
+  1: 'Diploma',
+  2: "Bachelor's",
+  3: "Master's",
+  4: 'PhD',
 }
 
-// ── Tier badge colors ─────────────────────────────────────────
 const TIER_COLORS = {
   1: { bg: '#fef3c7', border: '#d97706', text: '#78350f' },
   2: { bg: '#dbeafe', border: '#2563eb', text: '#1e3a8a' },
@@ -66,18 +62,8 @@ const TIER_COLORS = {
   4: { bg: '#d1fae5', border: '#059669', text: '#064e3b' },
 }
 
-/**
- * Given a base min/max experience range and a degree's tier, calculate the
- * adjusted experience requirement for that specific degree:
- *
- *   PhD (tier 4)        → base_min − 3  (min 0)
- *   Master's (tier 3)   → base_min − 1  (min 0)
- *   Bachelor's (tier 2) → base_min      (unchanged)
- *   Diploma (tier 1)    → base_min + 3  (capped at base_max)
- *
- * The idea: a more advanced degree compensates for less years;
- * a lower degree requires more proven experience.
- */
+// ── Per-degree experience calculation ─────────────────────────
+// PhD -3 | Master's -1 | Bachelor's 0 | Diploma +3
 function calcExpForDegree(tier, baseMin, baseMax) {
   const adjustments = { 4: -3, 3: -1, 2: 0, 1: 3 }
   const adj = adjustments[tier] ?? 0
@@ -85,9 +71,7 @@ function calcExpForDegree(tier, baseMin, baseMax) {
   return Math.min(adjusted, baseMax)
 }
 
-// ── Serialize degrees with experience into a structured string ─
-// Format understood by the backend / AI shortlister:
-// "DegreeName [minExp yrs]" — one per line (joined by " | ")
+// ── Serialize for backend: "DegreeName [min X yrs]" pipe-joined ─
 function serializeDegreesWithExp(degrees, baseMin, baseMax) {
   return degrees
     .map(d => {
@@ -98,15 +82,25 @@ function serializeDegreesWithExp(degrees, baseMin, baseMax) {
     .join(' | ')
 }
 
-// ============================================================
-//  60 JOB TEMPLATES — Rwanda Career Hub
-// ============================================================
-const RWANDA_JOBS_DATA = [
+// ── Parse serialized string back into {degree, exp} pairs ─────
+// Input:  "BSc CS [min 1 yr] | Advanced Diploma in IT [min 4 yrs]"
+// Output: [{degree: "BSc CS", exp: 1}, {degree: "Advanced Diploma in IT", exp: 4}]
+function parseDegreesWithExp(serialized) {
+  if (!serialized) return []
+  return serialized.split(' | ').map(chunk => {
+    const match = chunk.match(/^(.*?)\s*\[min (\d+) yrs?\]\s*$/)
+    if (match) {
+      return { degree: match[1].trim(), exp: parseInt(match[2], 10) }
+    }
+    return { degree: chunk.trim(), exp: null }
+  }).filter(x => x.degree)
+}
 
+// ── 60 JOB TEMPLATES ─────────────────────────────────────────
+const RWANDA_JOBS_DATA = [
   // ═══════════════════ HEALTH ═══════════════════
   {
-    title: "Registered Nurse",
-    domain: "Health", emoji: "💉",
+    title: "Registered Nurse", domain: "Health", emoji: "💉",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Nursing","Bachelor of Science in Midwifery","Advanced Diploma in Nursing","Advanced Diploma in Midwifery"],
     description: "Deliver direct, high-quality nursing care within a multidisciplinary clinical team across inpatient and outpatient settings, implementing nursing care plans in line with MoH protocols.",
@@ -131,8 +125,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Medical Doctor — General Practitioner",
-    domain: "Health", emoji: "🩺",
+    title: "Medical Doctor — General Practitioner", domain: "Health", emoji: "🩺",
     education_level: "Bachelor's",
     degrees: ["MBChB (Bachelor of Medicine and Bachelor of Surgery)","MBBS (Bachelor of Medicine, Bachelor of Surgery)","MD (Doctor of Medicine)"],
     description: "Provide comprehensive primary healthcare — including diagnosis, treatment, antenatal care, and preventive medicine — across health centres aligned with Rwanda's Community Health Policy.",
@@ -156,8 +149,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Pharmacist",
-    domain: "Health", emoji: "💊",
+    title: "Pharmacist", domain: "Health", emoji: "💊",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Pharmacy (B.Pharm)","PharmD (Doctor of Pharmacy)","Bachelor of Science in Pharmaceutical Sciences"],
     description: "Manage pharmaceutical services from procurement through dispensing, provide expert medication counselling, and ensure compliance with Rwanda FDA and Rwanda Pharmacy Council standards.",
@@ -180,8 +172,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Public Health Officer / Epidemiologist",
-    domain: "Health", emoji: "🦠",
+    title: "Public Health Officer / Epidemiologist", domain: "Health", emoji: "🦠",
     education_level: "Master's",
     degrees: ["Master of Public Health (MPH)","MSc Epidemiology","MSc Global Health","Master of Science in Environmental Health"],
     description: "Lead disease surveillance, outbreak investigation, health data analysis, and community health intervention programmes aligned with Rwanda's Health Sector Strategic Plan (HSSP IV).",
@@ -204,8 +195,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Medical Laboratory Scientist",
-    domain: "Health", emoji: "🔬",
+    title: "Medical Laboratory Scientist", domain: "Health", emoji: "🔬",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Biomedical Laboratory Sciences","Bachelor of Science in Medical Laboratory Technology","Bachelor of Science in Biochemistry and Molecular Biology","Bachelor of Science in Microbiology"],
     description: "Perform diagnostic laboratory analyses in haematology, clinical biochemistry, microbiology, and serology to support evidence-based clinical decision-making and maintain ISO 15189 quality standards.",
@@ -228,8 +218,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Midwife",
-    domain: "Health", emoji: "👶",
+    title: "Midwife", domain: "Health", emoji: "👶",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Midwifery","Bachelor of Science in Nursing and Midwifery","Advanced Diploma in Midwifery"],
     description: "Provide skilled midwifery care throughout the antenatal, intrapartum, and postnatal continuum, promoting safe motherhood and optimal newborn outcomes in line with Rwanda RMNCAH policies.",
@@ -254,8 +243,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ EDUCATION ═══════════════════
   {
-    title: "Secondary School Teacher — Sciences",
-    domain: "Education", emoji: "🧪",
+    title: "Secondary School Teacher — Sciences", domain: "Education", emoji: "🧪",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Education in Science (Physics)","Bachelor of Education in Science (Chemistry)","Bachelor of Education in Science (Biology)","Bachelor of Science in Physics + PGDE","Bachelor of Science in Chemistry + PGDE","Bachelor of Science in Biology + PGDE"],
     description: "Deliver engaging, competency-based Science instruction in Physics, Chemistry, or Biology at O-Level and A-Level, preparing students for national examinations and lifelong STEM engagement.",
@@ -278,8 +266,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "University Lecturer",
-    domain: "Education", emoji: "🎓",
+    title: "University Lecturer", domain: "Education", emoji: "🎓",
     education_level: "Master's",
     degrees: ["Master's degree in the relevant discipline","PhD in the relevant discipline (required for Senior Lecturer and above)"],
     description: "Contribute to academic excellence through high-quality teaching, original research, postgraduate supervision, and community engagement at an accredited Rwandan higher education institution.",
@@ -302,8 +289,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Primary School Teacher",
-    domain: "Education", emoji: "📚",
+    title: "Primary School Teacher", domain: "Education", emoji: "📚",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Education (Primary)","Bachelor of Arts in Education (Primary)","Bachelor of Science in Education (Primary)"],
     description: "Deliver inclusive, competency-based instruction to primary pupils, nurturing foundational literacy, numeracy, and social development in line with the REB CBC framework.",
@@ -326,8 +312,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "ECD Specialist",
-    domain: "Education", emoji: "🧒",
+    title: "ECD Specialist", domain: "Education", emoji: "🧒",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Education in Early Childhood Education","Bachelor of Science in Child Development","Bachelor of Arts in Psychology","Bachelor of Science in Social Sciences with Child Development"],
     description: "Design, implement, and evaluate integrated Early Childhood Development programmes for children aged 0–6, ensuring holistic development across nutrition, psychosocial stimulation, and quality pre-primary education.",
@@ -349,8 +334,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "School Principal / Head Teacher",
-    domain: "Education", emoji: "🏫",
+    title: "School Principal / Head Teacher", domain: "Education", emoji: "🏫",
     education_level: "Master's",
     degrees: ["Master of Education in Educational Leadership and Management","Master of Arts in Education Administration","Master of Education in School Management","Bachelor of Education + Postgraduate Diploma in Educational Management"],
     description: "Provide strategic, instructional, and administrative leadership to deliver an outstanding learning environment, high academic standards, and a school culture of excellence and inclusivity.",
@@ -375,8 +359,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ TECHNOLOGY ═══════════════════
   {
-    title: "Software Engineer",
-    domain: "Technology", emoji: "👨‍💻",
+    title: "Software Engineer", domain: "Technology", emoji: "👨‍💻",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Computer Science","Bachelor of Science in Software Engineering","Bachelor of Science in Information Technology","Bachelor of Engineering in Computer Engineering"],
     description: "Design, develop, test, and maintain high-quality, scalable software systems powering mission-critical digital products and services.",
@@ -399,8 +382,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Data Analyst",
-    domain: "Technology", emoji: "📊",
+    title: "Data Analyst", domain: "Technology", emoji: "📊",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Statistics","Bachelor of Science in Mathematics","Bachelor of Science in Data Science","Bachelor of Science in Computer Science","Bachelor of Science in Economics"],
     description: "Transform raw, complex datasets into clear, actionable insights and interactive dashboards that directly inform strategic and operational decisions.",
@@ -423,8 +405,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Cybersecurity Analyst",
-    domain: "Technology", emoji: "🛡️",
+    title: "Cybersecurity Analyst", domain: "Technology", emoji: "🛡️",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Cybersecurity","Bachelor of Science in Information Security","Bachelor of Science in Computer Science","Bachelor of Science in Information Technology"],
     description: "Protect organisational digital infrastructure by monitoring threats, conducting vulnerability assessments, leading incident response, and ensuring compliance with Rwanda's National Cyber Security Policy.",
@@ -447,8 +428,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "ICT Support Technician",
-    domain: "Technology", emoji: "🖥️",
+    title: "ICT Support Technician", domain: "Technology", emoji: "🖥️",
     education_level: "Diploma",
     degrees: ["Advanced Diploma in Information Technology","Diploma in Computer Science","Diploma in Electronics and Telecommunications","Advanced Diploma in Networking and Systems Administration"],
     description: "Provide first and second-line technical support, maintain hardware and network infrastructure, and ensure business continuity of all ICT systems across the organisation.",
@@ -471,8 +451,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Database Administrator (DBA)",
-    domain: "Technology", emoji: "🗄️",
+    title: "Database Administrator (DBA)", domain: "Technology", emoji: "🗄️",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Computer Science","Bachelor of Science in Information Systems","Bachelor of Science in Software Engineering","Bachelor of Science in Information Technology"],
     description: "Design, implement, maintain, and secure enterprise database systems ensuring high availability, performance optimisation, and data integrity across all organisational applications.",
@@ -497,8 +476,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ FINANCE ═══════════════════
   {
-    title: "Accountant",
-    domain: "Finance", emoji: "📒",
+    title: "Accountant", domain: "Finance", emoji: "📒",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Commerce in Accounting","Bachelor of Science in Accounting and Finance","Bachelor of Business Administration in Accounting","Bachelor of Arts in Economics and Finance"],
     description: "Maintain the integrity of financial records, ensure full compliance with Rwanda Revenue Authority (RRA) tax obligations, and support strategic financial planning through accurate and timely reporting.",
@@ -521,8 +499,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Internal Auditor",
-    domain: "Finance", emoji: "🔎",
+    title: "Internal Auditor", domain: "Finance", emoji: "🔎",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Commerce in Accounting","Bachelor of Science in Finance","Bachelor of Business Administration in Accounting","Bachelor of Commerce in Auditing"],
     description: "Independently assess the adequacy of internal controls, risk management processes, and governance structures to enhance organisational accountability and operational effectiveness.",
@@ -545,8 +522,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Procurement Officer",
-    domain: "Finance", emoji: "📦",
+    title: "Procurement Officer", domain: "Finance", emoji: "📦",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Business Administration in Supply Chain Management","Bachelor of Commerce in Procurement","Bachelor of Science in Logistics and Supply Chain Management","Bachelor of Arts in Business Administration"],
     description: "Manage end-to-end procurement processes, ensure full compliance with Rwanda Public Procurement Authority (RPPA) regulations, and achieve value-for-money on all acquisitions of goods, works, and services.",
@@ -569,8 +545,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Microfinance Loan Officer",
-    domain: "Finance", emoji: "🏦",
+    title: "Microfinance Loan Officer", domain: "Finance", emoji: "🏦",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Business Administration in Finance","Bachelor of Commerce in Banking and Finance","Bachelor of Science in Economics","Bachelor of Business Administration in Cooperative Management"],
     description: "Appraise individual and SME loan applications, manage a healthy loan portfolio, and provide financial advisory services that promote financial inclusion for Rwandan households and entrepreneurs.",
@@ -593,8 +568,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Finance Manager",
-    domain: "Finance", emoji: "💼",
+    title: "Finance Manager", domain: "Finance", emoji: "💼",
     education_level: "Master's",
     degrees: ["Master of Science in Finance","Master of Business Administration (MBA) with Finance specialisation","Master of Commerce in Accounting","Master of Science in Accounting and Finance"],
     description: "Provide strategic financial leadership, oversee all financial operations, ensure regulatory compliance, and deliver high-quality financial intelligence to drive sound organisational decision-making.",
@@ -619,8 +593,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ AGRICULTURE ═══════════════════
   {
-    title: "Agronomist",
-    domain: "Agriculture", emoji: "🌾",
+    title: "Agronomist", domain: "Agriculture", emoji: "🌾",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Agronomy","Bachelor of Science in Agriculture","Bachelor of Science in Crop Science","Bachelor of Science in Soil Science","Bachelor of Science in Plant Science"],
     description: "Provide technical agronomic advisory, conduct soil health assessments, and support smallholder and commercial farmers to improve crop productivity using evidence-based practices aligned with Rwanda PSTA IV.",
@@ -643,8 +616,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Veterinary Officer",
-    domain: "Agriculture", emoji: "🐄",
+    title: "Veterinary Officer", domain: "Agriculture", emoji: "🐄",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Veterinary Medicine (BVM)","Bachelor of Veterinary Science (BVSc)","Doctor of Veterinary Medicine (DVM)"],
     description: "Provide professional animal health services to livestock and companion animals, conduct disease surveillance, and ensure veterinary public health standards are maintained across assigned zones.",
@@ -667,8 +639,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Agricultural Extension Officer",
-    domain: "Agriculture", emoji: "🌱",
+    title: "Agricultural Extension Officer", domain: "Agriculture", emoji: "🌱",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Agriculture","Bachelor of Science in Agronomy","Advanced Diploma in Agriculture","Bachelor of Science in Rural Development","Bachelor of Science in Animal Science"],
     description: "Deliver practical training, field demonstrations, and advisory services to smallholder farmers, promoting adoption of improved crop technologies and climate-smart practices across assigned sectors.",
@@ -691,8 +662,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Irrigation Engineer",
-    domain: "Agriculture", emoji: "💧",
+    title: "Irrigation Engineer", domain: "Agriculture", emoji: "💧",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Agricultural Engineering","Bachelor of Science in Civil Engineering","Bachelor of Science in Water Resources Engineering","Bachelor of Science in Irrigation Engineering"],
     description: "Design, supervise construction, and manage operation and maintenance of irrigation systems to improve agricultural water use efficiency, supporting Rwanda's marshland and hillside irrigation programme.",
@@ -716,8 +686,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ ENGINEERING ═══════════════════
   {
-    title: "Civil Engineer",
-    domain: "Engineering", emoji: "🏗️",
+    title: "Civil Engineer", domain: "Engineering", emoji: "🏗️",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Civil Engineering","Bachelor of Engineering in Civil Engineering","Bachelor of Science in Structural Engineering","Bachelor of Science in Construction Management"],
     description: "Lead technical design, supervision, and delivery of roads, drainage, buildings, and water supply infrastructure compliant with Rwanda Housing Authority (RHA) and RTDA standards.",
@@ -740,8 +709,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Electrical Engineer",
-    domain: "Engineering", emoji: "⚡",
+    title: "Electrical Engineer", domain: "Engineering", emoji: "⚡",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Electrical Engineering","Bachelor of Engineering in Electrical Engineering","Bachelor of Science in Power Systems Engineering","Bachelor of Science in Electrical and Electronic Engineering"],
     description: "Design, install, and maintain medium and low voltage electrical power systems to support Rwanda's national electrification agenda under REG and RURA regulatory oversight.",
@@ -764,8 +732,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Environmental Officer",
-    domain: "Engineering", emoji: "🌍",
+    title: "Environmental Officer", domain: "Engineering", emoji: "🌍",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Environmental Science","Bachelor of Science in Environmental Engineering","Bachelor of Science in Natural Resources Management","Bachelor of Arts in Geography and Environmental Studies"],
     description: "Lead Environmental and Social Impact Assessment (ESIA) processes, implement environmental management plans, and ensure all project activities comply with REMA regulations and international safeguard standards.",
@@ -788,8 +755,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "WASH Engineer",
-    domain: "Engineering", emoji: "🚰",
+    title: "WASH Engineer", domain: "Engineering", emoji: "🚰",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Civil Engineering","Bachelor of Science in Water Resources Engineering","Bachelor of Science in Environmental Engineering","Bachelor of Science in Sanitary Engineering"],
     description: "Design, supervise construction, and manage O&M of water supply systems, sanitation facilities, and hygiene promotion programmes in urban and rural settings across Rwanda.",
@@ -812,10 +778,9 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
 
-  // ═══════════════════ GOVERNMENT / PUBLIC SERVICE ═══════════════════
+  // ═══════════════════ GOVERNMENT ═══════════════════
   {
-    title: "Human Resources Officer",
-    domain: "Government", emoji: "👥",
+    title: "Human Resources Officer", domain: "Government", emoji: "👥",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Human Resource Management","Bachelor of Business Administration in Human Resource Management","Bachelor of Science in Organisational Psychology","Bachelor of Arts in Industrial Psychology"],
     description: "Manage the full employee lifecycle — recruitment, onboarding, performance management, training, and offboarding — in compliance with Rwanda Labour Law and Rwanda Public Service Commission standards.",
@@ -838,8 +803,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Policy Analyst",
-    domain: "Government", emoji: "📜",
+    title: "Policy Analyst", domain: "Government", emoji: "📜",
     education_level: "Master's",
     degrees: ["Master of Arts in Public Policy","Master of Science in Economics","Master of Public Administration (MPA)","Master of Arts in Political Science","Master of Laws (LLM) in Public Law"],
     description: "Research, analyse, and formulate evidence-based policy recommendations that support Rwanda's National Strategy for Transformation (NST1) and sector development goals.",
@@ -861,8 +825,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "District Executive Secretary",
-    domain: "Government", emoji: "🏛️",
+    title: "District Executive Secretary", domain: "Government", emoji: "🏛️",
     education_level: "Master's",
     degrees: ["Master of Public Administration (MPA)","Master of Arts in Governance and Leadership","Master of Business Administration (MBA)","Master of Laws (LLM) in Public Law and Governance"],
     description: "Provide strategic administrative leadership and coordinate decentralised service delivery at district level, serving as Chief Executive of the District under Rwanda's decentralisation framework.",
@@ -885,10 +848,9 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
 
-  // ═══════════════════ NGO / DEVELOPMENT ═══════════════════
+  // ═══════════════════ NGO ═══════════════════
   {
-    title: "Project Manager",
-    domain: "NGO", emoji: "📋",
+    title: "Project Manager", domain: "NGO", emoji: "📋",
     education_level: "Master's",
     degrees: ["Master of Business Administration (MBA)","Master of Arts in Development Studies","Master of Science in Project Management","Master of Arts in International Development","Master of Public Administration (MPA)"],
     description: "Lead cross-functional teams to deliver high-impact development programmes on time, within scope, and on budget for a major donor-funded initiative operating across Rwanda.",
@@ -911,8 +873,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "MEAL Officer",
-    domain: "NGO", emoji: "📈",
+    title: "MEAL Officer", domain: "NGO", emoji: "📈",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Statistics","Bachelor of Arts in Development Studies","Bachelor of Science in Economics","Bachelor of Science in Public Health","Bachelor of Arts in Social Sciences"],
     description: "Strengthen evidence-based programme management by designing and implementing robust Monitoring, Evaluation, Accountability, and Learning (MEAL) systems across all programme components.",
@@ -935,8 +896,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Social Worker / Case Manager",
-    domain: "NGO", emoji: "🤝",
+    title: "Social Worker / Case Manager", domain: "NGO", emoji: "🤝",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Social Work","Bachelor of Science in Psychology","Bachelor of Arts in Sociology","Bachelor of Science in Social Sciences","Bachelor of Arts in Community Development"],
     description: "Provide professional psychosocial support, structured case management, and child protection services to vulnerable individuals and families including GBV survivors and households in extreme poverty.",
@@ -959,8 +919,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Nutrition Officer",
-    domain: "NGO", emoji: "🥗",
+    title: "Nutrition Officer", domain: "NGO", emoji: "🥗",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Nutrition and Dietetics","Bachelor of Science in Food Science and Nutrition","Bachelor of Science in Public Health Nutrition","Bachelor of Science in Agricultural Sciences with Nutrition"],
     description: "Design, implement, and evaluate nutrition programmes aimed at reducing malnutrition and improving dietary diversity in Rwanda, aligned with the Multi-Sector Nutrition Policy.",
@@ -982,8 +941,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "GBV Programme Officer",
-    domain: "NGO", emoji: "💜",
+    title: "GBV Programme Officer", domain: "NGO", emoji: "💜",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Social Work","Bachelor of Science in Psychology","Bachelor of Arts in Gender Studies","Bachelor of Arts in Development Studies","Bachelor of Arts in Sociology"],
     description: "Design, coordinate, and monitor gender-based violence prevention and response programmes that protect survivors and promote gender equality across Rwanda.",
@@ -1008,8 +966,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ HOSPITALITY ═══════════════════
   {
-    title: "Hotel Manager",
-    domain: "Hospitality", emoji: "🏨",
+    title: "Hotel Manager", domain: "Hospitality", emoji: "🏨",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Hospitality Management","Bachelor of Arts in Tourism and Hospitality Management","Bachelor of Business Administration in Hotel Management","Bachelor of Science in Tourism Management"],
     description: "Lead all aspects of hotel operations, deliver exceptional guest experiences, drive revenue growth, and maintain RDB tourism classification standards.",
@@ -1032,8 +989,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Tour Guide",
-    domain: "Hospitality", emoji: "🦍",
+    title: "Tour Guide", domain: "Hospitality", emoji: "🦍",
     education_level: "Diploma",
     degrees: ["Advanced Diploma in Tourism and Hospitality","Diploma in Tourism Management","Bachelor of Arts in Tourism and Hospitality (advantage)"],
     description: "Lead outstanding visitor experiences across Rwanda's iconic destinations — including Volcanoes National Park gorilla trekking, Nyungwe Forest, and Akagera Safari — providing expert knowledge of wildlife, history, and culture.",
@@ -1058,8 +1014,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ LEGAL ═══════════════════
   {
-    title: "Legal Counsel",
-    domain: "Legal", emoji: "⚖️",
+    title: "Legal Counsel", domain: "Legal", emoji: "⚖️",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Laws (LLB)","Bachelor of Laws with Honours (LLB Hons)","Bachelor of Arts in Law"],
     description: "Provide authoritative legal advice, manage litigation, draft and review contracts, and ensure full compliance with Rwandan law and applicable international regulations.",
@@ -1082,10 +1037,9 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
 
-  // ═══════════════════ MEDIA / COMMUNICATIONS ═══════════════════
+  // ═══════════════════ MEDIA ═══════════════════
   {
-    title: "Communications and PR Officer",
-    domain: "Media", emoji: "📣",
+    title: "Communications and PR Officer", domain: "Media", emoji: "📣",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Journalism and Mass Communication","Bachelor of Arts in Public Relations","Bachelor of Arts in Communications","Bachelor of Science in Media Studies","Bachelor of Arts in Marketing Communications"],
     description: "Manage the organisation's brand reputation, media relations, and internal and external communications strategy to strengthen visibility and credibility in Rwanda and beyond.",
@@ -1110,8 +1064,7 @@ const RWANDA_JOBS_DATA = [
 
   // ═══════════════════ ENERGY ═══════════════════
   {
-    title: "Renewable Energy Engineer — Solar PV",
-    domain: "Energy", emoji: "☀️",
+    title: "Renewable Energy Engineer — Solar PV", domain: "Energy", emoji: "☀️",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Electrical Engineering","Bachelor of Science in Renewable Energy Engineering","Bachelor of Science in Energy Systems Engineering","Bachelor of Engineering in Electrical Engineering"],
     description: "Design, install, commission, and maintain solar PV and off-grid energy systems, supporting Rwanda's universal electrification targets through REG, RURA, and off-grid energy programmes.",
@@ -1134,10 +1087,9 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
 
-  // ═══════════════════ OTHER / CROSS-CUTTING ═══════════════════
+  // ═══════════════════ OTHER ═══════════════════
   {
-    title: "Architect",
-    domain: "Other", emoji: "📐",
+    title: "Architect", domain: "Other", emoji: "📐",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Architecture (B.Arch)","Master of Architecture (M.Arch)","Bachelor of Arts in Architecture","Bachelor of Science in Architectural Engineering"],
     description: "Lead design and construction supervision of residential, commercial, and public building projects in Rwanda, ensuring compliance with RHA Building Code and Kigali City Master Plan.",
@@ -1160,8 +1112,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Supply Chain and Logistics Manager",
-    domain: "Other", emoji: "🚚",
+    title: "Supply Chain and Logistics Manager", domain: "Other", emoji: "🚚",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Supply Chain Management","Bachelor of Commerce in Logistics and Supply Chain","Bachelor of Business Administration in Operations Management","Bachelor of Science in Procurement and Logistics"],
     description: "Oversee end-to-end supply chain operations, optimise procurement and distribution processes, and ensure timely, cost-effective delivery of goods and services across all organisational functions.",
@@ -1184,8 +1135,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Graphic Designer",
-    domain: "Other", emoji: "🎨",
+    title: "Graphic Designer", domain: "Other", emoji: "🎨",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Graphic Design","Bachelor of Arts in Visual Communication","Bachelor of Fine Arts in Design","Bachelor of Science in Multimedia Design and Technology"],
     description: "Create compelling, on-brand visual content for print and digital platforms, strengthening organisational identity and maximising communications impact across all audiences.",
@@ -1208,8 +1158,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Fleet and Transport Manager",
-    domain: "Other", emoji: "🚗",
+    title: "Fleet and Transport Manager", domain: "Other", emoji: "🚗",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Automotive Engineering","Bachelor of Science in Mechanical Engineering","Bachelor of Business Administration in Logistics","Bachelor of Science in Transport Management"],
     description: "Oversee the full lifecycle management of the organisational vehicle fleet, ensuring operational readiness, driver safety, regulatory compliance, and cost efficiency across all field operations.",
@@ -1232,8 +1181,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Monitoring Officer — Government Programmes",
-    domain: "Other", emoji: "📊",
+    title: "Monitoring Officer — Government Programmes", domain: "Other", emoji: "📊",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Science in Statistics","Bachelor of Arts in Development Studies","Bachelor of Science in Economics","Bachelor of Public Administration","Bachelor of Science in Planning"],
     description: "Monitor implementation of government development programmes, track Imihigo performance indicators, and provide data-driven insights to support evidence-based policy and programme adjustments.",
@@ -1256,8 +1204,7 @@ const RWANDA_JOBS_DATA = [
     employment_type: "Full-time",
   },
   {
-    title: "Community Development Officer",
-    domain: "Other", emoji: "🌍",
+    title: "Community Development Officer", domain: "Other", emoji: "🌍",
     education_level: "Bachelor's",
     degrees: ["Bachelor of Arts in Community Development","Bachelor of Science in Social Sciences","Bachelor of Arts in Sociology","Bachelor of Arts in Rural Development","Bachelor of Science in Development Studies"],
     description: "Facilitate participatory community development processes, strengthen local governance structures, and support vulnerable households to improve their livelihoods and access to social services.",
@@ -1283,16 +1230,10 @@ const RWANDA_JOBS_DATA = [
 
 // ── Helpers ─────────────────────────────────────────────────
 function getEducationLevel(level) {
-  const map = {
-    "Bachelor's": "Bachelor's",
-    "Master's": "Master's",
-    "Diploma": "Diploma",
-    "PhD": "PhD",
-  }
+  const map = { "Bachelor's": "Bachelor's", "Master's": "Master's", "Diploma": "Diploma", "PhD": "PhD" }
   return map[level] || "Bachelor's"
 }
 
-// Build JOB_TEMPLATES map
 const JOB_TEMPLATES = {}
 RWANDA_JOBS_DATA.forEach(job => {
   JOB_TEMPLATES[job.title] = {
@@ -1312,6 +1253,12 @@ RWANDA_JOBS_DATA.forEach(job => {
 })
 
 const JOB_TITLES = Object.keys(JOB_TEMPLATES)
+const DOMAIN_ORDER = ['Health','Education','Technology','Finance','Agriculture','Engineering','Government','NGO','Hospitality','Legal','Media','Energy','Other']
+const titlesByDomain = {}
+RWANDA_JOBS_DATA.forEach(j => {
+  if (!titlesByDomain[j.domain]) titlesByDomain[j.domain] = []
+  titlesByDomain[j.domain].push(j.title)
+})
 
 // ── Shared styles ─────────────────────────────────────────────
 const inputStyle = {
@@ -1326,7 +1273,7 @@ const labelStyle = {
   letterSpacing: '.07em', marginBottom: 8,
 }
 
-// ── Sub-components ────────────────────────────────────────────
+// ── TagInput ─────────────────────────────────────────────────
 function TagInput({ label, hint, icon, tags, onChange, placeholder, color = B.blue }) {
   const [input, setInput] = useState('')
   const add    = () => { const v = input.trim(); if (v && !tags.includes(v)) onChange([...tags, v]); setInput('') }
@@ -1398,82 +1345,82 @@ function fmtDeadlinePreview(dtStr) {
   catch { return dtStr }
 }
 
-// ── Degree Experience Matrix Component ────────────────────────
-// Shows a live preview of each degree + its computed experience requirement
+// ── ExpBadge — clean coloured badge for a given exp value ────
+function ExpBadge({ exp }) {
+  const bg    = exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight  : exp <= 5 ? B.amberLight  : B.redLight
+  const bdr   = exp === 0 ? B.emerald      : exp <= 2 ? B.blue        : exp <= 5 ? B.amber        : B.red
+  const clr   = exp === 0 ? B.emerald      : exp <= 2 ? B.blueDark    : exp <= 5 ? B.amber        : B.red
+  const label = exp === 0 ? 'Entry-level (0 yrs)' : `Min ${exp} yr${exp !== 1 ? 's' : ''} experience`
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '4px 12px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 800,
+      background: bg, border: `1.5px solid ${bdr}50`, color: clr, whiteSpace: 'nowrap',
+    }}>
+      <Clock size={11} /> {label}
+    </span>
+  )
+}
+
+// ── TierBadge — coloured tier label ─────────────────────────
+function TierBadge({ tier }) {
+  const colors = TIER_COLORS[tier]
+  return (
+    <span style={{
+      padding: '2px 9px', borderRadius: 99, fontSize: '0.7rem', fontWeight: 800,
+      background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text,
+      whiteSpace: 'nowrap',
+    }}>
+      {TIER_LABELS[tier]}
+    </span>
+  )
+}
+
+// ── DegreeExpMatrix — live per-degree experience table ────────
 function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
   if (!degrees.length) return null
-
-  // Group by tier so same-tier degrees appear together
-  const grouped = {}
-  degrees.forEach(d => {
-    const t = degreeTier(d)
-    if (!grouped[t]) grouped[t] = []
-    grouped[t].push(d)
-  })
-
   return (
     <div style={{ marginTop: 14 }}>
       <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textMid, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>
         📊 Degree × Experience Matrix — auto-calculated
       </div>
       <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
-        {/* Table header */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', background: B.navy, padding: '8px 14px', gap: 12 }}>
-          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
-          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
-          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right', whiteSpace: 'nowrap' }}>Min Exp Required</span>
+        {/* Header */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 180px', background: B.navy, padding: '8px 14px', gap: 12 }}>
+          <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
+          <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
+          <span style={{ fontSize: '.7rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Experience Required</span>
         </div>
-        {/* Rows */}
+        {/* Rows — one row per degree */}
         {degrees.map((d, i) => {
           const tier = degreeTier(d)
-          const exp = calcExpForDegree(tier, baseMin, baseMax)
-          const colors = TIER_COLORS[tier]
+          const exp  = calcExpForDegree(tier, baseMin, baseMax)
           return (
-            <div
-              key={i}
-              style={{
-                display: 'grid', gridTemplateColumns: '1fr auto auto',
-                padding: '10px 14px', gap: 12, alignItems: 'center',
-                background: i % 2 === 0 ? B.white : B.bg,
-                borderTop: i === 0 ? 'none' : `1px solid ${B.borderLight}`,
-              }}
-            >
-              <span style={{ fontSize: '0.82rem', color: B.text, fontWeight: 600 }}>{d}</span>
-              <span style={{
-                padding: '2px 10px', borderRadius: 99, fontSize: '.72rem', fontWeight: 800,
-                background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text,
-                whiteSpace: 'nowrap',
-              }}>
-                {TIER_LABELS[tier]}
-              </span>
-              <span style={{
-                padding: '3px 12px', borderRadius: 99, fontSize: '.78rem', fontWeight: 800,
-                background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : '#fee2e2',
-                border: `1.5px solid ${exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red}40`,
-                color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
-                whiteSpace: 'nowrap', textAlign: 'right',
-              }}>
-                {exp === 0 ? 'No min exp' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
-              </span>
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '1fr 100px 180px',
+              padding: '11px 14px', gap: 12, alignItems: 'center',
+              background: i % 2 === 0 ? B.white : B.bg,
+              borderTop: `1px solid ${B.borderLight}`,
+            }}>
+              <span style={{ fontSize: '0.83rem', color: B.text, fontWeight: 600 }}>{d}</span>
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <TierBadge tier={tier} />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <ExpBadge exp={exp} />
+              </div>
             </div>
           )
         })}
         {/* Legend */}
         <div style={{ padding: '10px 14px', background: '#f8fafc', borderTop: `1px solid ${B.borderLight}`, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
-          <strong style={{ color: B.textMid }}>Rule:</strong> PhD → base−3 yrs &nbsp;|&nbsp; Master's → base−1 yr &nbsp;|&nbsp; Bachelor's → base yrs &nbsp;|&nbsp; Diploma → base+3 yrs &nbsp;(all capped at {baseMax} yrs max)
+          <strong style={{ color: B.textMid }}>Auto-adjustment rule:</strong>&nbsp;
+          PhD → base−3 yrs &nbsp;·&nbsp; Master's → base−1 yr &nbsp;·&nbsp; Bachelor's → base yrs &nbsp;·&nbsp; Diploma → base+3 yrs &nbsp;(all capped at {baseMax} yrs max)
         </div>
       </div>
     </div>
   )
 }
-
-// ── Domain ordering ──────────────────────────────────────────
-const DOMAIN_ORDER = ['Health','Education','Technology','Finance','Agriculture','Engineering','Government','NGO','Hospitality','Legal','Media','Energy','Other']
-const titlesByDomain = {}
-RWANDA_JOBS_DATA.forEach(j => {
-  if (!titlesByDomain[j.domain]) titlesByDomain[j.domain] = []
-  titlesByDomain[j.domain].push(j.title)
-})
 
 // ── Main Component ────────────────────────────────────────────
 export default function HRJobCreate() {
@@ -1534,10 +1481,7 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
-      // ── Build the enriched degree+experience string for the backend ──
-      // Format: "DegreeName [min X yrs]" pipe-separated
-      // The AI shortlister uses this to check each applicant's
-      // degree tier against the right experience threshold.
+      // Serialize degrees with per-tier experience thresholds for the AI shortlister
       const enrichedDegrees = serializeDegreesWithExp(
         form.required_degrees,
         Number(form.required_min_experience),
@@ -1554,10 +1498,8 @@ export default function HRJobCreate() {
         job_level:                 form.job_level,
         number_of_posts:           Number(form.number_of_posts),
         deadline:                  deadlineWithSeconds,
-        // ─ KEY FIX: send enriched degrees (with per-degree exp) ─
         required_education_levels: enrichedDegrees,
         required_fields:           form.required_fields,
-        // ─ base min/max kept for filtering UI on job cards ─
         required_min_experience:   Number(form.required_min_experience),
         required_max_experience:   Number(form.required_max_experience),
         required_skills:           serialize(form.required_skills),
@@ -1585,13 +1527,16 @@ export default function HRJobCreate() {
     return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`
   })()
 
+  const bMin = Number(form.required_min_experience)
+  const bMax = Number(form.required_max_experience)
+
   return (
     <>
       <Helmet><title>Post a Job — GI Recruitment Network</title></Helmet>
       <div className="page-wrapper" style={{ background: B.bg, minHeight: '100vh' }}>
         <Navbar />
 
-        {/* ── Header ── */}
+        {/* Header */}
         <div style={{ background: `linear-gradient(135deg, ${B.navy} 0%, #1e3a5f 45%, ${B.blue} 100%)`, padding: '44px 20px 40px', color: B.white, borderBottom: `3px solid ${B.blueLight}` }}>
           <div style={{ maxWidth: 1200, margin: '0 auto' }}>
             <button onClick={() => navigate('/hr')} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 16px', borderRadius: 7, border: '2px solid rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.12)', color: B.white, fontWeight: 700, fontSize: '0.82rem', cursor: 'pointer', marginBottom: 22, letterSpacing: '.02em' }}>
@@ -1603,14 +1548,14 @@ export default function HRJobCreate() {
               </div>
               <div>
                 <h1 style={{ fontSize: '1.75rem', fontWeight: 900, color: B.white, margin: 0, letterSpacing: '-.02em' }}>Post a New Job</h1>
-                <p style={{ color: '#93c5fd', fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>60 Rwanda-specific templates — experience adjusts automatically by degree level for fair, accurate AI shortlisting</p>
+                <p style={{ color: '#93c5fd', fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>60 Rwanda-specific templates — experience adjusts automatically by degree level for fair AI shortlisting</p>
               </div>
             </div>
           </div>
         </div>
 
         <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 20px' }}>
-          {/* ── Tab switcher ── */}
+          {/* Tab switcher */}
           <div style={{ display: 'flex', gap: 0, marginBottom: 28, background: B.white, borderRadius: 10, padding: 5, width: 'fit-content', border: `1.5px solid ${B.borderLight}`, boxShadow: '0 1px 4px rgba(15,23,42,.07)' }}>
             {['form', 'preview'].map(tab => (
               <button key={tab} type="button" onClick={() => setActiveTab(tab)} style={{ padding: '9px 24px', borderRadius: 7, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem', letterSpacing: '.02em', background: activeTab === tab ? B.blue : 'transparent', color: activeTab === tab ? B.white : B.textLight, boxShadow: activeTab === tab ? '0 2px 8px rgba(37,99,235,.35)' : 'none', transition: 'all .18s' }}>
@@ -1719,16 +1664,12 @@ export default function HRJobCreate() {
                 <div style={cardStyle}>
                   <SectionHeader step="3" icon={<GraduationCap size={20} />} title="Education Requirements" subtitle="The system auto-adjusts required experience per degree tier — higher degree = fewer years required" color={B.sky} />
                   <InfoBanner color={B.sky}>
-                    Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the matrix below.
+                    Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the live matrix below.
                   </InfoBanner>
                   <TagInput label="Accepted Degrees / Qualifications" hint="— one per entry, press Enter" icon={<GraduationCap size={14} />} tags={form.required_degrees} onChange={setArr('required_degrees')} placeholder="e.g. Bachelor of Commerce in Accounting" color={B.sky} />
 
                   {/* ── LIVE DEGREE × EXPERIENCE MATRIX ── */}
-                  <DegreeExpMatrix
-                    degrees={form.required_degrees}
-                    baseMin={Number(form.required_min_experience)}
-                    baseMax={Number(form.required_max_experience)}
-                  />
+                  <DegreeExpMatrix degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
@@ -1749,9 +1690,9 @@ export default function HRJobCreate() {
 
                 {/* Section 4: Experience */}
                 <div style={cardStyle}>
-                  <SectionHeader step="4" icon={<Clock size={20} />} title="Base Experience Range" subtitle="Set the baseline — the matrix above adjusts per-degree thresholds automatically" color={B.amber} />
+                  <SectionHeader step="4" icon={<Clock size={20} />} title="Base Experience Range" subtitle="Set the baseline for a Bachelor's degree — the matrix adjusts all other tiers automatically" color={B.amber} />
                   <InfoBanner color={B.amber}>
-                    This is the <strong>base range for a Bachelor's degree holder</strong>. The system automatically reduces the minimum for Master's/PhD applicants and increases it for Diploma holders — so every degree tier is treated fairly.
+                    This is the <strong>base range for a Bachelor's degree holder</strong>. Master's/PhD applicants need fewer years; Diploma holders need more — see the live matrix above.
                   </InfoBanner>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
@@ -1763,14 +1704,44 @@ export default function HRJobCreate() {
                       <input style={inputStyle} type="number" name="required_max_experience" min="0" max="50" value={form.required_max_experience} onChange={handle} required />
                     </div>
                   </div>
-                  <div style={{ padding: '12px 16px', background: '#fffbeb', border: '2px solid #fcd34d', borderRadius: 8, fontSize: '0.82rem', color: '#78350f', display: 'flex', gap: 10, alignItems: 'flex-start', fontWeight: 600 }}>
-                    <Info size={16} style={{ flexShrink: 0, color: B.amber, marginTop: 1 }} />
-                    <div>
-                      Effective thresholds for this job:&nbsp;
-                      <strong>PhD ≥ {Math.max(0, Number(form.required_min_experience) - 3)} yrs</strong>&nbsp;·&nbsp;
-                      <strong>Master's ≥ {Math.max(0, Number(form.required_min_experience) - 1)} yrs</strong>&nbsp;·&nbsp;
-                      <strong>Bachelor's ≥ {form.required_min_experience} yrs</strong>&nbsp;·&nbsp;
-                      <strong>Diploma ≥ {Math.min(Number(form.required_min_experience) + 3, Number(form.required_max_experience))} yrs</strong>
+
+                  {/* ── CLEAR EXPERIENCE SUMMARY PANEL ── */}
+                  <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', background: B.navy, fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.8)', textTransform: 'uppercase', letterSpacing: '.07em' }}>
+                      Effective experience thresholds for this job
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr' }}>
+                      {[
+                        { tier: 4, label: 'PhD', exp: Math.max(0, bMin - 3) },
+                        { tier: 3, label: "Master's", exp: Math.max(0, bMin - 1) },
+                        { tier: 2, label: "Bachelor's", exp: bMin },
+                        { tier: 1, label: 'Diploma', exp: Math.min(bMin + 3, bMax) },
+                      ].map(({ tier, label, exp }, i) => {
+                        const colors = TIER_COLORS[tier]
+                        return (
+                          <div key={tier} style={{
+                            padding: '14px 16px', textAlign: 'center',
+                            borderLeft: i > 0 ? `1px solid ${B.borderLight}` : 'none',
+                            background: B.white,
+                          }}>
+                            <div style={{ fontSize: '0.72rem', fontWeight: 800, color: colors.text, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>{label}</div>
+                            <div style={{
+                              fontSize: '1.6rem', fontWeight: 900, color: colors.text,
+                              lineHeight: 1, marginBottom: 4,
+                            }}>
+                              {exp}
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: B.textLight, fontWeight: 600 }}>
+                              yr{exp !== 1 ? 's' : ''} min
+                            </div>
+                            <div style={{ marginTop: 8 }}>
+                              <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: '0.68rem', fontWeight: 700, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text }}>
+                                {exp === 0 ? 'Entry-level' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
+                              </span>
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
                   </div>
                 </div>
@@ -1821,24 +1792,35 @@ export default function HRJobCreate() {
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
 
-                    {/* ── PER-DEGREE EXP — sidebar preview ── */}
+                    {/* ── SIDEBAR: clean per-degree experience list ── */}
                     {form.required_degrees.length > 0 && (
-                      <div style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>Degrees & Min Experience</div>
-                        {form.required_degrees.slice(0, 4).map((d, i) => {
-                          const tier = degreeTier(d)
-                          const exp = calcExpForDegree(tier, Number(form.required_min_experience), Number(form.required_max_experience))
-                          const colors = TIER_COLORS[tier]
-                          return (
-                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-                              <div style={{ flex: 1, fontSize: '.78rem', color: B.textMid, fontWeight: 600, paddingLeft: 8, borderLeft: `2px solid ${colors.border}`, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d}</div>
-                              <span style={{ padding: '1px 8px', borderRadius: 99, fontSize: '.7rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap', flexShrink: 0 }}>
-                                {exp === 0 ? '0 yrs' : `≥${exp}yr`}
-                              </span>
-                            </div>
-                          )
-                        })}
-                        {form.required_degrees.length > 4 && <div style={{ fontSize: '.73rem', color: B.textLight }}>+{form.required_degrees.length - 4} more</div>}
+                      <div style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
+                          Education &amp; Experience
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {form.required_degrees.slice(0, 5).map((d, i) => {
+                            const tier = degreeTier(d)
+                            const exp  = calcExpForDegree(tier, bMin, bMax)
+                            const colors = TIER_COLORS[tier]
+                            return (
+                              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 7, background: colors.bg, border: `1.5px solid ${colors.border}30` }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: '0.76rem', fontWeight: 700, color: colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d}</div>
+                                  <div style={{ fontSize: '0.68rem', color: colors.text, opacity: 0.75, marginTop: 1 }}>{TIER_LABELS[tier]}</div>
+                                </div>
+                                <div style={{ flexShrink: 0 }}>
+                                  <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: '0.7rem', fontWeight: 800, background: 'white', border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
+                                    {exp === 0 ? '0 yrs' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
+                                  </span>
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {form.required_degrees.length > 5 && (
+                            <div style={{ fontSize: '.72rem', color: B.textLight, paddingLeft: 4 }}>+{form.required_degrees.length - 5} more degrees</div>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -1875,39 +1857,68 @@ export default function HRJobCreate() {
                 {form.about_role && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>About the Role</h3><p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.92rem', marginBottom: 16 }}>{form.about_role}</p></>)}
                 {form.responsibilities.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Key Responsibilities</h3><ul style={{ margin: 0, paddingLeft: 22, color: B.textMid, lineHeight: 1.9, fontSize: '0.9rem' }}>{form.responsibilities.map((r, i) => <li key={i}>{r}</li>)}</ul></>)}
 
-                {/* ── PREVIEW: Degree + Experience table (replaces old flat list) ── */}
+                {/* ── PREVIEW: clean per-degree table — one row per degree ── */}
                 {form.required_degrees.length > 0 && (
                   <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Education & Experience Requirements</h3>
-                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden', marginBottom: 10 }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', background: B.navy, padding: '8px 16px', gap: 12 }}>
-                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
-                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Min Experience</span>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14, marginTop: 30 }}>Education &amp; Experience Requirements</h3>
+                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
+                      {/* Column headers */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 200px', background: B.navy, padding: '10px 18px', gap: 12 }}>
+                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree / Qualification</span>
+                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
+                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Experience Required</span>
                       </div>
+                      {/* One row per degree — clean degree name + its own exp badge */}
                       {form.required_degrees.map((d, i) => {
-                        const tier = degreeTier(d)
-                        const exp = calcExpForDegree(tier, Number(form.required_min_experience), Number(form.required_max_experience))
+                        const tier   = degreeTier(d)
+                        const exp    = calcExpForDegree(tier, bMin, bMax)
                         const colors = TIER_COLORS[tier]
                         return (
-                          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto', padding: '11px 16px', gap: 12, alignItems: 'center', background: i % 2 === 0 ? B.white : B.bg, borderTop: i === 0 ? 'none' : `1px solid ${B.borderLight}` }}>
+                          <div key={i} style={{
+                            display: 'grid', gridTemplateColumns: '1fr 100px 200px',
+                            padding: '13px 18px', gap: 12, alignItems: 'center',
+                            background: i % 2 === 0 ? B.white : B.bg,
+                            borderTop: `1px solid ${B.borderLight}`,
+                          }}>
+                            {/* Degree name — clean, no brackets */}
                             <div>
                               <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 700 }}>{d}</div>
-                              <div style={{ fontSize: '0.72rem', color: colors.text, fontWeight: 600, marginTop: 2 }}>{TIER_LABELS[tier]}</div>
                             </div>
-                            <span style={{ padding: '4px 14px', borderRadius: 99, fontSize: '0.82rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
-                              {exp === 0 ? 'Entry-level' : `≥ ${exp} yr${exp !== 1 ? 's' : ''} exp`}
-                            </span>
+                            {/* Tier badge */}
+                            <div style={{ display: 'flex', justifyContent: 'center' }}>
+                              <span style={{ padding: '3px 10px', borderRadius: 99, fontSize: '0.72rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
+                                {TIER_LABELS[tier]}
+                              </span>
+                            </div>
+                            {/* Experience badge — specific to THIS degree's tier */}
+                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                              <span style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 5,
+                                padding: '5px 14px', borderRadius: 99, fontSize: '0.82rem', fontWeight: 800, whiteSpace: 'nowrap',
+                                background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : B.redLight,
+                                border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
+                                color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
+                              }}>
+                                <Clock size={12} />
+                                {exp === 0 ? 'Entry-level (0 yrs exp)' : `Min ${exp} yr${exp !== 1 ? 's' : ''} experience`}
+                              </span>
+                            </div>
                           </div>
                         )
                       })}
                     </div>
-                    {form.required_fields && <p style={{ color: B.textLight, fontSize: '0.85rem', marginTop: 6 }}>Accepted fields of study: {form.required_fields}</p>}
+                    {form.required_fields && (
+                      <p style={{ color: B.textLight, fontSize: '0.83rem', marginTop: 6 }}>
+                        Accepted fields of study: <strong style={{ color: B.textMid }}>{form.required_fields}</strong>
+                      </p>
+                    )}
                   </>
                 )}
 
                 {form.required_skills.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Skills</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_skills.map((s, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}50`, color: B.violet, fontSize: '0.82rem', fontWeight: 700 }}>{s}</span>)}</div></>)}
-                {form.required_certifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications & Licences</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_certifications.map((c, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.amberLight, border: `1.5px solid ${B.amber}50`, color: B.amber, fontSize: '0.82rem', fontWeight: 700 }}>{c}</span>)}</div></>)}
+                {form.required_certifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications &amp; Licences</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_certifications.map((c, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.amberLight, border: `1.5px solid ${B.amber}50`, color: B.amber, fontSize: '0.82rem', fontWeight: 700 }}>{c}</span>)}</div></>)}
                 {form.preferred_qualifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Preferred Qualifications</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.preferred_qualifications.map((p, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.emeraldLight, border: `1.5px solid ${B.emerald}50`, color: B.emerald, fontSize: '0.82rem', fontWeight: 700 }}>{p}</span>)}</div></>)}
+
                 <div style={{ marginTop: 36, paddingTop: 24, borderTop: `2px solid ${B.borderLight}`, display: 'flex', gap: 14 }}>
                   <button onClick={() => setActiveTab('form')} style={{ padding: '11px 22px', borderRadius: 8, border: `2px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, cursor: 'pointer', fontSize: '0.9rem' }}>← Back to Edit</button>
                   <button disabled={loading} onClick={submit} style={{ padding: '11px 28px', borderRadius: 8, border: 'none', background: `linear-gradient(135deg, ${B.blue} 0%, ${B.blueDark} 100%)`, color: B.white, fontWeight: 800, cursor: 'pointer', fontSize: '0.9rem', boxShadow: '0 4px 14px rgba(37,99,235,.4)', display: 'flex', alignItems: 'center', gap: 8 }}>
