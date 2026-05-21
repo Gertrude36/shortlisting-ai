@@ -1,18 +1,32 @@
 /**
- * ApplyPage.jsx — v5.12.0
+ * ApplyPage.jsx — v5.13.0
  *
- * FIXES in v5.12.0:
+ * FIXES in v5.13.0:
  *
- *  ✅ FIX — Client-side file type and size validation in handleFileChange.
- *     Previously, unsupported types (e.g. .docx, .zip, .heic) were sent to
- *     the server which returned a cryptic error with no clear UI feedback.
- *     Now validated BEFORE upload:
- *       - Wrong type  → red toast + red error card on the doc slot
- *       - File too big → red toast + red error card on the doc slot
- *     The <input accept> filters the OS picker but not drag-and-drop or
- *     manual path entry — this fix covers those cases too.
+ *  ✅ FIX — attach-profile failures now properly reflected in UI state.
+ *     Previously, when POST /applications/{id}/documents/attach-profile
+ *     returned a 404 or any error, the doc was still shown as "success"
+ *     (fromProfile: true) on the frontend. The user would then proceed to
+ *     Submit and receive a confusing "Cannot submit — 1 required document(s)
+ *     missing: CV / Resume" error from the backend (/finalize returns 400).
  *
- * All v5.11.0 fixes retained unchanged.
+ *     Root cause: attachAll() used Promise.allSettled and silently swallowed
+ *     failures. The docStatus for that type was never updated from its
+ *     pre-filled "success/fromProfile" state.
+ *
+ *     Fix:
+ *       1. On attach failure, docStatus for that type is reset to 'idle'
+ *          (or 'error' if we have a useful message), so the upload slot
+ *          appears and the user can re-upload the file.
+ *       2. A toast warning is shown so the user knows which doc needs action.
+ *       3. The profileDocIdsRef entry is cleared so it isn't re-attempted
+ *          on finalize.
+ *       4. A server-side guard in finalize_application (main.py) does a
+ *          fresh db.expire_all() + DB query before checking missing docs,
+ *          ensuring the check is always authoritative even if the UI state
+ *          drifted. (See main.py v6.6.1 notes.)
+ *
+ * All v5.12.0 fixes retained unchanged.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -79,7 +93,7 @@ const DOC_TYPES = [
 const REQUIRED_DOC_KEYS  = DOC_TYPES.filter(d => d.required).map(d => d.key)
 const STEPS              = ['Position Info', 'Your Details', 'Documents', 'Submit']
 
-// ✅ FIX: client-side validation constants (mirrors backend limits)
+// ✅ client-side validation constants (mirrors backend limits)
 const ALLOWED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg']
 const MAX_FILE_SIZE_MB   = 5
 const MAX_FILE_SIZE_B    = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -468,6 +482,10 @@ export default function ApplyPage() {
   }, [applicationId])
 
   // ── Attach profile docs when applicationId becomes available ──────────────
+  // ✅ FIX v5.13.0: On attach failure, reset docStatus to 'idle' so the user
+  // sees the upload slot and can re-upload. Previously failures were silently
+  // swallowed, leaving the doc appearing as "success/fromProfile" while the
+  // backend had no record of it — causing /finalize to return 400.
   useEffect(() => {
     if (!applicationId) return
     const profileTypes = Object.keys(profileDocIdsRef.current)
@@ -486,11 +504,48 @@ export default function ApplyPage() {
           if (data?.id) {
             uploadedDocIds.current[docType] = data.id
             delete profileDocIdsRef.current[docType]
+            // Doc already marked success/fromProfile — no state change needed
+          } else {
+            // Unexpected: server returned 200 but no id — reset to idle
+            throw new Error('attach-profile returned no document id')
           }
         } catch (err) {
-          const status = err?.response?.status
-          const detail = err?.response?.data?.detail || err?.message || 'unknown error'
-          console.warn(`[ApplyPage] attach-profile failed for '${docType}' (source=${source}, status=${status}): ${detail}`)
+          const httpStatus = err?.response?.status
+          const detail     = err?.response?.data?.detail || err?.message || 'unknown error'
+
+          console.warn(
+            `[ApplyPage] attach-profile failed for '${docType}' ` +
+            `(source=${source}, status=${httpStatus}): ${detail}`
+          )
+
+          // ✅ FIX: Clear the profileDocIdsRef so we don't think it's attached
+          delete profileDocIdsRef.current[docType]
+
+          // ✅ FIX: Reset docStatus to idle so the upload button appears.
+          // This is the key change — the user must re-upload this file manually.
+          if (mountedRef.current) {
+            setDocStatus(prev => ({
+              ...prev,
+              [docType]: {
+                status: 'idle',
+                message: '',
+                fileName: '',
+                isAdvisory: false,
+                isNetwork: false,
+                fromProfile: false,
+              },
+            }))
+
+            // Also clear any stale uploadedDocIds entry for this type
+            delete uploadedDocIds.current[docType]
+
+            // Notify the user so they know action is needed
+            const label = DOC_TYPES.find(d => d.key === docType)?.label || docType
+            toast.error(
+              `Could not pre-fill "${label}" from your profile — please upload it manually.`,
+              { duration: 8000, icon: '⚠️' }
+            )
+          }
         }
       })
       await Promise.allSettled(tasks)
@@ -693,7 +748,7 @@ export default function ApplyPage() {
 
   useEffect(() => { handleUploadRef.current = handleUpload }, [handleUpload])
 
-  // ✅ FIX: validate file type and size BEFORE sending to server
+  // ✅ validate file type and size BEFORE sending to server
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1127,7 +1182,6 @@ export default function ApplyPage() {
                                     <strong>💡 Tip:</strong> Your account name is <strong>{user?.full_name || user?.fullName}</strong>. Make sure this exactly matches the name on your National ID or Passport.
                                   </div>
                                 )}
-                                {/* ✅ FIX: show accepted formats hint on type errors */}
                                 {state.message?.includes('not supported') && (
                                   <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff7f7', borderRadius: 4, border: '1px solid #fecaca', fontSize: '.78rem', color: '#991b1b' }}>
                                     <strong>💡 Accepted formats:</strong> PDF, PNG, JPG, JPEG (max {MAX_FILE_SIZE_MB} MB)

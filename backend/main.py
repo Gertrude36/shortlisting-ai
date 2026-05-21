@@ -1,32 +1,27 @@
 """
-backend/main.py  ·  v6.6.0
+backend/main.py  ·  v6.6.1
 ────────────────────────────────────────────────────────────────
-ALL v6.5.2 FIXES RETAINED.
+ALL v6.6.0 FIXES RETAINED.
 
-NEW IN v6.6.0 — PERMANENT APPLICANT PROFILE PERSISTENCE:
+NEW IN v6.6.1 — FIX attach-profile 404 → finalize 400 bug:
 
-  ✅ FIX-PROFILE-1 — national_id is now a real DB column on the users table.
-     Previously it was localStorage-only (client-side), meaning it was lost
-     on every new device, browser clear, or server-side session. It is now
-     stored in the database alongside phone and address.
+  ✅ FIX-ATTACH-1 — attach_profile_document() now logs the exact failure
+     path when a ProfileDocument lookup misses (source mismatch between
+     frontend "profile" and backend "application" source), so the 404
+     is diagnosable from logs.
 
-  ✅ FIX-PROFILE-2 — ensure_user_profile_columns() now adds national_id
-     (VARCHAR 50) to the users table as part of startup migrations, alongside
-     the existing phone and address columns. Safe for existing deployments —
-     ALTER TABLE is no-op if the column already exists.
+  ✅ FIX-ATTACH-2 — The 404 error message now clearly tells the frontend
+     WHY the attach failed ("Profile document not found for 'CV / Resume'…
+     please upload a new file directly.") so the ApplyPage toast is
+     meaningful to the user.
 
-  ✅ FIX-PROFILE-3 — /auth/me now returns national_id from the DB so
-     AuthContext always gets the server-persisted value on every page load,
-     not a stale localStorage copy that could be wiped at any time.
+  ✅ FIX-ATTACH-3 — The frontend (ApplyPage v5.13.0) now handles this 404
+     by resetting docStatus to 'idle' and showing a toast so the user
+     sees the upload button and can re-upload. The backend 404 was always
+     correct; the bug was the frontend silently swallowing it via
+     Promise.allSettled and keeping the doc shown as success/fromProfile.
 
-  ✅ FIX-PROFILE-4 — PUT /profile now accepts and saves national_id to the DB.
-     ProfileUpdateRequest includes the optional national_id field; the
-     update_profile() handler writes it to users.national_id.
-
-  ✅ FIX-PROFILE-5 — _build_profile_response() includes national_id in every
-     profile response so GET /profile and PUT /profile both return the full
-     persisted state including national_id, and the profile_complete / missing
-     check now correctly gates on national_id being present in the DB.
+  finalize_application() is UNCHANGED — it was already correct.
 """
 
 import os
@@ -190,8 +185,6 @@ def _load_ml_modules() -> None:
         _ML_LOAD_ERROR = str(exc)
         print(f"[ml_loader] ⚠️  shortlisting_engine import failed: {exc!r}")
     try:
-        # ✅ FIX-IMPORT-3: broad catch so ai_matcher sub-import failures
-        # don't prevent the verifier stubs from being registered.
         from document_verifier import verify_documents as _vd, pre_submission_check as _psc
         _verify_documents     = _vd
         _pre_submission_check = _psc
@@ -230,12 +223,6 @@ def _call_verify_documents(**kwargs):
 
 
 def _call_pre_submission_check(**kwargs) -> tuple[bool, str]:
-    """
-    ✅ FIX-UPLOAD-1: This wrapper NEVER raises. Any exception (import error,
-    AI crash, disk error) is caught and returns a safe advisory acceptance
-    so the file is stored and the applicant is never shown a bare 500.
-    """
-    # Re-read env var so a live toggle takes effect without restart
     ocr_enabled_live = os.getenv("ENABLE_OCR", "true").lower() == "true"
     if not ocr_enabled_live:
         declared = kwargs.get("declared_type", "document")
@@ -249,7 +236,6 @@ def _call_pre_submission_check(**kwargs) -> tuple[bool, str]:
 
     try:
         result = _pre_submission_check(**kwargs)
-        # Ensure we always return a 2-tuple
         if isinstance(result, (list, tuple)) and len(result) >= 2:
             return bool(result[0]), str(result[1])
         return True, "✓ Document accepted."
@@ -269,7 +255,6 @@ def _extract_all_doc_texts(
     doc_texts: dict[str, str] = {}
     ocr_start = time.monotonic()
 
-    # Skip all OCR when disabled
     if not OCR_ENABLED:
         return {_doc_type_value(d): "" for d in docs}
 
@@ -386,12 +371,6 @@ def ensure_job_columns():
 
 
 def ensure_user_profile_columns():
-    """
-    ✅ FIX-PROFILE-2 — Ensures phone, address, AND national_id columns all
-    exist on the users table. national_id is now persisted in the DB so
-    applicant data survives server restarts and device/browser changes.
-    Safe for existing deployments — ALTER TABLE is skipped if column exists.
-    """
     try:
         inspector        = inspect(engine)
         existing_columns = [col["name"] for col in inspector.get_columns("users")]
@@ -399,7 +378,7 @@ def ensure_user_profile_columns():
             for col, coltype in [
                 ("phone",       "VARCHAR(50)"),
                 ("address",     "VARCHAR(255)"),
-                ("national_id", "VARCHAR(50)"),    # ✅ FIX-PROFILE-2
+                ("national_id", "VARCHAR(50)"),
             ]:
                 if col not in existing_columns:
                     try:
@@ -704,7 +683,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 
 _app = FastAPI(
     title       = "Applicant Shortlisting API",
-    version     = "6.6.0",
+    version     = "6.6.1",
     description = "AI-powered applicant shortlisting with full audit logging",
     lifespan    = lifespan,
 )
@@ -1084,11 +1063,6 @@ def login(
 
 @_app.get("/auth/me", tags=["auth"])
 def me(current_user: User = Depends(get_current_user)):
-    """
-    ✅ FIX-PROFILE-3 — Returns national_id from the DB so AuthContext always
-    receives the server-persisted value on every token verification, not a
-    stale or missing localStorage copy.
-    """
     return {
         "id":          current_user.id,
         "full_name":   current_user.full_name,
@@ -1096,7 +1070,7 @@ def me(current_user: User = Depends(get_current_user)):
         "role":        current_user.role.value,
         "phone":       current_user.phone       or "",
         "address":     current_user.address     or "",
-        "national_id": current_user.national_id or "",   # ✅ FIX-PROFILE-3
+        "national_id": current_user.national_id or "",
     }
 
 
@@ -1471,25 +1445,15 @@ def finalize_application(
 # ═══════════════════════════════════════════════════════════════
 
 class ProfileUpdateRequest(BaseModel):
-    """
-    ✅ FIX-PROFILE-4 — national_id is now accepted by PUT /profile and saved
-    to the users table in the database. It will persist across server restarts,
-    new devices, and browser clears — just like phone and address.
-    """
     phone:       Optional[str] = None
     address:     Optional[str] = None
-    national_id: Optional[str] = None   # ✅ FIX-PROFILE-4
+    national_id: Optional[str] = None
 
 
 def _build_profile_response(current_user: User) -> dict:
-    """
-    ✅ FIX-PROFILE-5 — national_id is included in every profile response.
-    The profile_complete check and missing_fields list now correctly reflect
-    whether national_id has been saved to the database.
-    """
     phone       = current_user.phone       or ""
     address     = current_user.address     or ""
-    national_id = current_user.national_id or ""   # ✅ FIX-PROFILE-5
+    national_id = current_user.national_id or ""
     missing = []
     if not national_id: missing.append("National ID")
     if not address:     missing.append("Location / Address")
@@ -1499,7 +1463,7 @@ def _build_profile_response(current_user: User) -> dict:
         "email":            current_user.email,
         "phone":            phone,
         "address":          address,
-        "national_id":      national_id,               # ✅ FIX-PROFILE-5
+        "national_id":      national_id,
         "profile_complete": len(missing) == 0,
         "missing_fields":   missing,
     }
@@ -1519,11 +1483,6 @@ def update_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    """
-    ✅ FIX-PROFILE-4 — Saves phone, address, AND national_id to the DB.
-    All three fields now survive server restarts and are available from
-    any device or browser without relying on localStorage.
-    """
     updated = []
     if payload.phone is not None:
         current_user.phone = payload.phone.strip() or None
@@ -1531,7 +1490,7 @@ def update_profile(
     if payload.address is not None:
         current_user.address = payload.address.strip() or None
         updated.append("address")
-    if payload.national_id is not None:                          # ✅ FIX-PROFILE-4
+    if payload.national_id is not None:
         current_user.national_id = payload.national_id.strip() or None
         updated.append("national_id")
     if updated:
@@ -1708,6 +1667,25 @@ def attach_profile_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
+    """
+    ✅ FIX-ATTACH-1/2/3 (v6.6.1) — Improved logging + clearer 404 messages.
+
+    Root cause of the original bug:
+      The frontend sent source="profile" for docs that came from a previous
+      application (stored in the Document table, not ProfileDocument). The
+      ProfileDocument lookup returned None, the fallback Document lookup used
+      profile_doc_id as a Document PK (it's actually a ProfileDocument PK) →
+      not found → 404. The frontend silently swallowed this via
+      Promise.allSettled, kept the doc shown as success/fromProfile, then
+      /finalize correctly rejected with 400 (CV missing from DB).
+
+    Fix:
+      - Log the exact miss so the 404 path is visible in server logs
+      - Return a clear 404 message naming which document type failed,
+        so the frontend toast (ApplyPage v5.13.0) is meaningful
+      - The frontend now resets docStatus to 'idle' on any 404 so the
+        user sees the upload button and can re-upload manually
+    """
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -1743,8 +1721,8 @@ def attach_profile_document(
     source_original  = None
     source_filename  = None
 
+    # ── Try ProfileDocument first (source="profile") ──────────────────────
     if payload.source == "profile":
-        doc_type_value = DocumentType(doc_type).value
         prof_doc = db.query(ProfileDocument).filter(
             ProfileDocument.id      == payload.profile_doc_id,
             ProfileDocument.user_id == current_user.id,
@@ -1753,15 +1731,36 @@ def attach_profile_document(
             source_file_path = prof_doc.file_path
             source_original  = prof_doc.original_name
             source_filename  = prof_doc.filename
+        else:
+            # ✅ FIX-ATTACH-1: Log the miss so it's diagnosable in Render logs
+            print(
+                f"[attach_profile] ProfileDocument id={payload.profile_doc_id} not found "
+                f"for user={current_user.id} (doc_type={doc_type}, source={payload.source}). "
+                f"Falling through to application Document lookup."
+            )
 
+    # ── Fall back to application Document (source="application") ──────────
     if source_file_path is None:
         source_doc = db.query(Document).filter(
             Document.id == payload.profile_doc_id
         ).first()
         if not source_doc:
+            # ✅ FIX-ATTACH-1: Log the final miss with full context
+            print(
+                f"[attach_profile] MISS — no ProfileDocument or Document found for "
+                f"id={payload.profile_doc_id}, user={current_user.id}, "
+                f"doc_type={doc_type}, source={payload.source}. Returning 404."
+            )
+            # ✅ FIX-ATTACH-2: Name the doc type in the error so the frontend
+            # toast tells the user exactly which file to re-upload
             raise HTTPException(
                 status_code=404,
-                detail="Profile document not found. Please upload a new file.",
+                detail=(
+                    f"Profile document not found for "
+                    f"'{DOC_TYPE_LABELS.get(doc_type, doc_type)}'. "
+                    "The file may have been deleted after a server restart. "
+                    "Please upload it directly."
+                ),
             )
         source_app = db.query(Application).filter(
             Application.id           == source_doc.application_id,
@@ -1833,11 +1832,6 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_applicant),
 ):
-    """
-    ✅ FIX-UPLOAD-2: The entire handler is wrapped in a top-level try/except
-    so any unhandled exception returns a clean JSON instead of crashing
-    the ASGI worker and showing "Internal server error" to the user.
-    """
     try:
         return await _upload_document_inner(
             application_id, request, doc_type, file, db, current_user
@@ -1864,7 +1858,6 @@ async def _upload_document_inner(
     db: Session,
     current_user: User,
 ):
-    """Inner handler — all business logic lives here, cleanly separated."""
     app_obj = db.query(Application).filter(
         Application.id           == application_id,
         Application.applicant_id == current_user.id,
@@ -1903,9 +1896,6 @@ async def _upload_document_inner(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # ── Pre-submission check ──────────────────────────────────────────────────
-    # Experience docs skip verification entirely.
-    # All other docs go through _call_pre_submission_check which NEVER raises.
     if doc_type == "experience":
         check_passed  = True
         check_message = "✓ Experience document accepted."
