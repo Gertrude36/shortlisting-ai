@@ -1,33 +1,30 @@
 /**
- * frontend/src/components/Navbar.jsx  ·  v6.0.0
+ * frontend/src/components/Navbar.jsx  ·  v6.1.0
  *
- * FIXES vs v5.9.0:
+ * FIXES in v6.1.0:
  *
- *  ✅ FIX-NAV-1 (CRITICAL) — profileComplete and `missing` now read from
- *     `profileDocuments` (the separate array on AuthContext) instead of
- *     `user.documents`. In AuthContext v3.0.0 profileDocuments is populated
- *     by /profile/documents; user.documents does not exist and was always
- *     undefined → profile was ALWAYS shown as incomplete regardless of uploads.
+ *  ✅ FIX-NAV-6 — DocSlot file input accept changed from
+ *     ".pdf,.doc,.docx,.jpg,.jpeg,.png" to ".pdf,.jpg,.jpeg,.png" only.
+ *     .doc and .docx are rejected by the backend but the old accept string
+ *     allowed them through the OS picker, giving users false confidence.
  *
- *  ✅ FIX-NAV-2 (CRITICAL) — InfoRow for "Documents" now uses profileDocuments
- *     from context instead of user.documents, so the sidebar shows the real
- *     count instead of "Not set" forever.
+ *  ✅ FIX-NAV-7 — Client-side file type + size validation added to DocSlot
+ *     BEFORE the file is handed to onChange/handleSave. Wrong type or
+ *     oversized files now show an immediate red error banner INSIDE the
+ *     modal slot — previously the error was invisible (shown in the page
+ *     background behind the modal overlay) or silently swallowed.
  *
- *  ✅ FIX-NAV-3 — ProfileModal now receives and calls refreshDocuments() after
- *     all uploads finish, so AuthContext.profileDocuments is updated before
- *     updateProfile() is called and before the modal closes. This means the
- *     Navbar dropdown immediately reflects the new document count.
+ *  ✅ FIX-NAV-8 — DocSlot now has its own `error` state. When validation
+ *     fails or the server rejects a file during handleSave, the specific
+ *     slot turns red with a clear message: file name, what went wrong,
+ *     and the accepted formats reminder. The error clears when the user
+ *     picks a new file.
  *
- *  ✅ FIX-NAV-4 — updateProfile() call in handleSave now only sends
- *     { phone, address, national_id } — fields the backend/AuthContext
- *     actually handles. `fullName` and `documents` are no longer sent
- *     (fullName is read-only; documents are managed via /profile/documents).
+ *  ✅ FIX-NAV-9 — handleSave now catches per-slot upload errors and writes
+ *     them back to each DocSlot's error state instead of only toasting,
+ *     so the user can see which document failed without closing the modal.
  *
- *  ✅ FIX-NAV-5 — Removed the `phone` field being marked required in the
- *     profile completeness check. phone is optional per backend schema;
- *     only national_id, address, and required documents block the gate.
- *
- * All v5.9.0 visual design and non-broken logic is retained unchanged.
+ * All v6.0.0 fixes retained unchanged.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
@@ -38,10 +35,16 @@ import {
   Phone, FileText, CheckCircle, AlertCircle,
   GraduationCap, ScrollText, Award, Eye,
   Trash2, RefreshCw, Pencil, Save, Briefcase as BriefcaseIcon,
+  XCircle,
 } from 'lucide-react'
 import toast       from 'react-hot-toast'
 import { useAuth } from '../context/AuthContext'
 import api         from '../api/axios'
+
+// ✅ FIX-NAV-6/7: accepted types and size limit — mirrors backend exactly
+const ALLOWED_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png']
+const MAX_FILE_SIZE_MB   = 5
+const MAX_FILE_SIZE_B    = MAX_FILE_SIZE_MB * 1024 * 1024
 
 const DOC_SLOTS = [
   { key: 'id_card',     label: 'National ID Copy',      hint: 'Front & back scan or photo',    icon: CreditCard,    color: '#1a56db', bg: '#deeaff', border: '#93b4ff', required: true  },
@@ -120,70 +123,170 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function DocSlot({ slot, file, serverDoc, onChange, onPreview }) {
-  const fileRef = useRef(null)
-  const Icon    = slot.icon
-  const hasFile = !!file || !!serverDoc
+// ─────────────────────────────────────────────────────────────────────────────
+// DocSlot — with client-side validation + visible error state
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, onClearError }) {
+  const fileRef  = useRef(null)
+  const Icon     = slot.icon
+  const hasFile  = !!file || !!serverDoc
   const displayName = file?.name || serverDoc?.original_name || serverDoc?.file_name || slot.key
+
+  // ✅ FIX-NAV-8: local error state — shown inside the slot card, not as a toast
+  const [localError, setLocalError] = useState('')
+  const error = externalError || localError
+
+  // ✅ FIX-NAV-7: validate file BEFORE passing upstream
+  const handleFileInput = (e) => {
+    const picked = e.target.files?.[0]
+    e.target.value = '' // reset so same file can be re-selected
+    if (!picked) return
+
+    // Clear any previous error
+    setLocalError('')
+    if (onClearError) onClearError(slot.key)
+
+    // File type check
+    const ext = '.' + (picked.name.split('.').pop() || '').toLowerCase()
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      const msg = `"${picked.name}" is not supported. Please use PDF, JPG, or PNG.`
+      setLocalError(msg)
+      return
+    }
+
+    // File size check
+    if (picked.size > MAX_FILE_SIZE_B) {
+      const sizeMB = (picked.size / 1024 / 1024).toFixed(1)
+      const msg = `"${picked.name}" is ${sizeMB} MB — maximum is ${MAX_FILE_SIZE_MB} MB.`
+      setLocalError(msg)
+      return
+    }
+
+    // All good
+    onChange(slot.key, picked)
+  }
+
+  const handleDelete = () => {
+    setLocalError('')
+    if (onClearError) onClearError(slot.key)
+    onChange(slot.key, null)
+  }
+
+  const handleReplace = () => {
+    setLocalError('')
+    if (onClearError) onClearError(slot.key)
+    fileRef.current?.click()
+  }
+
+  const showError  = !!error
+  const borderColor = showError  ? '#dc2626'
+    : hasFile      ? slot.border
+    : '#e5e7eb'
+  const bgColor     = showError  ? '#fff1f2'
+    : hasFile      ? slot.bg
+    : '#f9fafb'
 
   return (
     <div style={{
-      border: `2px solid ${hasFile ? slot.border : '#e5e7eb'}`,
+      border: `2px solid ${borderColor}`,
       borderRadius: 8,
-      background: hasFile ? slot.bg : '#f9fafb',
+      background: bgColor,
       padding: '12px 14px',
       transition: 'all .2s',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
         <div style={{
           width: 38, height: 38, borderRadius: 6, flexShrink: 0,
-          background: hasFile ? slot.bg : '#ffffff',
-          border: `2px solid ${hasFile ? slot.border : '#e5e7eb'}`,
+          background: showError ? '#fee2e2' : hasFile ? slot.bg : '#ffffff',
+          border: `2px solid ${showError ? '#fca5a5' : hasFile ? slot.border : '#e5e7eb'}`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <Icon size={17} color={hasFile ? slot.color : '#9ca3af'} />
+          {showError
+            ? <XCircle size={17} color="#dc2626" />
+            : <Icon size={17} color={hasFile ? slot.color : '#9ca3af'} />
+          }
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-            <span style={{ fontSize: '.82rem', fontWeight: 700, color: '#111827' }}>{slot.label}</span>
+            <span style={{ fontSize: '.82rem', fontWeight: 700, color: showError ? '#7f1d1d' : '#111827' }}>
+              {slot.label}
+            </span>
             {slot.required
               ? <span style={{ fontSize: '.62rem', color: '#c41a1a', fontWeight: 700, background: '#fde0e0', border: '1.5px solid rgba(196,26,26,.20)', borderRadius: 3, padding: '1px 5px' }}>Required</span>
               : <span style={{ fontSize: '.62rem', color: '#6b7280', fontWeight: 600, background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 3, padding: '1px 5px' }}>Optional</span>
             }
-            {serverDoc && !file && (
+            {serverDoc && !file && !showError && (
               <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved ✓</span>
             )}
           </div>
-          {hasFile
+          {hasFile && !showError
             ? <div style={{ fontSize: '.75rem', color: slot.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {displayName}</div>
-            : <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>{slot.hint}</div>
+            : !showError && <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>{slot.hint}</div>
           }
         </div>
-        {hasFile ? (
+
+        {/* Action buttons */}
+        {hasFile && !showError ? (
           <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
             {serverDoc && !file && (
               <button onClick={() => onPreview(slot)} style={{ width: 28, height: 28, borderRadius: 6, border: `1.5px solid ${slot.border}`, background: slot.bg, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <Eye size={12} color={slot.color} />
               </button>
             )}
-            <button onClick={() => fileRef.current.click()} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #93b4ff', background: '#deeaff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <button onClick={handleReplace} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #93b4ff', background: '#deeaff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <RefreshCw size={12} color="#1a56db" />
             </button>
-            <button onClick={() => onChange(slot.key, null)} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid rgba(196,26,26,.2)', background: '#fde0e0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <button onClick={handleDelete} style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid rgba(196,26,26,.2)', background: '#fde0e0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Trash2 size={12} color="#c41a1a" />
             </button>
           </div>
         ) : (
-          <button onClick={() => fileRef.current.click()} style={{ padding: '6px 14px', borderRadius: 6, flexShrink: 0, border: '2px solid #2563eb', background: '#deeaff', cursor: 'pointer', fontSize: '.75rem', fontWeight: 700, color: '#1a56db', display: 'flex', alignItems: 'center', gap: 5 }}>
-            <Upload size={11} /> Upload
+          <button
+            onClick={() => fileRef.current?.click()}
+            style={{
+              padding: '6px 14px', borderRadius: 6, flexShrink: 0,
+              border: showError ? '2px solid #dc2626' : '2px solid #2563eb',
+              background: showError ? '#fde0e0' : '#deeaff',
+              cursor: 'pointer', fontSize: '.75rem', fontWeight: 700,
+              color: showError ? '#dc2626' : '#1a56db',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}
+          >
+            <Upload size={11} /> {showError ? 'Try Again' : 'Upload'}
           </button>
         )}
       </div>
+
+      {/* ✅ FIX-NAV-8: error banner shown INSIDE the slot, visible above the modal overlay */}
+      {showError && (
+        <div style={{
+          marginTop: 10,
+          padding: '9px 12px',
+          background: '#fee2e2',
+          border: '1px solid #fca5a5',
+          borderRadius: 6,
+          fontSize: '.78rem',
+          color: '#7f1d1d',
+          lineHeight: 1.55,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+            <XCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} color="#dc2626" />
+            <div>
+              <strong>Upload failed:</strong> {error}
+              <div style={{ marginTop: 4, color: '#991b1b' }}>
+                <strong>Accepted:</strong> PDF, JPG, PNG (max {MAX_FILE_SIZE_MB} MB)
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <input
         ref={fileRef}
         type="file"
-        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-        onChange={e => { if (e.target.files[0]) onChange(slot.key, e.target.files[0]); e.target.value = '' }}
+        accept=".pdf,.jpg,.jpeg,.png"
+        onChange={handleFileInput}
         style={{ display: 'none' }}
       />
     </div>
@@ -209,10 +312,11 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
   const [loadingDocs, setLoadingDocs] = useState(true)
   const [saving,      setSaving]      = useState(false)
   const [done,        setDone]        = useState(false)
+  // ✅ FIX-NAV-9: per-slot server error state
+  const [slotErrors,  setSlotErrors]  = useState({})
 
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
 
-  // Load existing profile documents from server on mount
   useEffect(() => {
     api.get('/profile/documents')
       .then(({ data }) => {
@@ -226,8 +330,14 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
   }, [])
 
   const handleDocChange = (slotKey, file) => {
+    // Clear slot error when user picks a new file
+    setSlotErrors(prev => { const next = { ...prev }; delete next[slotKey]; return next })
     setNewFiles(prev => ({ ...prev, [slotKey]: file || undefined }))
     if (!file) setServerDocs(prev => { const next = { ...prev }; delete next[slotKey]; return next })
+  }
+
+  const clearSlotError = (slotKey) => {
+    setSlotErrors(prev => { const next = { ...prev }; delete next[slotKey]; return next })
   }
 
   const totalUploaded    = DOC_SLOTS.filter(s => newFiles[s.key] || serverDocs[s.key]).length
@@ -242,17 +352,17 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
     (requiredDone / requiredTotal) * 60
   )
 
-  // ✅ FIX-NAV-3 + FIX-NAV-4: upload files first, refresh AuthContext docs,
-  // then call updateProfile with only the fields it actually handles.
   const handleSave = async () => {
-    if (!fullName.trim())         { toast.error('Full name is required');               return }
-    if (!form.national_id.trim()) { toast.error('National ID is required');             return }
-    if (!form.address.trim())     { toast.error('Location is required');                return }
+    if (!fullName.trim())         { toast.error('Full name is required');                return }
+    if (!form.national_id.trim()) { toast.error('National ID is required');              return }
+    if (!form.address.trim())     { toast.error('Location is required');                 return }
     if (!requiredComplete)        { toast.error('Please upload all required documents'); return }
 
     setSaving(true)
+    const uploadErrors = {}
+
     try {
-      // Step 1 — upload any new local files
+      // Step 1 — upload new local files, collect per-slot errors
       const uploadEntries = Object.entries(newFiles).filter(([, f]) => !!f)
       await Promise.all(
         uploadEntries.map(async ([docType, file]) => {
@@ -262,24 +372,25 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
           try {
             await api.post('/profile/documents', formData)
           } catch (err) {
-            const msg = extractApiError(err, `Failed to upload ${docType}`)
-            toast.error(msg)
-            throw err
+            // ✅ FIX-NAV-9: record error per slot so it shows inside the card
+            const msg = extractApiError(err, `Upload failed for ${docType}`)
+            uploadErrors[docType] = msg
           }
         })
       )
 
-      // ✅ FIX-NAV-3: refresh AuthContext.profileDocuments now so the
-      // dropdown count updates immediately when the modal closes
+      // If any slot had a server error, surface them all and stop
+      if (Object.keys(uploadErrors).length > 0) {
+        setSlotErrors(uploadErrors)
+        toast.error('Some documents were rejected — see the highlighted slots above.')
+        return
+      }
+
       if (uploadEntries.length > 0) {
         await refreshDocuments()
       }
 
       // Step 2 — persist text fields
-      // ✅ FIX-NAV-4: only send what the backend/AuthContext handle:
-      //   phone + address  → PUT /profile (saved to DB)
-      //   national_id      → localStorage only
-      // fullName is read-only on the backend; skip it.
       await updateProfile({
         phone:       form.phone,
         address:     form.address,
@@ -293,7 +404,8 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
       setTimeout(onClose, 700)
 
     } catch {
-      // Individual errors already toasted in the upload loop
+      // Caught above per-slot; generic fallback
+      toast.error('Something went wrong. Please try again.')
     } finally {
       setSaving(false)
     }
@@ -392,7 +504,7 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-              {/* Full Name — read-only unless editing */}
+              {/* Full Name */}
               <div>
                 <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>Full Name</label>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -447,11 +559,21 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
             <div style={{
               fontSize: '.72rem', fontWeight: 700, color: '#2563eb',
               letterSpacing: '.12em', textTransform: 'uppercase',
-              marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8,
+              marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8,
             }}>
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
               Documents ({totalUploaded}/{DOC_SLOTS.length})
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
+            </div>
+
+            {/* ✅ FIX-NAV-6: accepted formats hint shown above the slots */}
+            <div style={{
+              marginBottom: 12, padding: '7px 12px',
+              background: '#fffbeb', border: '1px solid #fcd34d',
+              borderRadius: 6, fontSize: '.75rem', color: '#78350f', fontWeight: 600,
+            }}>
+              📎 Accepted formats: <strong>PDF, JPG, PNG</strong> — max {MAX_FILE_SIZE_MB} MB each.
+              Word documents (.doc, .docx) are not supported.
             </div>
 
             {loadingDocs ? (
@@ -468,6 +590,8 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
                     serverDoc={serverDocs[slot.key] || null}
                     onChange={handleDocChange}
                     onPreview={() => {}}
+                    externalError={slotErrors[slot.key] || ''}
+                    onClearError={clearSlotError}
                   />
                 ))}
               </div>
@@ -505,7 +629,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function Navbar() {
-  // ✅ FIX-NAV-1: pull profileDocuments from context (not user.documents)
   const { user, logout, updateProfile, profileDocuments, refreshDocuments } = useAuth()
   const navigate    = useNavigate()
   const dropdownRef = useRef(null)
@@ -536,10 +659,9 @@ export default function Navbar() {
   const isHR        = user?.role === 'hr'
   const displayName = getDisplayName(user)
 
-  // ✅ FIX-NAV-1: use profileDocuments (from AuthContext) for all doc checks
-  const uploadedDocTypes  = new Set((profileDocuments || []).map(d => d.doc_type))
+  const uploadedDocTypes    = new Set((profileDocuments || []).map(d => d.doc_type))
   const missingRequiredDocs = REQUIRED_DOC_KEYS.filter(k => !uploadedDocTypes.has(k))
-  const docCount          = (profileDocuments || []).length
+  const docCount            = (profileDocuments || []).length
 
   const profileComplete = isHR
     ? true
@@ -553,7 +675,6 @@ export default function Navbar() {
         missingRequiredDocs.length > 0  && 'Documents',
       ].filter(Boolean)
 
-  // ✅ FIX-NAV-2: document count for sidebar uses profileDocuments
   const docDisplayValue = docCount > 0
     ? `${docCount} file${docCount > 1 ? 's' : ''} uploaded`
     : null
@@ -648,7 +769,6 @@ export default function Navbar() {
                         )}
                       </div>
 
-                      {/* ✅ FIX-NAV-2: InfoRow for Documents uses docDisplayValue */}
                       {!isHR && (
                         <div style={{ padding: '6px 20px 2px' }}>
                           <InfoRow icon={CreditCard} label="National ID" value={user.national_id}  />
@@ -694,7 +814,6 @@ export default function Navbar() {
         </div>
       </nav>
 
-      {/* ✅ FIX-NAV-3: pass refreshDocuments so modal can update context after uploads */}
       {modalOpen && user && !isHR && (
         <ProfileModal
           user={user}
