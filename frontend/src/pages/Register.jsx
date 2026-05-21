@@ -335,7 +335,7 @@ export default function Register() {
                   <input
                     className="form-input" type="text" name="full_name"
                     value={form.full_name} onChange={handleChange}
-                    placeholder="e.g. Gertrude Irimaso" required
+                    placeholder="e.g. ITUZE Nicole" required
                     style={{ color: '#111827', fontSize: '.95rem' }}
                   />
                 </div>
@@ -348,7 +348,7 @@ export default function Register() {
                   <input
                     className="form-input" type="email" name="email"
                     value={form.email} onChange={handleChange}
-                    placeholder="you@example.com" required
+                    placeholder="e.g nicole35@gmail.com" required
                     style={{ color: '#111827', fontSize: '.95rem' }}
                   />
                 </div>
