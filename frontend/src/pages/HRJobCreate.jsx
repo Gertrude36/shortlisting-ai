@@ -30,14 +30,76 @@ const JOB_LEVELS = [
   '7.I','7.II','7.III',
 ]
 
+// ── Degree tier detection ─────────────────────────────────────
+// Returns numeric tier: 1=Diploma, 2=Bachelor's, 3=Master's, 4=PhD
+function degreeTier(degreeStr) {
+  const d = (degreeStr || '').toLowerCase()
+  if (d.includes('phd') || d.includes('doctor of philosophy')) return 4
+  if (
+    d.includes('master') || d.includes('msc') || d.includes('mba') ||
+    d.includes('mpa') || d.includes('llm') || d.includes('med') || d.includes('mph')
+  ) return 3
+  if (
+    d.includes('bachelor') || d.includes('bsc') || d.includes('ba ') || d.startsWith('ba ') ||
+    d.includes('b.com') || d.includes('bba') || d.includes('llb') || d.includes('mbchb') ||
+    d.includes('mbbs') || d.includes('bvm') || d.includes('bvsc') || d.includes('b.arch') ||
+    d.includes('b.pharm') || d.includes('pharmd') || d.includes('dvm') || d.includes('b.eng')
+  ) return 2
+  // Advanced Diploma / Diploma
+  if (d.includes('diploma') || d.includes('advanced diploma') || d.includes('pgde') || d.includes('pgdip')) return 1
+  return 2 // default to Bachelor's tier
+}
+
+// ── Tier label ────────────────────────────────────────────────
+const TIER_LABELS = {
+  1: 'Diploma / Advanced Diploma',
+  2: "Bachelor's Degree",
+  3: "Master's Degree",
+  4: 'PhD / Doctorate',
+}
+
+// ── Tier badge colors ─────────────────────────────────────────
+const TIER_COLORS = {
+  1: { bg: '#fef3c7', border: '#d97706', text: '#78350f' },
+  2: { bg: '#dbeafe', border: '#2563eb', text: '#1e3a8a' },
+  3: { bg: '#ede9fe', border: '#7c3aed', text: '#4c1d95' },
+  4: { bg: '#d1fae5', border: '#059669', text: '#064e3b' },
+}
+
+/**
+ * Given a base min/max experience range and a degree's tier, calculate the
+ * adjusted experience requirement for that specific degree:
+ *
+ *   PhD (tier 4)        → base_min − 3  (min 0)
+ *   Master's (tier 3)   → base_min − 1  (min 0)
+ *   Bachelor's (tier 2) → base_min      (unchanged)
+ *   Diploma (tier 1)    → base_min + 3  (capped at base_max)
+ *
+ * The idea: a more advanced degree compensates for less years;
+ * a lower degree requires more proven experience.
+ */
+function calcExpForDegree(tier, baseMin, baseMax) {
+  const adjustments = { 4: -3, 3: -1, 2: 0, 1: 3 }
+  const adj = adjustments[tier] ?? 0
+  const adjusted = Math.max(0, baseMin + adj)
+  return Math.min(adjusted, baseMax)
+}
+
+// ── Serialize degrees with experience into a structured string ─
+// Format understood by the backend / AI shortlister:
+// "DegreeName [minExp yrs]" — one per line (joined by " | ")
+function serializeDegreesWithExp(degrees, baseMin, baseMax) {
+  return degrees
+    .map(d => {
+      const tier = degreeTier(d)
+      const exp = calcExpForDegree(tier, baseMin, baseMax)
+      return `${d} [min ${exp} yr${exp !== 1 ? 's' : ''}]`
+    })
+    .join(' | ')
+}
+
 // ============================================================
 //  60 JOB TEMPLATES — Rwanda Career Hub
-//  Design rules:
-//  • education_level maps exactly to required_degrees entries
-//  • exp_min / exp_max match the seniority of the role
-//  • skills are concrete and directly matchable against a CV
-//  • certs are real Rwanda-relevant licences / professional bodies
-//  • preferred are genuine value-adds, never basic requirements
 // ============================================================
 const RWANDA_JOBS_DATA = [
 
@@ -1336,6 +1398,75 @@ function fmtDeadlinePreview(dtStr) {
   catch { return dtStr }
 }
 
+// ── Degree Experience Matrix Component ────────────────────────
+// Shows a live preview of each degree + its computed experience requirement
+function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
+  if (!degrees.length) return null
+
+  // Group by tier so same-tier degrees appear together
+  const grouped = {}
+  degrees.forEach(d => {
+    const t = degreeTier(d)
+    if (!grouped[t]) grouped[t] = []
+    grouped[t].push(d)
+  })
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textMid, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>
+        📊 Degree × Experience Matrix — auto-calculated
+      </div>
+      <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+        {/* Table header */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', background: B.navy, padding: '8px 14px', gap: 12 }}>
+          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
+          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'center' }}>Level</span>
+          <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right', whiteSpace: 'nowrap' }}>Min Exp Required</span>
+        </div>
+        {/* Rows */}
+        {degrees.map((d, i) => {
+          const tier = degreeTier(d)
+          const exp = calcExpForDegree(tier, baseMin, baseMax)
+          const colors = TIER_COLORS[tier]
+          return (
+            <div
+              key={i}
+              style={{
+                display: 'grid', gridTemplateColumns: '1fr auto auto',
+                padding: '10px 14px', gap: 12, alignItems: 'center',
+                background: i % 2 === 0 ? B.white : B.bg,
+                borderTop: i === 0 ? 'none' : `1px solid ${B.borderLight}`,
+              }}
+            >
+              <span style={{ fontSize: '0.82rem', color: B.text, fontWeight: 600 }}>{d}</span>
+              <span style={{
+                padding: '2px 10px', borderRadius: 99, fontSize: '.72rem', fontWeight: 800,
+                background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text,
+                whiteSpace: 'nowrap',
+              }}>
+                {TIER_LABELS[tier]}
+              </span>
+              <span style={{
+                padding: '3px 12px', borderRadius: 99, fontSize: '.78rem', fontWeight: 800,
+                background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : '#fee2e2',
+                border: `1.5px solid ${exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red}40`,
+                color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
+                whiteSpace: 'nowrap', textAlign: 'right',
+              }}>
+                {exp === 0 ? 'No min exp' : `≥ ${exp} yr${exp !== 1 ? 's' : ''}`}
+              </span>
+            </div>
+          )
+        })}
+        {/* Legend */}
+        <div style={{ padding: '10px 14px', background: '#f8fafc', borderTop: `1px solid ${B.borderLight}`, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
+          <strong style={{ color: B.textMid }}>Rule:</strong> PhD → base−3 yrs &nbsp;|&nbsp; Master's → base−1 yr &nbsp;|&nbsp; Bachelor's → base yrs &nbsp;|&nbsp; Diploma → base+3 yrs &nbsp;(all capped at {baseMax} yrs max)
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Domain ordering ──────────────────────────────────────────
 const DOMAIN_ORDER = ['Health','Education','Technology','Finance','Agriculture','Engineering','Government','NGO','Hospitality','Legal','Media','Energy','Other']
 const titlesByDomain = {}
@@ -1403,6 +1534,16 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
+      // ── Build the enriched degree+experience string for the backend ──
+      // Format: "DegreeName [min X yrs]" pipe-separated
+      // The AI shortlister uses this to check each applicant's
+      // degree tier against the right experience threshold.
+      const enrichedDegrees = serializeDegreesWithExp(
+        form.required_degrees,
+        Number(form.required_min_experience),
+        Number(form.required_max_experience),
+      )
+
       await api.post('/jobs', {
         title:                     form.title,
         description:               form.description,
@@ -1413,8 +1554,10 @@ export default function HRJobCreate() {
         job_level:                 form.job_level,
         number_of_posts:           Number(form.number_of_posts),
         deadline:                  deadlineWithSeconds,
-        required_education_levels: serialize(form.required_degrees) || form.required_education_levels,
+        // ─ KEY FIX: send enriched degrees (with per-degree exp) ─
+        required_education_levels: enrichedDegrees,
         required_fields:           form.required_fields,
+        // ─ base min/max kept for filtering UI on job cards ─
         required_min_experience:   Number(form.required_min_experience),
         required_max_experience:   Number(form.required_max_experience),
         required_skills:           serialize(form.required_skills),
@@ -1460,7 +1603,7 @@ export default function HRJobCreate() {
               </div>
               <div>
                 <h1 style={{ fontSize: '1.75rem', fontWeight: 900, color: B.white, margin: 0, letterSpacing: '-.02em' }}>Post a New Job</h1>
-                <p style={{ color: '#93c5fd', fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>60 Rwanda-specific templates — clear requirements, matched degrees, and meaningful skills for accurate AI shortlisting</p>
+                <p style={{ color: '#93c5fd', fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>60 Rwanda-specific templates — experience adjusts automatically by degree level for fair, accurate AI shortlisting</p>
               </div>
             </div>
           </div>
@@ -1488,7 +1631,7 @@ export default function HRJobCreate() {
                     <Zap size={18} color={B.white} />
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 800, fontSize: '0.85rem', color: B.white, marginBottom: 8, letterSpacing: '.02em' }}>⚡ Quick-Start — {JOB_TITLES.length} Rwanda job templates with clear, matched requirements</div>
+                    <div style={{ fontWeight: 800, fontSize: '0.85rem', color: B.white, marginBottom: 8, letterSpacing: '.02em' }}>⚡ Quick-Start — {JOB_TITLES.length} Rwanda job templates · experience scales automatically by degree level</div>
                     <select
                       style={{ width: '100%', padding: '9px 12px', borderRadius: 7, border: '2px solid rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.12)', fontSize: '0.88rem', color: B.white, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 }}
                       value={JOB_TITLES.includes(form.title) ? form.title : ''}
@@ -1574,11 +1717,19 @@ export default function HRJobCreate() {
 
                 {/* Section 3: Education */}
                 <div style={cardStyle}>
-                  <SectionHeader step="3" icon={<GraduationCap size={20} />} title="Education Requirements" subtitle="Specify exact degrees that the AI will match against applicant CVs" color={B.sky} />
+                  <SectionHeader step="3" icon={<GraduationCap size={20} />} title="Education Requirements" subtitle="The system auto-adjusts required experience per degree tier — higher degree = fewer years required" color={B.sky} />
                   <InfoBanner color={B.sky}>
-                    Enter each accepted degree exactly as it would appear on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. Templates pre-fill precise, matchable degree names. The AI uses these verbatim.
+                    Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the matrix below.
                   </InfoBanner>
                   <TagInput label="Accepted Degrees / Qualifications" hint="— one per entry, press Enter" icon={<GraduationCap size={14} />} tags={form.required_degrees} onChange={setArr('required_degrees')} placeholder="e.g. Bachelor of Commerce in Accounting" color={B.sky} />
+
+                  {/* ── LIVE DEGREE × EXPERIENCE MATRIX ── */}
+                  <DegreeExpMatrix
+                    degrees={form.required_degrees}
+                    baseMin={Number(form.required_min_experience)}
+                    baseMax={Number(form.required_max_experience)}
+                  />
+
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
                       <label style={labelStyle}>Minimum Education Level <span style={{ color: B.red }}>*</span></label>
@@ -1598,10 +1749,13 @@ export default function HRJobCreate() {
 
                 {/* Section 4: Experience */}
                 <div style={cardStyle}>
-                  <SectionHeader step="4" icon={<Clock size={20} />} title="Experience Requirements" subtitle="Set the acceptable years of professional experience" color={B.amber} />
+                  <SectionHeader step="4" icon={<Clock size={20} />} title="Base Experience Range" subtitle="Set the baseline — the matrix above adjusts per-degree thresholds automatically" color={B.amber} />
+                  <InfoBanner color={B.amber}>
+                    This is the <strong>base range for a Bachelor's degree holder</strong>. The system automatically reduces the minimum for Master's/PhD applicants and increases it for Diploma holders — so every degree tier is treated fairly.
+                  </InfoBanner>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
-                      <label style={labelStyle}>Minimum Experience (years) <span style={{ color: B.red }}>*</span></label>
+                      <label style={labelStyle}>Base Minimum Experience (years) <span style={{ color: B.red }}>*</span></label>
                       <input style={inputStyle} type="number" name="required_min_experience" min="0" max="30" value={form.required_min_experience} onChange={handle} required />
                     </div>
                     <div>
@@ -1609,9 +1763,15 @@ export default function HRJobCreate() {
                       <input style={inputStyle} type="number" name="required_max_experience" min="0" max="50" value={form.required_max_experience} onChange={handle} required />
                     </div>
                   </div>
-                  <div style={{ padding: '12px 16px', background: '#fffbeb', border: '2px solid #fcd34d', borderRadius: 8, fontSize: '0.82rem', color: '#78350f', display: 'flex', gap: 10, alignItems: 'center', fontWeight: 600 }}>
-                    <Info size={16} style={{ flexShrink: 0, color: B.amber }} />
-                    Applicants with fewer than <strong style={{ background: B.amber, color: B.white, padding: '1px 9px', borderRadius: 99, fontSize: '0.85rem' }}>{form.required_min_experience} yr{form.required_min_experience !== 1 ? 's' : ''}</strong> will be <strong>automatically disqualified</strong>.
+                  <div style={{ padding: '12px 16px', background: '#fffbeb', border: '2px solid #fcd34d', borderRadius: 8, fontSize: '0.82rem', color: '#78350f', display: 'flex', gap: 10, alignItems: 'flex-start', fontWeight: 600 }}>
+                    <Info size={16} style={{ flexShrink: 0, color: B.amber, marginTop: 1 }} />
+                    <div>
+                      Effective thresholds for this job:&nbsp;
+                      <strong>PhD ≥ {Math.max(0, Number(form.required_min_experience) - 3)} yrs</strong>&nbsp;·&nbsp;
+                      <strong>Master's ≥ {Math.max(0, Number(form.required_min_experience) - 1)} yrs</strong>&nbsp;·&nbsp;
+                      <strong>Bachelor's ≥ {form.required_min_experience} yrs</strong>&nbsp;·&nbsp;
+                      <strong>Diploma ≥ {Math.min(Number(form.required_min_experience) + 3, Number(form.required_max_experience))} yrs</strong>
+                    </div>
                   </div>
                 </div>
 
@@ -1660,13 +1820,28 @@ export default function HRJobCreate() {
                     </div>
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
+
+                    {/* ── PER-DEGREE EXP — sidebar preview ── */}
                     {form.required_degrees.length > 0 && (
                       <div style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>Required Degrees</div>
-                        {form.required_degrees.slice(0, 3).map((d, i) => <div key={i} style={{ fontSize: '.78rem', color: B.textMid, fontWeight: 600, paddingLeft: 10, borderLeft: `2px solid ${B.sky}`, marginBottom: 3 }}>{d}</div>)}
-                        {form.required_degrees.length > 3 && <div style={{ fontSize: '.73rem', color: B.textLight }}>+{form.required_degrees.length - 3} more</div>}
+                        <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>Degrees & Min Experience</div>
+                        {form.required_degrees.slice(0, 4).map((d, i) => {
+                          const tier = degreeTier(d)
+                          const exp = calcExpForDegree(tier, Number(form.required_min_experience), Number(form.required_max_experience))
+                          const colors = TIER_COLORS[tier]
+                          return (
+                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                              <div style={{ flex: 1, fontSize: '.78rem', color: B.textMid, fontWeight: 600, paddingLeft: 8, borderLeft: `2px solid ${colors.border}`, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d}</div>
+                              <span style={{ padding: '1px 8px', borderRadius: 99, fontSize: '.7rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                {exp === 0 ? '0 yrs' : `≥${exp}yr`}
+                              </span>
+                            </div>
+                          )
+                        })}
+                        {form.required_degrees.length > 4 && <div style={{ fontSize: '.73rem', color: B.textLight }}>+{form.required_degrees.length - 4} more</div>}
                       </div>
                     )}
+
                     {form.required_skills.length > 0 && (
                       <>
                         <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 7 }}>Required Skills</div>
@@ -1699,8 +1874,37 @@ export default function HRJobCreate() {
                 {form.description && <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.95rem', marginBottom: 22 }}>{form.description}</p>}
                 {form.about_role && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>About the Role</h3><p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.92rem', marginBottom: 16 }}>{form.about_role}</p></>)}
                 {form.responsibilities.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Key Responsibilities</h3><ul style={{ margin: 0, paddingLeft: 22, color: B.textMid, lineHeight: 1.9, fontSize: '0.9rem' }}>{form.responsibilities.map((r, i) => <li key={i}>{r}</li>)}</ul></>)}
-                {form.required_degrees.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Education Requirements</h3><ul style={{ margin: 0, paddingLeft: 22, color: B.textMid, lineHeight: 1.9, fontSize: '0.9rem' }}>{form.required_degrees.map((d, i) => <li key={i}>{d}</li>)}</ul>{form.required_fields && <p style={{ color: B.textLight, fontSize: '0.85rem', marginTop: 6 }}>Accepted fields of study: {form.required_fields}</p>}</>)}
-                {(form.required_min_experience > 0 || form.required_max_experience > 0) && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Experience</h3><p style={{ color: B.textMid, fontSize: '0.9rem' }}>{form.required_min_experience}–{form.required_max_experience} years of relevant professional experience required</p></>)}
+
+                {/* ── PREVIEW: Degree + Experience table (replaces old flat list) ── */}
+                {form.required_degrees.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Education & Experience Requirements</h3>
+                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden', marginBottom: 10 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', background: B.navy, padding: '8px 16px', gap: 12 }}>
+                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Accepted Degree</span>
+                        <span style={{ fontSize: '.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '.06em', textAlign: 'right' }}>Min Experience</span>
+                      </div>
+                      {form.required_degrees.map((d, i) => {
+                        const tier = degreeTier(d)
+                        const exp = calcExpForDegree(tier, Number(form.required_min_experience), Number(form.required_max_experience))
+                        const colors = TIER_COLORS[tier]
+                        return (
+                          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto', padding: '11px 16px', gap: 12, alignItems: 'center', background: i % 2 === 0 ? B.white : B.bg, borderTop: i === 0 ? 'none' : `1px solid ${B.borderLight}` }}>
+                            <div>
+                              <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 700 }}>{d}</div>
+                              <div style={{ fontSize: '0.72rem', color: colors.text, fontWeight: 600, marginTop: 2 }}>{TIER_LABELS[tier]}</div>
+                            </div>
+                            <span style={{ padding: '4px 14px', borderRadius: 99, fontSize: '0.82rem', fontWeight: 800, background: colors.bg, border: `1.5px solid ${colors.border}`, color: colors.text, whiteSpace: 'nowrap' }}>
+                              {exp === 0 ? 'Entry-level' : `≥ ${exp} yr${exp !== 1 ? 's' : ''} exp`}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    {form.required_fields && <p style={{ color: B.textLight, fontSize: '0.85rem', marginTop: 6 }}>Accepted fields of study: {form.required_fields}</p>}
+                  </>
+                )}
+
                 {form.required_skills.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Skills</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_skills.map((s, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}50`, color: B.violet, fontSize: '0.82rem', fontWeight: 700 }}>{s}</span>)}</div></>)}
                 {form.required_certifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications & Licences</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.required_certifications.map((c, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.amberLight, border: `1.5px solid ${B.amber}50`, color: B.amber, fontSize: '0.82rem', fontWeight: 700 }}>{c}</span>)}</div></>)}
                 {form.preferred_qualifications.length > 0 && (<><h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Preferred Qualifications</h3><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{form.preferred_qualifications.map((p, i) => <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.emeraldLight, border: `1.5px solid ${B.emerald}50`, color: B.emerald, fontSize: '0.82rem', fontWeight: 700 }}>{p}</span>)}</div></>)}
