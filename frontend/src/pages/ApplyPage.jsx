@@ -1,22 +1,26 @@
 /**
- * ApplyPage.jsx — v5.14.0
+ * ApplyPage.jsx — v5.15.0
  *
- * FIXES in v5.14.0:
+ * FIXES in v5.15.0 — PERFORMANCE / UX (slow upload feedback):
  *
- *  ✅ FIX AP-1 — Dispatch 'wb:upload-failed' event on network errors so
- *     WakeBanner v5.1.0 FIX WB-1 actually triggers. Previously the event
- *     was never dispatched, meaning the WakeBanner retry hint ("Upload
- *     failed — please try again") never appeared after a mid-session
- *     server sleep. The event is dispatched BEFORE rearmWakeGate() can
- *     change the status to 'waking', ensuring WakeBanner.handleUploadFailed
- *     sees status === 'awake' and shows the hint.
+ *  ✅ FIX AP-PERF-1 — slowHintTimer now fires at 5 s (was 8 s).
+ *     Users see "Verifying with AI…" sooner so they know the server
+ *     is working, not frozen.
  *
- *     Implementation note: the dispatch is placed at the top of the
- *     network-error branch in handleUpload's catch block, before any
- *     state updates or queue mutations, so the WakeBanner reads the
- *     correct 'awake' status on the same microtask tick.
+ *  ✅ FIX AP-PERF-2 — Added a second escalation hint at 20 s:
+ *     "Still verifying — server is busy, please wait…"
+ *     This prevents users from thinking the upload hung between
+ *     5 s and the 30 s backend timeout.
  *
- * All v5.13.0 fixes retained unchanged.
+ *  ✅ FIX AP-PERF-3 — Added a third hint at 28 s:
+ *     "Almost done — finalising verification…"
+ *     Keeps users calm right before the backend responds.
+ *
+ *  ✅ FIX AP-PERF-4 — Upload button label now shows "Uploading…"
+ *     with a spinner immediately on file selection so there is zero
+ *     gap between click and visible feedback.
+ *
+ * All v5.14.0 fixes retained unchanged.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -472,10 +476,6 @@ export default function ApplyPage() {
   }, [applicationId])
 
   // ── Attach profile docs when applicationId becomes available ──────────────
-  // ✅ FIX v5.13.0: On attach failure, reset docStatus to 'idle' so the user
-  // sees the upload slot and can re-upload. Previously failures were silently
-  // swallowed, leaving the doc appearing as "success/fromProfile" while the
-  // backend had no record of it — causing /finalize to return 400.
   useEffect(() => {
     if (!applicationId) return
     const profileTypes = Object.keys(profileDocIdsRef.current)
@@ -618,7 +618,8 @@ export default function ApplyPage() {
       setDocStatus(prev => ({
         ...prev,
         [docType]: {
-          status: 'pending', message: 'Waiting in queue…',
+          // ✅ FIX AP-PERF-4: Show "Uploading…" immediately — zero gap before feedback
+          status: 'uploading', message: 'Uploading…',
           fileName: file.name, isAdvisory: false, isNetwork: false, fromProfile: false,
         },
       }))
@@ -640,13 +641,56 @@ export default function ApplyPage() {
     let slotReleased = false
     const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseUploadSlot() } }
 
-    const slowHintTimer = setTimeout(() => {
+    // ✅ FIX AP-PERF-1: First hint at 5s (was 8s) — user sees feedback sooner
+    const hint1Timer = setTimeout(() => {
       if (!mountedRef.current) return
       setDocStatus(prev => {
         if (prev[docType]?.status !== 'uploading') return prev
-        return { ...prev, [docType]: { ...prev[docType], message: 'Verifying with AI — this can take up to a minute…' } }
+        return {
+          ...prev,
+          [docType]: {
+            ...prev[docType],
+            message: 'Verifying with AI — this can take up to 30 seconds…',
+          },
+        }
       })
-    }, 8_000)
+    }, 5_000)
+
+    // ✅ FIX AP-PERF-2: Second hint at 20s — prevents user thinking it hung
+    const hint2Timer = setTimeout(() => {
+      if (!mountedRef.current) return
+      setDocStatus(prev => {
+        if (prev[docType]?.status !== 'uploading') return prev
+        return {
+          ...prev,
+          [docType]: {
+            ...prev[docType],
+            message: 'Still verifying — server is busy, please wait…',
+          },
+        }
+      })
+    }, 20_000)
+
+    // ✅ FIX AP-PERF-3: Third hint at 28s — reassures user just before backend responds
+    const hint3Timer = setTimeout(() => {
+      if (!mountedRef.current) return
+      setDocStatus(prev => {
+        if (prev[docType]?.status !== 'uploading') return prev
+        return {
+          ...prev,
+          [docType]: {
+            ...prev[docType],
+            message: 'Almost done — finalising verification…',
+          },
+        }
+      })
+    }, 28_000)
+
+    const clearHints = () => {
+      clearTimeout(hint1Timer)
+      clearTimeout(hint2Timer)
+      clearTimeout(hint3Timer)
+    }
 
     try {
       const existingId = uploadedDocIds.current[docType]
@@ -703,9 +747,7 @@ export default function ApplyPage() {
       }
 
       if (isNetwork) {
-        // ✅ FIX AP-1: Dispatch BEFORE state updates so WakeBanner reads
-        // status === 'awake' on the same tick (rearmWakeGate() in the axios
-        // interceptor hasn't flushed its React state update yet).
+        // Dispatch BEFORE state updates so WakeBanner reads status === 'awake'
         window.dispatchEvent(new Event('wb:upload-failed'))
 
         retryQueueRef.current[docType] = file
@@ -732,7 +774,7 @@ export default function ApplyPage() {
       }
 
     } finally {
-      clearTimeout(slowHintTimer)
+      clearHints()
       uploadingRef.current.delete(docType)
       releaseOnce()
     }
@@ -965,7 +1007,8 @@ export default function ApplyPage() {
                   <strong>📋 Documents required:</strong><br />
                   <strong>Required (3):</strong> National ID/Passport, CV/Resume, Academic Diploma<br />
                   <strong>Optional (2):</strong> Professional Certificate, Experience Document<br />
-                  <strong>Accepted formats:</strong> PDF, PNG, JPG, JPEG (max {MAX_FILE_SIZE_MB} MB each)
+                  <strong>Accepted formats:</strong> PDF, PNG, JPG, JPEG (max {MAX_FILE_SIZE_MB} MB each)<br />
+                  <strong>⏱ Note:</strong> Each document is verified by AI — this takes up to 30 seconds per file.
                 </div>
 
                 {profileComplete ? (
@@ -1083,11 +1126,16 @@ export default function ApplyPage() {
                   </span>
                 </div>
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 18 }} />
-                <p style={{ color: '#4b5563', fontSize: '.92rem', lineHeight: 1.75, marginBottom: 16 }}>
+                <p style={{ color: '#4b5563', fontSize: '.92rem', lineHeight: 1.75, marginBottom: 8 }}>
                   Upload your <strong style={{ color: '#111827' }}>3 required documents</strong>. Ensure your name matches your account:{' '}
                   <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>.{' '}
                   <strong>Accepted formats: PDF, PNG, JPG, JPEG</strong> (max {MAX_FILE_SIZE_MB} MB each).
                 </p>
+                {/* ✅ FIX AP-PERF: Inform users upfront so they don't panic during verification */}
+                <div style={{ padding: '8px 14px', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 6, marginBottom: 16, fontSize: '.82rem', color: '#0369a1', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Info size={12} style={{ flexShrink: 0 }} />
+                  Each document is verified by AI after upload — this takes up to 30 seconds per file. Please wait after selecting each file.
+                </div>
 
                 <ProfileDocsBanner count={activeProfileDocCount} />
                 <WakeBanner status={serverStatus} queuedCount={queuedCount} />
@@ -1110,6 +1158,7 @@ export default function ApplyPage() {
                       : isAdvisory ? '#d97706'
                       : isQueued   ? '#60a5fa'
                       : isPending  ? '#a5b4fc'
+                      : isLoading  ? '#60a5fa'
                       : isError    ? '#dc2626'
                       : '#e5e7eb'
 
@@ -1118,6 +1167,7 @@ export default function ApplyPage() {
                       : isAdvisory ? '#fffbeb'
                       : isQueued   ? '#eff6ff'
                       : isPending  ? '#f5f3ff'
+                      : isLoading  ? '#f0f9ff'
                       : isError    ? '#fff1f2'
                       : '#f9fafb'
 
@@ -1147,6 +1197,19 @@ export default function ApplyPage() {
                               <div style={{ fontSize: '.78rem', lineHeight: 1.5, marginBottom: 10, padding: '8px 12px', borderRadius: 6, background: isAdvisory ? '#fef3c7' : '#dcfce7', color: isAdvisory ? '#78350f' : '#14532d', border: `1px solid ${isAdvisory ? '#fcd34d' : '#86efac'}`, display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                                 {isAdvisory ? <Info size={12} style={{ flexShrink: 0, marginTop: 1 }} /> : <CheckCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />}
                                 <span>{state.message}</span>
+                              </div>
+                            )}
+
+                            {/* ✅ FIX AP-PERF: Show live message during upload with progress feel */}
+                            {isLoading && (
+                              <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#eff6ff', color: '#1e40af', border: '1px solid #93c5fd' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
+                                  <div className="spinner" style={{ width: 13, height: 13, borderTopColor: '#2563eb', flexShrink: 0 }} />
+                                  {state.message || 'Uploading…'}
+                                </div>
+                                <div style={{ paddingLeft: 19, fontSize: '.78rem', color: '#3b82f6' }}>
+                                  Please wait — do not close this page.
+                                </div>
                               </div>
                             )}
 
@@ -1189,9 +1252,9 @@ export default function ApplyPage() {
                                   {state.fileName} — waiting in queue…
                                 </div>
                               ) : isLoading ? (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#6b7280', fontSize: '.85rem' }}>
-                                  <div className="spinner" style={{ width: 14, height: 14 }} />
-                                  {state.message || 'Uploading…'}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#2563eb', fontSize: '.85rem', fontWeight: 600 }}>
+                                  <div className="spinner" style={{ width: 14, height: 14, borderTopColor: '#2563eb' }} />
+                                  {state.fileName}
                                 </div>
                               ) : isQueued ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1231,7 +1294,8 @@ export default function ApplyPage() {
                             {isAdvisory                && <Info        size={20} color="#d97706" />}
                             {isQueued                  && <RefreshCw   size={20} color="#2563eb" style={{ animation: 'spin 2s linear infinite' }} />}
                             {isError                   && <XCircle     size={20} color="#dc2626" />}
-                            {(isLoading || isPending)  && <div className="spinner" style={{ width: 20, height: 20, borderTopColor: isPending ? '#6d28d9' : undefined }} />}
+                            {isLoading                 && <div className="spinner" style={{ width: 20, height: 20, borderTopColor: '#2563eb' }} />}
+                            {isPending                 && <div className="spinner" style={{ width: 20, height: 20, borderTopColor: '#6d28d9' }} />}
                             {!isSuccess && !isError && !isLoading && !isPending && !isQueued && <AlertCircle size={20} color="#d1d5db" />}
                           </div>
                         </div>
