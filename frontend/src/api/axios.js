@@ -1,22 +1,28 @@
 /**
- * frontend/src/api/axios.js — v5.2.0
+ * frontend/src/api/axios.js — v5.3.0
  *
- * FIXES IN v5.2.0 (over v5.1.0):
+ * FIXES IN v5.3.0 (over v5.2.0):
  *
- *   ✅ FIX NET-1 — shortlist-all requests now get a 180s timeout
- *            (was inheriting the default 30s, causing network errors
- *            on OCR + AI batches that take 30–120s per applicant).
+ *   ✅ FIX NET-4 — /profile/documents now correctly matched by
+ *            isDocumentUpload(). Previously only /applications/:id/documents
+ *            was matched, so /profile/documents skipped the wake gate,
+ *            the upload semaphore, and the 150s timeout — causing immediate
+ *            network failures on cold starts and the "Re-arming wake gate"
+ *            log spam seen in the console.
  *
- *   ✅ FIX NET-2 — shortlist-all network errors no longer trigger
- *            rearmWakeGate() (the server is awake; it's just slow).
- *            This prevents the wake banner from appearing mid-batch.
+ *   ✅ FIX NET-5 — Retry logic no longer uses Promise.race(wakeGate, sleep).
+ *            Previously the short sleep (2s/4s/6s) always won the race,
+ *            meaning retries fired while the server was still waking up.
+ *            Now retries await the wake gate FIRST (up to 45s), then add
+ *            a small extra delay before re-sending, so the request only
+ *            goes out once the server is confirmed alive.
  *
- *   ✅ FIX NET-3 — shortlist-all requests are NOT retried on network
- *            error (retrying a partially-completed batch would
- *            double-process candidates). Instead the error is surfaced
- *            immediately so the frontend can show a useful message.
+ *   ✅ FIX NET-6 — Retry waits changed from (retryCount × 2s) to a fixed
+ *            staggered schedule (3s / 5s / 8s) applied AFTER the wake gate
+ *            resolves. This prevents thundering-retries while still giving
+ *            the server a moment to stabilise after waking.
  *
- * All previous v5.1.0 fixes retained unchanged.
+ * All previous v5.2.0 fixes retained unchanged.
  */
 
 import axios from 'axios'
@@ -241,32 +247,47 @@ const isPublic = (url = '', method = '') => {
   )
 }
 
-const isDocumentUpload = (url = '', method = '') =>
-  method.toUpperCase() === 'POST' &&
-  /\/applications\/\d+\/documents$/.test(url.split('?')[0])
+// ✅ FIX NET-4: Added /profile/documents to the document upload matcher.
+// Previously only /applications/:id/documents was matched, so /profile/documents
+// bypassed the wake gate, upload semaphore, and 150s timeout entirely —
+// causing the "Network error on POST /profile/documents" console errors.
+const isDocumentUpload = (url = '', method = '') => {
+  if (method.toUpperCase() !== 'POST') return false
+  const path = url.split('?')[0]
+  return (
+    /\/applications\/\d+\/documents$/.test(path) ||
+    /\/profile\/documents$/.test(path)
+  )
+}
 
-// ✅ FIX NET-1: Detect shortlist-all requests so we can extend their timeout
+// ✅ FIX NET-1 (v5.2.0): Detect shortlist-all requests for extended timeout.
 const isShortlistAll = (url = '', method = '') =>
   method.toUpperCase() === 'POST' &&
   /\/hr\/shortlist-all\/\d+$/.test(url.split('?')[0])
 
 // Routes where network errors should NOT trigger rearmWakeGate().
-// ✅ FIX NET-2: shortlist-all added — server is alive, just slow
+// ✅ FIX NET-2 (v5.2.0): shortlist-all — server is alive, just slow.
 const isBackgroundRoute = (url = '') =>
   /\/(auth\/me|jobs)($|\?)/.test(url) ||
   /\/hr\/shortlist-all\/\d+$/.test(url)
 
+// ✅ FIX NET-6: Staggered post-wakeup delays applied AFTER the gate resolves.
+// Gives the server a moment to stabilise before the retry hits it.
+const RETRY_POST_WAKE_DELAYS = [3_000, 5_000, 8_000]
+
+const _sleep = ms => new Promise(r => setTimeout(r, ms))
+
 // ── Request interceptor ────────────────────────────────────────────────────
 api.interceptors.request.use(
   async (config) => {
-    // ✅ FIX NET-1: Give shortlist-all a generous 180s timeout.
-    // OCR + ML per applicant takes 30–120s; this covers small batches.
+    // ✅ FIX NET-1 (v5.2.0): Give shortlist-all a generous 180s timeout.
     if (isShortlistAll(config.url, config.method)) {
       config.timeout = 180_000
       config._isShortlistAll = true
     }
 
     if (isDocumentUpload(config.url, config.method)) {
+      // Always wait for the server to be awake before sending documents.
       await getCurrentWakeGate()
 
       if (!config._slotPreacquired) {
@@ -294,7 +315,6 @@ api.interceptors.request.use(
 
 // ── Response interceptor ───────────────────────────────────────────────────
 let _redirecting = false
-const _sleep = ms => new Promise(r => setTimeout(r, ms))
 
 api.interceptors.response.use(
   response => {
@@ -319,19 +339,20 @@ api.interceptors.response.use(
         return Promise.reject(error)
       }
 
-      // ✅ FIX NET-2: Don't re-arm wake gate for shortlist-all timeouts.
-      // The server is alive — the request just took longer than expected.
+      // ✅ FIX NET-2 (v5.2.0): Don't re-arm wake gate for shortlist-all.
       if (!isBackgroundRoute(config.url || '')) {
         rearmWakeGate()
       }
 
       if (isDocumentUpload(config.url, config.method)) {
+        // Document uploads already awaited the wake gate in the request
+        // interceptor. If we still got a network error the server went back
+        // to sleep mid-session. Release the slot and surface the error so
+        // the UI can prompt the user to retry manually.
         return Promise.reject(error)
       }
 
-      // ✅ FIX NET-3: Don't retry shortlist-all on network error.
-      // Retrying a partially-completed batch could double-process candidates.
-      // Surface the error immediately so the UI shows a helpful message.
+      // ✅ FIX NET-3 (v5.2.0): Don't retry shortlist-all on network error.
       if (config._isShortlistAll) {
         console.warn('[axios] shortlist-all timed out or lost connection — not retrying.')
         return Promise.reject(error)
@@ -340,13 +361,19 @@ api.interceptors.response.use(
       config._retryCount = (config._retryCount || 0) + 1
       if (config._retryCount > 3) return Promise.reject(error)
 
-      const waitMs = config._retryCount * 2_000
+      // ✅ FIX NET-5 + NET-6: Wait for the wake gate to resolve FIRST (up
+      // to 45s), then add a small stagger delay before re-sending.
+      // Previously we raced the gate against a short sleep (2s/4s/6s) which
+      // always won, so retries fired while the server was still sleeping.
+      const postWakeDelay = RETRY_POST_WAKE_DELAYS[config._retryCount - 1]
+
       console.warn(
         `[axios] Network error on ${config.method?.toUpperCase()} ${config.url}. ` +
-        `Retry ${config._retryCount}/3 — waiting ${waitMs / 1000}s…`
+        `Retry ${config._retryCount}/3 — waiting for server to wake, then +${postWakeDelay / 1000}s…`
       )
 
-      await Promise.race([getCurrentWakeGate(), _sleep(waitMs)])
+      await getCurrentWakeGate()
+      await _sleep(postWakeDelay)
       return api(config)
     }
 

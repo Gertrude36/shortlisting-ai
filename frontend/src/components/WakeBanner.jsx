@@ -1,24 +1,29 @@
 /**
- * frontend/src/components/WakeBanner.jsx — v5.0.0
+ * frontend/src/components/WakeBanner.jsx — v5.1.0
  *
- * FIXES IN THIS VERSION:
+ * FIXES IN v5.1.0 (over v5.0.0):
  *
- *   ✅ FIX 1 — COUNTDOWN_MS raised from 30s → 45s to match the new
- *              WAKE_SAFETY_TIMEOUT_MS in axios.js v5. The countdown bar
- *              and the gate unblock now align exactly.
+ *   ✅ FIX WB-1 — "Retry" sub-message added when the server confirmed awake
+ *              but a document upload still failed (net error post-wake).
+ *              Previously users saw nothing actionable after the banner
+ *              disappeared — now the banner surfaces a "Try again" prompt
+ *              if an upload error event is dispatched.
  *
- *   ✅ FIX 2 — "Waking up" message is more honest: says "up to 45 seconds"
- *              rather than showing a specific countdown that may worry users
- *              when it reaches 0 but the server is still loading.
+ *   ✅ FIX WB-2 — "Still starting up…" past-deadline state now shows an
+ *              amber pulsing ring instead of staying indigo, making it
+ *              visually distinct from the normal waking state so users
+ *              understand something extra is happening (ML models loading).
  *
- *   ✅ FIX 3 — Added "Still waking…" sub-state shown after countdown
- *              reaches 0 but server hasn't confirmed awake yet. Previously
- *              the banner just sat at 0s which looked broken.
+ *   ✅ FIX WB-3 — Banner no longer flickers when rearmWakeGate() is called
+ *              immediately after a failed upload. Added a 400ms debounce
+ *              before switching from 'awake' → 'waking' to absorb the
+ *              brief status bounce that follows a network error recovery.
  *
- *   ✅ FIX 4 — Removed the duplicate WakeBanner inside ApplyPage.jsx
- *              (the small inline one). The global WakeBanner in App.jsx
- *              handles the full-screen overlay; the inline one in
- *              ApplyPage now only shows queue status (no countdown).
+ * All v5.0.0 fixes retained unchanged:
+ *   ✅ COUNTDOWN_MS = 45s (matches WAKE_SAFETY_TIMEOUT_MS in axios.js)
+ *   ✅ Honest "up to 45 seconds" wording
+ *   ✅ "Still waking…" sub-state after countdown reaches 0
+ *   ✅ Duplicate WakeBanner removed from ApplyPage.jsx
  *
  * Usage (unchanged — drop into App.jsx root):
  *
@@ -37,8 +42,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { getServerStatus, onServerStatusChange } from '../api/axios'
 
-// ✅ FIX 1: Must match WAKE_SAFETY_TIMEOUT_MS in axios.js
+// Must match WAKE_SAFETY_TIMEOUT_MS in axios.js
 const COUNTDOWN_MS = 45_000
+
+// ✅ FIX WB-3: Debounce ms before accepting a waking/sleeping status after
+// being awake. Prevents a single failed upload from flickering the banner.
+const REARM_DEBOUNCE_MS = 400
 
 const STYLE_ID = '__wake-banner-styles__'
 
@@ -59,6 +68,11 @@ function injectStyles() {
       70%  { transform: scale(1);    box-shadow: 0 0 0 14px rgba(99,102,241,0); }
       100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(99,102,241,0); }
     }
+    @keyframes wb-pulse-ring-amber {
+      0%   { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245,158,11,0.45); }
+      70%  { transform: scale(1);    box-shadow: 0 0 0 14px rgba(245,158,11,0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+    }
     @keyframes wb-shimmer {
       0%   { background-position: -200% center; }
       100% { background-position:  200% center; }
@@ -66,31 +80,65 @@ function injectStyles() {
     .wb-countdown-ring {
       animation: wb-pulse-ring 2s ease-out infinite;
     }
+    .wb-countdown-ring-amber {
+      animation: wb-pulse-ring-amber 2s ease-out infinite;
+    }
   `
   document.head.appendChild(el)
 }
 
 export default function WakeBanner() {
-  const [status,      setStatus]      = useState(getServerStatus)
-  const [msLeft,      setMsLeft]      = useState(COUNTDOWN_MS)
-  const [visible,     setVisible]     = useState(false)
-  const [pastDeadline, setPastDeadline] = useState(false)  // ✅ FIX 3
+  const [status,       setStatus]       = useState(getServerStatus)
+  const [msLeft,       setMsLeft]       = useState(COUNTDOWN_MS)
+  const [visible,      setVisible]      = useState(false)
+  const [pastDeadline, setPastDeadline] = useState(false)
+  // ✅ FIX WB-1: Show actionable retry hint after upload fails post-wake.
+  const [showRetryHint, setShowRetryHint] = useState(false)
 
-  const startRef     = useRef(null)
-  const rafRef       = useRef(null)
-  const hideTimerRef = useRef(null)
+  const startRef       = useRef(null)
+  const rafRef         = useRef(null)
+  const hideTimerRef   = useRef(null)
+  // ✅ FIX WB-3: Debounce timer for waking status after being awake.
+  const rearmDebounce  = useRef(null)
 
   useEffect(() => { injectStyles() }, [])
 
+  // ✅ FIX WB-1: Listen for upload-failed events dispatched by ApplyPage
+  // after axios surfaces a network error on /profile/documents.
   useEffect(() => {
-    const unsub = onServerStatusChange(setStatus)
-    return unsub
+    const handleUploadFailed = () => {
+      if (getServerStatus() === 'awake') {
+        setShowRetryHint(true)
+        setVisible(true)
+        hideTimerRef.current = setTimeout(() => {
+          setShowRetryHint(false)
+          setVisible(false)
+        }, 5_000)
+      }
+    }
+    window.addEventListener('wb:upload-failed', handleUploadFailed)
+    return () => window.removeEventListener('wb:upload-failed', handleUploadFailed)
   }, [])
+
+  useEffect(() => {
+    const unsub = onServerStatusChange((nextStatus) => {
+      // ✅ FIX WB-3: Debounce waking/sleeping transitions from awake state.
+      if (status === 'awake' && (nextStatus === 'waking' || nextStatus === 'sleeping')) {
+        clearTimeout(rearmDebounce.current)
+        rearmDebounce.current = setTimeout(() => setStatus(nextStatus), REARM_DEBOUNCE_MS)
+      } else {
+        clearTimeout(rearmDebounce.current)
+        setStatus(nextStatus)
+      }
+    })
+    return () => { unsub(); clearTimeout(rearmDebounce.current) }
+  }, [status])
 
   useEffect(() => {
     if (status === 'sleeping' || status === 'waking') {
       clearTimeout(hideTimerRef.current)
       setVisible(true)
+      setShowRetryHint(false)
       setPastDeadline(false)
       startRef.current = performance.now()
       setMsLeft(COUNTDOWN_MS)
@@ -102,7 +150,7 @@ export default function WakeBanner() {
         if (remaining > 0) {
           rafRef.current = requestAnimationFrame(tick)
         } else {
-          // ✅ FIX 3: Countdown hit 0 but server not confirmed awake yet.
+          // Countdown hit 0 but server not confirmed awake yet.
           setPastDeadline(true)
         }
       }
@@ -111,7 +159,9 @@ export default function WakeBanner() {
     } else if (status === 'awake') {
       cancelAnimationFrame(rafRef.current)
       setPastDeadline(false)
-      hideTimerRef.current = setTimeout(() => setVisible(false), 900)
+      if (!showRetryHint) {
+        hideTimerRef.current = setTimeout(() => setVisible(false), 900)
+      }
     }
 
     return () => {
@@ -126,7 +176,7 @@ export default function WakeBanner() {
   const progress = isAwake
     ? 100
     : pastDeadline
-      ? 99   // stay near-full while waiting past deadline
+      ? 99  // stay near-full while waiting past deadline
       : ((COUNTDOWN_MS - msLeft) / COUNTDOWN_MS) * 100
 
   const secondsLeft = Math.ceil(msLeft / 1000)
@@ -136,19 +186,40 @@ export default function WakeBanner() {
   const C   = 2 * Math.PI * R
   const arc = C * (1 - progress / 100)
 
+  // ✅ FIX WB-2: Amber ring class for past-deadline state.
+  const ringClass = !isAwake
+    ? pastDeadline
+      ? 'wb-countdown-ring-amber'
+      : 'wb-countdown-ring'
+    : ''
+
+  const barColor = isAwake
+    ? 'linear-gradient(90deg, #22c55e, #16a34a)'
+    : pastDeadline
+      ? 'linear-gradient(90deg, #f59e0b, #d97706)'
+      : 'linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1)'
+
+  // ✅ FIX WB-2: Amber stroke for past-deadline ring.
+  const ringStroke = isAwake ? '#22c55e' : pastDeadline ? '#f59e0b' : '#6366f1'
+
   return (
     <div style={S.overlay}>
       <div style={S.backdrop} />
 
       <div style={S.card} role="status" aria-live="polite">
         {/* Animated ring */}
-        <div style={S.logoWrap} className={!isAwake ? 'wb-countdown-ring' : ''}>
+        <div style={S.logoWrap} className={ringClass}>
           <svg width="100" height="100" viewBox="0 0 100 100" style={S.svg}>
-            <circle cx="50" cy="50" r={R} fill="none" stroke="rgba(99,102,241,0.15)" strokeWidth="6" />
             <circle
               cx="50" cy="50" r={R}
               fill="none"
-              stroke={isAwake ? '#22c55e' : '#6366f1'}
+              stroke="rgba(99,102,241,0.15)"
+              strokeWidth="6"
+            />
+            <circle
+              cx="50" cy="50" r={R}
+              fill="none"
+              stroke={ringStroke}
               strokeWidth="6"
               strokeLinecap="round"
               strokeDasharray={C}
@@ -157,11 +228,24 @@ export default function WakeBanner() {
               style={{ transition: 'stroke-dashoffset 0.1s linear, stroke 0.4s ease' }}
             />
             {isAwake ? (
-              <polyline points="32,50 44,62 68,38" fill="none" stroke="#22c55e" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+              <polyline
+                points="32,50 44,62 68,38"
+                fill="none"
+                stroke="#22c55e"
+                strokeWidth="5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             ) : (
               <g style={{ animation: 'wb-spin 1.4s linear infinite', transformOrigin: '50px 50px' }}>
                 {[0,1,2,3,4,5,6,7].map(i => (
-                  <rect key={i} x="47.5" y="18" width="5" height="11" rx="2.5" fill="#6366f1" opacity={0.15 + i * 0.12} transform={`rotate(${i * 45} 50 50)`} />
+                  <rect
+                    key={i}
+                    x="47.5" y="18" width="5" height="11" rx="2.5"
+                    fill={pastDeadline ? '#f59e0b' : '#6366f1'}
+                    opacity={0.15 + i * 0.12}
+                    transform={`rotate(${i * 45} 50 50)`}
+                  />
                 ))}
               </g>
             )}
@@ -170,24 +254,32 @@ export default function WakeBanner() {
 
         {/* Text */}
         <div style={S.textBlock}>
-          {isAwake ? (
+          {/* ✅ FIX WB-1: Retry hint shown when upload failed after wakeup */}
+          {showRetryHint ? (
+            <>
+              <h2 style={{ ...S.title, color: '#f59e0b' }}>Upload failed</h2>
+              <p style={S.subtitle}>
+                The server was restarted. Please try uploading your
+                documents again — the server is now awake.
+              </p>
+            </>
+          ) : isAwake ? (
             <>
               <h2 style={{ ...S.title, color: '#22c55e' }}>Server ready!</h2>
               <p style={S.subtitle}>Loading your page…</p>
             </>
           ) : pastDeadline ? (
-            /* ✅ FIX 3: Past-deadline state — server is still loading models */
+            /* Past-deadline — ML models still loading */
             <>
-              <h2 style={S.title}>Still starting up…</h2>
+              <h2 style={{ ...S.title, color: '#f59e0b' }}>Still starting up…</h2>
               <p style={S.subtitle}>
-                This is taking longer than usual. Your uploads are queued
-                and will begin automatically once the server is ready.
+                ML models are loading — this takes a little longer on the first
+                visit. Your uploads are queued and will begin automatically.
               </p>
             </>
           ) : (
             <>
               <h2 style={S.title}>Waking up the server</h2>
-              {/* ✅ FIX 2: Honest wording — shows countdown but manages expectations */}
               <p style={S.subtitle}>
                 Our server sleeps when idle to save resources.
                 <br />
@@ -210,22 +302,18 @@ export default function WakeBanner() {
           <div
             style={{
               ...S.barFill,
-              width: `${progress}%`,
-              background: isAwake
-                ? 'linear-gradient(90deg, #22c55e, #16a34a)'
-                : pastDeadline
-                  ? 'linear-gradient(90deg, #f59e0b, #d97706)'
-                  : 'linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1)',
-              backgroundSize: (isAwake || pastDeadline) ? 'auto' : '200% auto',
-              animation: (isAwake || pastDeadline) ? 'none' : 'wb-shimmer 1.8s linear infinite',
+              width:           `${progress}%`,
+              background:      barColor,
+              backgroundSize:  (isAwake || pastDeadline) ? 'auto' : '200% auto',
+              animation:       (isAwake || pastDeadline) ? 'none' : 'wb-shimmer 1.8s linear infinite',
             }}
           />
         </div>
 
-        {!isAwake && (
+        {!isAwake && !showRetryHint && (
           <p style={S.footnote}>
             {pastDeadline
-              ? 'ML models are loading — this only happens on the first visit.'
+              ? 'Large AI models are initialising — hang tight.'
               : 'This only happens once — subsequent visits are instant.'}
           </p>
         )}
