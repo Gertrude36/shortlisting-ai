@@ -9,38 +9,31 @@ import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
 import api from '../api/axios'
 
-// ── Color system (projector-safe, high-contrast) ────────────────
-const C = {
-  navy:        '#0A1628',
-  navyMid:     '#102040',
-  blue:        '#1A56DB',
-  blueDark:    '#1040B0',
-  blueLight:   '#EBF2FF',
-  blueBorder:  '#93C5FD',
-  purple:      '#6D28D9',
-  purpleLight: '#F3EEFF',
-  purpleBorder:'#C4B5FD',
-  amber:       '#B45309',
-  amberLight:  '#FFFBEB',
-  amberBorder: '#FCD34D',
-  teal:        '#0E7490',
-  tealLight:   '#ECFEFF',
-  tealBorder:  '#67E8F9',
-  green:       '#065F46',
-  greenLight:  '#ECFDF5',
-  greenBorder: '#6EE7B7',
-  red:         '#B91C1C',
-  redLight:    '#FEF2F2',
-  white:       '#FFFFFF',
-  gray50:      '#F8FAFC',
-  gray100:     '#F1F5F9',
-  gray200:     '#E2E8F0',
-  gray300:     '#CBD5E1',
-  gray400:     '#94A3B8',
-  gray600:     '#475569',
-  gray700:     '#334155',
-  gray800:     '#1E293B',
-  gray900:     '#0F172A',
+// ── Brand tokens (matches GI Recruitment Network) ───────────
+const B = {
+  navy:        '#0f172a',   // navbar background
+  navyMid:     '#1e293b',   // slightly lighter navy
+  blue:        '#2563eb',   // brand primary
+  blueDark:    '#1d4ed8',
+  blueLight:   '#3b82f6',
+  blueXLight:  '#dbeafe',
+  violet:      '#7c3aed',
+  violetLight: '#ede9fe',
+  amber:       '#d97706',
+  amberLight:  '#fef3c7',
+  sky:         '#0284c7',
+  skyLight:    '#e0f2fe',
+  emerald:     '#059669',
+  emeraldLight:'#d1fae5',
+  red:         '#dc2626',
+  redLight:    '#fee2e2',
+  text:        '#0f172a',   // near-black — high contrast on projector
+  textMid:     '#334155',
+  textLight:   '#64748b',
+  border:      '#cbd5e1',
+  borderLight: '#e2e8f0',
+  bg:          '#f8fafc',
+  white:       '#ffffff',
 }
 
 const JOB_LEVELS = [
@@ -146,49 +139,39 @@ const JOB_TEMPLATES = {
 
 const JOB_TITLES = Object.keys(JOB_TEMPLATES)
 
-// ── Shared input styles ──────────────────────────────────────────
+// ── Shared styles ────────────────────────────────────────────
 const inputStyle = {
   width:        '100%',
   padding:      '11px 14px',
   borderRadius: 8,
-  border:       `2px solid ${C.gray300}`,
-  background:   C.white,
-  color:        C.gray900,
-  fontSize:     '0.95rem',
+  border:       `2px solid ${B.border}`,
+  background:   B.white,
+  color:        B.text,
+  fontSize:     '0.95rem',        // larger for projector
   fontWeight:   500,
   boxSizing:    'border-box',
   outline:      'none',
   fontFamily:   'inherit',
-  transition:   'border-color 0.15s',
+  transition:   'border-color .15s',
 }
 
 const labelStyle = {
   display:       'block',
   fontSize:      '0.78rem',
   fontWeight:    800,
-  color:         C.gray700,
+  color:         B.textMid,
   textTransform: 'uppercase',
-  letterSpacing: '0.07em',
+  letterSpacing: '.07em',
   marginBottom:  8,
 }
 
-// ── Section accent colors ────────────────────────────────────────
-const SECTIONS = {
-  basic:  { color: C.blue,   light: C.blueLight,   border: C.blueBorder   },
-  role:   { color: C.purple, light: C.purpleLight,  border: C.purpleBorder },
-  edu:    { color: C.teal,   light: C.tealLight,    border: C.tealBorder   },
-  exp:    { color: C.amber,  light: C.amberLight,   border: C.amberBorder  },
-  skills: { color: C.purple, light: C.purpleLight,  border: C.purpleBorder },
-  certs:  { color: C.amber,  light: C.amberLight,   border: C.amberBorder  },
-}
-
-// ── Tag input ────────────────────────────────────────────────────
-function TagInput({ label, hint, icon, tags, onChange, placeholder, color = C.blue }) {
+// ── Tag Input ────────────────────────────────────────────────
+function TagInput({ label, hint, icon, tags, onChange, placeholder, color = B.blue }) {
   const [input, setInput] = useState('')
   const add    = () => { const v = input.trim(); if (v && !tags.includes(v)) onChange([...tags, v]); setInput('') }
   const remove = (i) => onChange(tags.filter((_, idx) => idx !== i))
   const onKey  = e => {
-    if (e.key === 'Enter')     { e.preventDefault(); add() }
+    if (e.key === 'Enter')    { e.preventDefault(); add() }
     if (e.key === 'Backspace' && !input && tags.length) remove(tags.length - 1)
   }
   return (
@@ -197,23 +180,23 @@ function TagInput({ label, hint, icon, tags, onChange, placeholder, color = C.bl
         {icon && <span style={{ color }}>{icon}</span>}
         {label}
         {hint && (
-          <span style={{ color: C.gray400, fontWeight: 500, textTransform: 'none', fontSize: '0.72rem', marginLeft: 4, letterSpacing: 0 }}>
+          <span style={{ color: B.textLight, fontWeight: 500, textTransform: 'none', fontSize: '.72rem', marginLeft: 4, letterSpacing: 0 }}>
             {hint}
           </span>
         )}
       </label>
       <div
         style={{
-          minHeight:   52,
-          padding:     '8px 12px',
-          border:      `2px solid ${C.gray300}`,
-          borderRadius:8,
-          background:  C.white,
-          display:     'flex',
-          flexWrap:    'wrap',
-          gap:         7,
-          alignItems:  'center',
-          cursor:      'text',
+          minHeight:    52,
+          padding:      '8px 12px',
+          border:       `2px solid ${B.border}`,
+          borderRadius: 8,
+          background:   B.white,
+          display:      'flex',
+          flexWrap:     'wrap',
+          gap:          6,
+          alignItems:   'center',
+          cursor:       'text',
         }}
         onClick={e => e.currentTarget.querySelector('input')?.focus()}
       >
@@ -221,11 +204,11 @@ function TagInput({ label, hint, icon, tags, onChange, placeholder, color = C.bl
           <span key={i} style={{
             display:     'inline-flex',
             alignItems:  'center',
-            gap:         6,
+            gap:         5,
             padding:     '4px 12px',
             borderRadius:99,
-            background:  color + '22',
-            border:      `1.5px solid ${color}88`,
+            background:  color + '20',
+            border:      `1.5px solid ${color}60`,
             color:       color,
             fontSize:    '0.8rem',
             fontWeight:  700,
@@ -234,9 +217,9 @@ function TagInput({ label, hint, icon, tags, onChange, placeholder, color = C.bl
             <button
               type="button"
               onClick={() => remove(i)}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color, padding: 0, display: 'flex', alignItems: 'center', lineHeight: 1 }}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color, padding: 0, display: 'flex', alignItems: 'center' }}
             >
-              <X size={11} />
+              <X size={12} />
             </button>
           </span>
         ))}
@@ -248,79 +231,103 @@ function TagInput({ label, hint, icon, tags, onChange, placeholder, color = C.bl
           placeholder={tags.length === 0 ? placeholder : 'Add more…'}
           style={{
             flex:       1,
-            minWidth:   140,
+            minWidth:   160,
             border:     'none',
             outline:    'none',
             background: 'transparent',
-            fontSize:   '0.88rem',
-            color:      C.gray900,
+            fontSize:   '0.9rem',
+            color:      B.text,
             fontFamily: 'inherit',
           }}
         />
       </div>
-      <div style={{ fontSize: '0.71rem', color: C.gray400, marginTop: 5, display: 'flex', alignItems: 'center', gap: 4 }}>
+      <div style={{ fontSize: '.72rem', color: B.textLight, marginTop: 5, display: 'flex', alignItems: 'center', gap: 4 }}>
         Press{' '}
-        <kbd style={{ padding: '1px 6px', background: C.gray100, border: `1px solid ${C.gray300}`, borderRadius: 4, fontSize: '0.68rem', color: C.gray700, fontFamily: 'inherit' }}>
-          Enter
-        </kbd>{' '}
-        or click away to add
+        <kbd style={{
+          padding:      '1px 6px',
+          background:   B.bg,
+          border:       `1px solid ${B.border}`,
+          borderRadius: 4,
+          fontSize:     '.7rem',
+          color:        B.textMid,
+          fontWeight:   600,
+        }}>Enter</kbd>
+        {' '}or click away to add
       </div>
     </div>
   )
 }
 
-// ── Section header ───────────────────────────────────────────────
-function SectionHeader({ icon, title, subtitle, accent }) {
-  const { color, light } = accent
+// ── Section Header ───────────────────────────────────────────
+function SectionHeader({ icon, title, subtitle, color = B.blue, step }) {
   return (
     <div style={{
-      display:      'flex',
-      alignItems:   'flex-start',
-      gap:          14,
-      paddingBottom:16,
-      borderBottom: `3px solid ${color}`,
-      marginBottom: 20,
+      display:       'flex',
+      alignItems:    'flex-start',
+      gap:           14,
+      paddingBottom: 16,
+      borderBottom:  `2px solid ${B.borderLight}`,
+      marginBottom:  20,
     }}>
+      {/* Step badge */}
+      {step && (
+        <div style={{
+          width:          28,
+          height:         28,
+          borderRadius:   '50%',
+          background:     color,
+          color:          B.white,
+          fontSize:       '.75rem',
+          fontWeight:     900,
+          display:        'flex',
+          alignItems:     'center',
+          justifyContent: 'center',
+          flexShrink:     0,
+          marginTop:      4,
+        }}>
+          {step}
+        </div>
+      )}
+      {/* Icon box */}
       <div style={{
-        width:          42,
-        height:         42,
+        width:          40,
+        height:         40,
         borderRadius:   10,
         flexShrink:     0,
-        background:     color,
+        background:     color + '18',
+        border:         `1.5px solid ${color}40`,
         display:        'flex',
         alignItems:     'center',
         justifyContent: 'center',
-        boxShadow:      `0 2px 8px ${color}44`,
       }}>
-        <span style={{ color: C.white }}>{icon}</span>
+        <span style={{ color }}>{icon}</span>
       </div>
-      <div style={{ paddingTop: 2 }}>
-        <div style={{ fontWeight: 800, fontSize: '1rem', color: C.gray900, letterSpacing: '-0.01em' }}>{title}</div>
-        {subtitle && <div style={{ fontSize: '0.78rem', color: C.gray600, marginTop: 3, fontWeight: 500 }}>{subtitle}</div>}
+      <div>
+        <div style={{ fontWeight: 800, fontSize: '1rem', color: B.text, letterSpacing: '-.01em' }}>{title}</div>
+        {subtitle && <div style={{ fontSize: '.78rem', color: B.textLight, marginTop: 3 }}>{subtitle}</div>}
       </div>
     </div>
   )
 }
 
-// ── Info banner ──────────────────────────────────────────────────
-function InfoBanner({ children, accent }) {
-  const { color, light, border } = accent
+// ── Info Banner ──────────────────────────────────────────────
+function InfoBanner({ children, color = B.blue, bg, border }) {
   return (
     <div style={{
-      padding:      '12px 16px',
-      background:   light,
-      border:       `1.5px solid ${border}`,
-      borderLeft:   `5px solid ${color}`,
+      padding:      '11px 16px',
+      background:   bg  || color + '10',
+      border:       `1.5px solid ${border || color + '40'}`,
       borderRadius: 8,
-      fontSize:     '0.8rem',
+      fontSize:     '0.82rem',
       color:        color,
-      fontWeight:   600,
       display:      'flex',
       gap:          9,
       alignItems:   'flex-start',
+      fontWeight:   500,
+      lineHeight:   1.6,
     }}>
-      <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-      <span style={{ lineHeight: 1.6 }}>{children}</span>
+      <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+      <span>{children}</span>
     </div>
   )
 }
@@ -333,25 +340,6 @@ function fmtDeadlinePreview(dtStr) {
       hour: '2-digit', minute: '2-digit',
     })
   } catch { return dtStr }
-}
-
-// ── Card wrapper ─────────────────────────────────────────────────
-function Card({ children, accent }) {
-  return (
-    <div style={{
-      background:   C.white,
-      border:       `1.5px solid ${C.gray200}`,
-      borderTop:    `4px solid ${accent.color}`,
-      borderRadius: 12,
-      padding:      '28px 28px 24px',
-      display:      'flex',
-      flexDirection:'column',
-      gap:          20,
-      boxShadow:    '0 2px 12px rgba(0,0,0,0.06)',
-    }}>
-      {children}
-    </div>
-  )
 }
 
 export default function HRJobCreate() {
@@ -409,7 +397,10 @@ export default function HRJobCreate() {
     if (!form.responsibilities.length) { toast.error('Add at least one responsibility'); return }
     if (!form.deadline)                { toast.error('Please set an application deadline'); return }
 
-    const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
+    const deadlineWithSeconds = form.deadline.length === 16
+      ? form.deadline + ':00'
+      : form.deadline
+
     setLoading(true)
     try {
       await api.post('/jobs', {
@@ -439,18 +430,30 @@ export default function HRJobCreate() {
     }
   }
 
+  // Card shared style
+  const cardStyle = {
+    background:   B.white,
+    border:       `1.5px solid ${B.borderLight}`,
+    borderRadius: 14,
+    padding:      '28px 30px',
+    display:      'flex',
+    flexDirection:'column',
+    gap:          20,
+    boxShadow:    '0 1px 6px rgba(15,23,42,.06)',
+  }
+
   return (
     <>
-      <Helmet><title>Post a Job — TalentScreen</title></Helmet>
-      <div className="page-wrapper" style={{ background: C.gray50, minHeight: '100vh' }}>
+      <Helmet><title>Post a Job — GI Recruitment Network</title></Helmet>
+      <div className="page-wrapper" style={{ background: B.bg, minHeight: '100vh' }}>
         <Navbar />
 
-        {/* ── Page header ── */}
+        {/* ── Page header — matches site navy→blue gradient ── */}
         <div style={{
-          background: C.navy,
-          padding:    '44px 24px 40px',
-          color:      C.white,
-          borderBottom: `5px solid ${C.blue}`,
+          background: `linear-gradient(135deg, ${B.navy} 0%, #1e3a5f 45%, ${B.blue} 100%)`,
+          padding:    '44px 20px 40px',
+          color:      B.white,
+          borderBottom: `3px solid ${B.blueLight}`,
         }}>
           <div style={{ maxWidth: 1200, margin: '0 auto' }}>
             <button
@@ -460,39 +463,38 @@ export default function HRJobCreate() {
                 alignItems:   'center',
                 gap:          7,
                 padding:      '8px 16px',
-                borderRadius: 8,
-                border:       `2px solid rgba(255,255,255,0.5)`,
+                borderRadius: 7,
+                border:       '2px solid rgba(255,255,255,0.45)',
                 background:   'rgba(255,255,255,0.12)',
-                color:        C.white,
+                color:        B.white,
                 fontWeight:   700,
                 fontSize:     '0.82rem',
                 cursor:       'pointer',
-                marginBottom: 24,
-                letterSpacing: '0.03em',
+                marginBottom: 22,
+                letterSpacing:'.02em',
               }}
             >
               <ArrowLeft size={14} /> Back to Dashboard
             </button>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
               <div style={{
                 width:          56,
                 height:         56,
                 borderRadius:   14,
-                background:     C.blue,
-                border:         `2px solid rgba(255,255,255,0.3)`,
+                background:     'rgba(255,255,255,0.18)',
+                border:         '2px solid rgba(255,255,255,0.3)',
                 display:        'flex',
                 alignItems:     'center',
                 justifyContent: 'center',
-                boxShadow:      `0 4px 20px ${C.blue}88`,
               }}>
-                <Briefcase size={26} color={C.white} />
+                <Briefcase size={26} color={B.white} />
               </div>
               <div>
-                <h1 style={{ fontSize: '1.8rem', fontWeight: 900, color: C.white, margin: 0, letterSpacing: '-0.02em' }}>
+                <h1 style={{ fontSize: '1.75rem', fontWeight: 900, color: B.white, margin: 0, letterSpacing: '-.02em' }}>
                   Post a New Job
                 </h1>
-                <p style={{ color: C.blueBorder, fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>
+                <p style={{ color: '#93c5fd', fontSize: '0.88rem', margin: '4px 0 0', fontWeight: 500 }}>
                   Detailed requirements help the AI accurately shortlist the right candidates
                 </p>
               </div>
@@ -500,18 +502,19 @@ export default function HRJobCreate() {
           </div>
         </div>
 
-        <div style={{ maxWidth: 1200, margin: '0 auto', padding: '28px 24px' }}>
+        <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 20px' }}>
 
           {/* ── Tab switcher ── */}
           <div style={{
             display:      'flex',
             gap:          0,
-            marginBottom: 24,
-            background:   C.gray200,
+            marginBottom: 28,
+            background:   B.white,
             borderRadius: 10,
-            padding:      4,
+            padding:      5,
             width:        'fit-content',
-            border:       `1.5px solid ${C.gray300}`,
+            border:       `1.5px solid ${B.borderLight}`,
+            boxShadow:    '0 1px 4px rgba(15,23,42,.07)',
           }}>
             {['form', 'preview'].map(tab => (
               <button
@@ -521,57 +524,60 @@ export default function HRJobCreate() {
                 style={{
                   padding:      '9px 24px',
                   borderRadius: 7,
-                  border:       activeTab === tab ? `2px solid ${C.blue}` : '2px solid transparent',
+                  border:       'none',
                   cursor:       'pointer',
                   fontWeight:   700,
-                  fontSize:     '0.84rem',
-                  background:   activeTab === tab ? C.white : 'transparent',
-                  color:        activeTab === tab ? C.blue : C.gray600,
-                  boxShadow:    activeTab === tab ? '0 2px 8px rgba(0,0,0,.10)' : 'none',
-                  transition:   'all .15s',
-                  letterSpacing: '0.02em',
+                  fontSize:     '0.85rem',
+                  letterSpacing:'.02em',
+                  background:   activeTab === tab ? B.blue    : 'transparent',
+                  color:        activeTab === tab ? B.white   : B.textLight,
+                  boxShadow:    activeTab === tab ? '0 2px 8px rgba(37,99,235,.35)' : 'none',
+                  transition:   'all .18s',
                 }}
               >
-                {tab === 'form' ? '✏️ Edit Form' : '👁 Preview'}
+                {tab === 'form' ? '✏️  Edit Form' : '👁  Preview'}
               </button>
             ))}
           </div>
 
           <div style={{
             display:             'grid',
-            gridTemplateColumns: activeTab === 'preview' ? '1fr' : '1fr 360px',
-            gap:                 24,
+            gridTemplateColumns: activeTab === 'preview' ? '1fr' : '1fr 380px',
+            gap:                 28,
             alignItems:          'start',
           }}>
+
+            {/* ══════════════════════════════════════════════════
+                FORM
+            ══════════════════════════════════════════════════ */}
             {activeTab === 'form' && (
               <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
 
-                {/* ── Template banner ── */}
+                {/* Template Banner */}
                 <div style={{
-                  padding:      '18px 22px',
-                  background:   C.navy,
-                  border:       `2px solid ${C.blue}`,
+                  padding:      '16px 20px',
+                  background:   `linear-gradient(135deg, ${B.navy} 0%, #1e3a5f 100%)`,
                   borderRadius: 12,
                   display:      'flex',
                   alignItems:   'center',
-                  gap:          16,
-                  boxShadow:    `0 4px 16px ${C.blue}22`,
+                  gap:          14,
+                  boxShadow:    '0 2px 10px rgba(15,23,42,.18)',
                 }}>
                   <div style={{
                     width:          40,
                     height:         40,
                     borderRadius:   10,
-                    background:     C.blue,
+                    background:     B.blue,
                     display:        'flex',
                     alignItems:     'center',
                     justifyContent: 'center',
                     flexShrink:     0,
-                    boxShadow:      `0 2px 10px ${C.blue}66`,
+                    boxShadow:      '0 2px 8px rgba(37,99,235,.5)',
                   }}>
-                    <Zap size={18} color={C.white} />
+                    <Zap size={18} color={B.white} />
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 800, fontSize: '0.88rem', color: C.white, marginBottom: 8, letterSpacing: '0.02em' }}>
+                    <div style={{ fontWeight: 800, fontSize: '0.85rem', color: B.white, marginBottom: 8, letterSpacing: '.02em' }}>
                       ⚡ Quick-Start with a Template
                     </div>
                     <select
@@ -579,10 +585,10 @@ export default function HRJobCreate() {
                         width:        '100%',
                         padding:      '9px 12px',
                         borderRadius: 7,
-                        border:       `2px solid ${C.blue}`,
-                        background:   C.white,
-                        fontSize:     '0.85rem',
-                        color:        C.gray900,
+                        border:       `2px solid rgba(255,255,255,0.25)`,
+                        background:   'rgba(255,255,255,0.12)',
+                        fontSize:     '0.88rem',
+                        color:        B.white,
                         cursor:       'pointer',
                         fontFamily:   'inherit',
                         fontWeight:   600,
@@ -590,23 +596,24 @@ export default function HRJobCreate() {
                       value={JOB_TITLES.includes(form.title) ? form.title : ''}
                       onChange={e => { if (e.target.value) applyTemplate(e.target.value) }}
                     >
-                      <option value="">— Select a template to auto-fill all fields —</option>
-                      {JOB_TITLES.map(t => <option key={t} value={t}>{t}</option>)}
+                      <option value="" style={{ color: B.text, background: B.white }}>— Select a template to auto-fill all fields —</option>
+                      {JOB_TITLES.map(t => <option key={t} value={t} style={{ color: B.text, background: B.white }}>{t}</option>)}
                     </select>
                   </div>
                 </div>
 
-                {/* ── SECTION 1: Basic Info ── */}
-                <Card accent={SECTIONS.basic}>
+                {/* ── SECTION 1: Basic Information ── */}
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="1"
                     icon={<Briefcase size={20} />}
                     title="Basic Information"
-                    subtitle="Core details shown on the job listing"
-                    accent={SECTIONS.basic}
+                    subtitle="Core details displayed on the job listing"
+                    color={B.blue}
                   />
 
                   <div>
-                    <label style={labelStyle}>Job Title *</label>
+                    <label style={labelStyle}>Job Title <span style={{ color: B.red }}>*</span></label>
                     <input
                       style={inputStyle}
                       name="title"
@@ -617,10 +624,10 @@ export default function HRJobCreate() {
                     />
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
                       <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <MapPin size={13} color={C.blue} /> Location
+                        <MapPin size={13} color={B.textLight} /> Location
                       </label>
                       <input style={inputStyle} name="location"
                         placeholder="e.g. Kigali, Rwanda / Remote"
@@ -628,7 +635,7 @@ export default function HRJobCreate() {
                     </div>
                     <div>
                       <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <Users size={13} color={C.blue} /> Employment Type
+                        <Users size={13} color={B.textLight} /> Employment Type
                       </label>
                       <select style={inputStyle} name="employment_type" value={form.employment_type} onChange={handle}>
                         <option>Full-time</option>
@@ -640,10 +647,10 @@ export default function HRJobCreate() {
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
                       <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <BarChart2 size={13} color={C.purple} /> Job Level
+                        <BarChart2 size={13} color={B.violet} /> Job Level
                       </label>
                       <select style={inputStyle} name="job_level" value={form.job_level} onChange={handle}>
                         <option value="">— Select Level —</option>
@@ -652,22 +659,24 @@ export default function HRJobCreate() {
                     </div>
                     <div>
                       <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <Users size={13} color={C.purple} /> Number of Posts *
+                        <Users size={13} color={B.violet} /> Number of Posts <span style={{ color: B.red }}>*</span>
                       </label>
                       <input style={inputStyle} type="number" name="number_of_posts"
                         min="1" max="100" value={form.number_of_posts} onChange={handle} required />
                     </div>
                   </div>
 
+                  {/* Deadline */}
                   <div>
                     <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <Timer size={13} color={C.red} /> Application Deadline *
-                      <span style={{ color: C.gray400, fontWeight: 500, fontSize: '0.72rem', marginLeft: 4, textTransform: 'none', letterSpacing: 0 }}>
-                        — set the exact closing date and time
+                      <Timer size={13} color={B.red} />
+                      Application Deadline <span style={{ color: B.red }}>*</span>
+                      <span style={{ color: B.textLight, fontWeight: 500, fontSize: '.72rem', textTransform: 'none', letterSpacing: 0 }}>
+                        — exact date & time when the position closes
                       </span>
                     </label>
                     <input
-                      style={{ ...inputStyle, borderColor: C.gray300 }}
+                      style={{ ...inputStyle, borderColor: B.red + '60' }}
                       type="datetime-local"
                       name="deadline"
                       min={(() => {
@@ -681,88 +690,98 @@ export default function HRJobCreate() {
                     />
                     {form.deadline && (
                       <div style={{
-                        marginTop: 8,
-                        fontSize: '0.78rem',
-                        color: C.amber,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        fontWeight: 700,
-                        padding: '6px 12px',
-                        background: C.amberLight,
-                        borderRadius: 6,
-                        border: `1.5px solid ${C.amberBorder}`,
+                        marginTop:    8,
+                        padding:      '8px 14px',
+                        borderRadius: 7,
+                        background:   '#fff7ed',
+                        border:       `1.5px solid #fed7aa`,
+                        fontSize:     '0.8rem',
+                        color:        '#9a3412',
+                        fontWeight:   600,
+                        display:      'flex',
+                        alignItems:   'center',
+                        gap:          6,
                       }}>
-                        <Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}
+                        <Timer size={13} /> Closes on {fmtDeadlinePreview(form.deadline)}
                       </div>
                     )}
                   </div>
-                </Card>
+                </div>
 
                 {/* ── SECTION 2: Role Description ── */}
-                <Card accent={SECTIONS.role}>
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="2"
                     icon={<FileText size={20} />}
                     title="Role Description"
                     subtitle="Help candidates understand the position in full detail"
-                    accent={SECTIONS.role}
+                    color={B.violet}
                   />
 
                   <div>
-                    <label style={labelStyle}>Short Overview *</label>
+                    <label style={labelStyle}>Short Overview <span style={{ color: B.red }}>*</span></label>
                     <textarea
-                      style={{ ...inputStyle, minHeight: 85, resize: 'vertical' }}
-                      name="description" rows={3}
+                      style={{ ...inputStyle, minHeight: 88, resize: 'vertical', lineHeight: 1.7 }}
+                      name="description"
+                      rows={3}
                       placeholder="A concise 2–3 sentence summary shown on the listings page…"
-                      value={form.description} onChange={handle} required
+                      value={form.description}
+                      onChange={handle}
+                      required
                     />
                   </div>
+
                   <div>
                     <label style={labelStyle}>About the Role</label>
                     <textarea
-                      style={{ ...inputStyle, minHeight: 115, resize: 'vertical' }}
-                      name="about_role" rows={5}
+                      style={{ ...inputStyle, minHeight: 120, resize: 'vertical', lineHeight: 1.7 }}
+                      name="about_role"
+                      rows={5}
                       placeholder="Detailed description of what the role entails, the team, work environment…"
-                      value={form.about_role} onChange={handle}
+                      value={form.about_role}
+                      onChange={handle}
                     />
                   </div>
+
                   <TagInput
-                    label="Key Responsibilities *"
+                    label="Key Responsibilities"
                     hint="— press Enter after each"
-                    icon={<FileText size={13} />}
+                    icon={<FileText size={14} />}
                     tags={form.responsibilities}
                     onChange={setArr('responsibilities')}
                     placeholder="e.g. Prepare monthly financial statements"
-                    color={C.purple}
+                    color={B.violet}
                   />
-                </Card>
+                </div>
 
                 {/* ── SECTION 3: Education ── */}
-                <Card accent={SECTIONS.edu}>
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="3"
                     icon={<GraduationCap size={20} />}
                     title="Education Requirements"
                     subtitle="Specify exact degrees and academic levels required"
-                    accent={SECTIONS.edu}
+                    color={B.sky}
                   />
 
-                  <InfoBanner accent={SECTIONS.edu}>
-                    Add each accepted degree in full — e.g. <em>"Bachelor of Science in Accounting"</em>. The AI matches these exactly against applicant submissions.
+                  <InfoBanner color={B.sky}>
+                    Add each accepted degree in full — e.g. <strong>"Bachelor of Science in Accounting"</strong>.
+                    The AI matches these exactly against applicant submissions.
                   </InfoBanner>
 
                   <TagInput
-                    label="Accepted Degrees / Qualifications *"
+                    label="Accepted Degrees / Qualifications"
                     hint="— one per entry, press Enter"
-                    icon={<GraduationCap size={13} />}
+                    icon={<GraduationCap size={14} />}
                     tags={form.required_degrees}
                     onChange={setArr('required_degrees')}
                     placeholder="e.g. Bachelor of Commerce in Accounting"
-                    color={C.teal}
+                    color={B.sky}
                   />
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
-                      <label style={labelStyle}>Minimum Education Level *</label>
+                      <label style={labelStyle}>Minimum Education Level <span style={{ color: B.red }}>*</span></label>
                       <select style={inputStyle} name="required_education_levels" value={form.required_education_levels} onChange={handle}>
                         <option value="Diploma">Diploma</option>
                         <option value="Bachelor's">Bachelor's Degree</option>
@@ -772,96 +791,130 @@ export default function HRJobCreate() {
                     </div>
                     <div>
                       <label style={labelStyle}>
-                        Fields of Study *{' '}
-                        <span style={{ color: C.gray400, fontWeight: 500, fontSize: '0.72rem', textTransform: 'none', letterSpacing: 0 }}>
+                        Fields of Study <span style={{ color: B.red }}>*</span>{' '}
+                        <span style={{ color: B.textLight, fontWeight: 500, fontSize: '.71rem', textTransform: 'none', letterSpacing: 0 }}>
                           (comma-separated)
                         </span>
                       </label>
-                      <input style={inputStyle} name="required_fields"
+                      <input
+                        style={inputStyle}
+                        name="required_fields"
                         placeholder="e.g. Accounting, Finance, Business Administration"
-                        value={form.required_fields} onChange={handle} required />
+                        value={form.required_fields}
+                        onChange={handle}
+                        required
+                      />
                     </div>
                   </div>
-                </Card>
+                </div>
 
                 {/* ── SECTION 4: Experience ── */}
-                <Card accent={SECTIONS.exp}>
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="4"
                     icon={<Clock size={20} />}
                     title="Experience Requirements"
                     subtitle="Set the acceptable years of professional experience"
-                    accent={SECTIONS.exp}
+                    color={B.amber}
                   />
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
-                      <label style={labelStyle}>Minimum Experience (years) *</label>
-                      <input style={inputStyle} type="number" name="required_min_experience" min="0" max="30" value={form.required_min_experience} onChange={handle} required />
+                      <label style={labelStyle}>Minimum Experience (years) <span style={{ color: B.red }}>*</span></label>
+                      <input style={inputStyle} type="number" name="required_min_experience"
+                        min="0" max="30" value={form.required_min_experience} onChange={handle} required />
                     </div>
                     <div>
-                      <label style={labelStyle}>Maximum Experience (years) *</label>
-                      <input style={inputStyle} type="number" name="required_max_experience" min="0" max="50" value={form.required_max_experience} onChange={handle} required />
+                      <label style={labelStyle}>Maximum Experience (years) <span style={{ color: B.red }}>*</span></label>
+                      <input style={inputStyle} type="number" name="required_max_experience"
+                        min="0" max="50" value={form.required_max_experience} onChange={handle} required />
                     </div>
                   </div>
 
-                  <InfoBanner accent={SECTIONS.exp}>
-                    Applicants with fewer than <strong>{form.required_min_experience} year(s)</strong> of experience will be automatically disqualified by the AI screening system.
-                  </InfoBanner>
-                </Card>
+                  {/* Auto-disqualification warning */}
+                  <div style={{
+                    padding:      '12px 16px',
+                    background:   '#fffbeb',
+                    border:       `2px solid #fcd34d`,
+                    borderRadius: 8,
+                    fontSize:     '0.82rem',
+                    color:        '#78350f',
+                    display:      'flex',
+                    gap:          10,
+                    alignItems:   'center',
+                    fontWeight:   600,
+                  }}>
+                    <Info size={16} style={{ flexShrink: 0, color: B.amber }} />
+                    Applicants with fewer than{' '}
+                    <strong style={{
+                      background:   B.amber,
+                      color:        B.white,
+                      padding:      '1px 9px',
+                      borderRadius: 99,
+                      fontSize:     '0.85rem',
+                    }}>
+                      {form.required_min_experience} yr{form.required_min_experience !== 1 ? 's' : ''}
+                    </strong>
+                    {' '}of experience will be <strong>automatically disqualified</strong>.
+                  </div>
+                </div>
 
-                {/* ── SECTION 5: Skills ── */}
-                <Card accent={SECTIONS.skills}>
+                {/* ── SECTION 5: Required Skills ── */}
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="5"
                     icon={<Wrench size={20} />}
                     title="Required Skills"
-                    subtitle="List every technical and soft skill the AI will match against applicants' CVs"
-                    accent={SECTIONS.skills}
+                    subtitle="The AI matches these directly against applicants' CVs"
+                    color={B.violet}
                   />
 
-                  <InfoBanner accent={SECTIONS.skills}>
-                    Be specific — write <em>"Anaesthesia monitoring"</em> not just <em>"Medical skills"</em>. Applicants matching fewer than 30% of skills are automatically disqualified.
+                  <InfoBanner color={B.violet}>
+                    Be specific — write <strong>"Anaesthesia monitoring"</strong> not just <em>"Medical skills"</em>.
+                    Applicants matching fewer than <strong>30%</strong> of skills are automatically disqualified.
                   </InfoBanner>
 
                   <TagInput
-                    label="Required Skills *"
+                    label="Required Skills"
                     hint="— press Enter after each"
-                    icon={<Wrench size={13} />}
+                    icon={<Wrench size={14} />}
                     tags={form.required_skills}
                     onChange={setArr('required_skills')}
                     placeholder="e.g. Financial reporting (IFRS/GAAP)"
-                    color={C.purple}
+                    color={B.violet}
                   />
-                </Card>
+                </div>
 
                 {/* ── SECTION 6: Certifications ── */}
-                <Card accent={SECTIONS.certs}>
+                <div style={cardStyle}>
                   <SectionHeader
+                    step="6"
                     icon={<Award size={20} />}
                     title="Certifications & Licences"
                     subtitle="Professional certifications and licences required or preferred"
-                    accent={SECTIONS.certs}
+                    color={B.amber}
                   />
 
                   <TagInput
                     label="Required Certifications / Licences"
                     hint="— press Enter after each"
-                    icon={<Award size={13} />}
+                    icon={<Award size={14} />}
                     tags={form.required_certifications}
                     onChange={setArr('required_certifications')}
                     placeholder="e.g. Certified Public Accountant (CPA)"
-                    color={C.amber}
+                    color={B.amber}
                   />
 
                   <TagInput
                     label="Preferred / Nice-to-Have Qualifications"
                     hint="— press Enter after each"
-                    icon={<Star size={13} />}
+                    icon={<Star size={14} />}
                     tags={form.preferred_qualifications}
                     onChange={setArr('preferred_qualifications')}
                     placeholder="e.g. CFA Level I or above"
-                    color={C.green}
+                    color={B.emerald}
                   />
-                </Card>
+                </div>
 
                 {/* ── Submit row ── */}
                 <div style={{ display: 'flex', gap: 14, paddingBottom: 48 }}>
@@ -872,13 +925,13 @@ export default function HRJobCreate() {
                       flex:         1,
                       padding:      '14px',
                       borderRadius: 10,
-                      border:       `2px solid ${C.gray300}`,
-                      background:   C.white,
-                      color:        C.gray700,
+                      border:       `2px solid ${B.border}`,
+                      background:   B.white,
+                      color:        B.textMid,
                       fontWeight:   700,
                       cursor:       'pointer',
                       fontSize:     '0.95rem',
-                      letterSpacing:'0.02em',
+                      letterSpacing:'.01em',
                     }}
                   >
                     Cancel
@@ -891,18 +944,20 @@ export default function HRJobCreate() {
                       padding:        '14px',
                       borderRadius:   10,
                       border:         'none',
-                      background:     loading ? C.gray400 : C.blue,
-                      color:          C.white,
+                      background:     loading
+                        ? '#93c5fd'
+                        : `linear-gradient(135deg, ${B.blue} 0%, ${B.blueDark} 100%)`,
+                      color:          B.white,
                       fontWeight:     800,
                       cursor:         loading ? 'not-allowed' : 'pointer',
-                      fontSize:       '0.98rem',
-                      letterSpacing:  '0.02em',
+                      fontSize:       '1rem',
+                      letterSpacing:  '.02em',
                       display:        'flex',
                       alignItems:     'center',
                       justifyContent: 'center',
-                      gap:            10,
-                      boxShadow:      loading ? 'none' : `0 4px 16px ${C.blue}55`,
-                      transition:     'background 0.15s, box-shadow 0.15s',
+                      gap:            9,
+                      boxShadow:      loading ? 'none' : '0 4px 14px rgba(37,99,235,.45)',
+                      transition:     'all .18s',
                     }}
                   >
                     {loading
@@ -914,238 +969,201 @@ export default function HRJobCreate() {
               </form>
             )}
 
-            {/* ── Sticky live preview panel ── */}
+            {/* ══════════════════════════════════════════════════
+                STICKY LIVE PREVIEW (right column)
+            ══════════════════════════════════════════════════ */}
             {activeTab === 'form' && (
               <div style={{ position: 'sticky', top: 24 }}>
                 <div style={{
-                  background:   C.white,
-                  border:       `2px solid ${C.gray200}`,
-                  borderTop:    `4px solid ${C.navy}`,
-                  borderRadius: 12,
+                  background:   B.white,
+                  border:       `1.5px solid ${B.borderLight}`,
+                  borderRadius: 14,
                   padding:      '24px',
                   maxHeight:    'calc(100vh - 80px)',
                   overflowY:    'auto',
-                  boxShadow:    '0 4px 20px rgba(0,0,0,0.08)',
+                  boxShadow:    '0 2px 10px rgba(15,23,42,.07)',
                 }}>
+                  {/* Preview header */}
                   <div style={{
-                    fontSize:      '0.72rem',
-                    fontWeight:    800,
-                    color:         C.blue,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                    marginBottom:  16,
                     display:       'flex',
                     alignItems:    'center',
-                    gap:           6,
+                    gap:           8,
+                    fontSize:      '.72rem',
+                    fontWeight:    800,
+                    color:         B.blue,
+                    textTransform: 'uppercase',
+                    letterSpacing: '.1em',
+                    marginBottom:  16,
+                    paddingBottom: 12,
+                    borderBottom:  `2px solid ${B.borderLight}`,
                   }}>
                     👁 Live Preview
                   </div>
 
-                  {!form.title && (
-                    <div style={{
-                      textAlign:  'center',
-                      color:      C.gray400,
-                      fontSize:   '0.82rem',
-                      padding:    '24px 0',
-                      fontWeight: 500,
-                    }}>
-                      Start filling the form or select a template to see a preview here.
-                    </div>
-                  )}
-
-                  {form.title && (
-                    <div style={{ fontSize: '0.84rem', lineHeight: 1.7 }}>
-                      <div style={{
-                        fontWeight: 900,
-                        fontSize:   '1.05rem',
-                        color:      C.gray900,
-                        marginBottom: 10,
-                        letterSpacing: '-0.01em',
-                      }}>
+                  <div style={{ fontSize: '0.85rem', lineHeight: 1.75 }}>
+                    {form.title && (
+                      <div style={{ fontWeight: 900, fontSize: '1.05rem', color: B.text, marginBottom: 10 }}>
                         {form.title}
                       </div>
+                    )}
 
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginBottom: 12 }}>
-                        {form.job_level && (
-                          <span style={{
-                            padding: '3px 12px', borderRadius: 99,
-                            background: C.blueLight, border: `1.5px solid ${C.blueBorder}`,
-                            color: C.blueDark, fontSize: '0.72rem', fontWeight: 800,
-                          }}>
-                            Level {form.job_level}
-                          </span>
-                        )}
-                        {form.number_of_posts && (
-                          <span style={{
-                            padding: '3px 12px', borderRadius: 99,
-                            background: C.purpleLight, border: `1.5px solid ${C.purpleBorder}`,
-                            color: C.purple, fontSize: '0.72rem', fontWeight: 800,
-                          }}>
-                            {form.number_of_posts} Post{form.number_of_posts > 1 ? 's' : ''}
-                          </span>
-                        )}
-                        {form.employment_type && (
-                          <span style={{
-                            padding: '3px 12px', borderRadius: 99,
-                            background: C.gray100, border: `1.5px solid ${C.gray300}`,
-                            color: C.gray700, fontSize: '0.72rem', fontWeight: 700,
-                          }}>
-                            {form.employment_type}
-                          </span>
-                        )}
-                        {form.location && (
-                          <span style={{
-                            padding: '3px 12px', borderRadius: 99,
-                            background: C.tealLight, border: `1.5px solid ${C.tealBorder}`,
-                            color: C.teal, fontSize: '0.72rem', fontWeight: 700,
-                          }}>
-                            📍 {form.location}
-                          </span>
-                        )}
-                      </div>
-
-                      {form.deadline && (
-                        <div style={{
-                          fontSize: '0.75rem', color: C.amber, marginBottom: 10,
-                          display: 'flex', alignItems: 'center', gap: 5, fontWeight: 700,
-                          padding: '5px 10px', background: C.amberLight,
-                          borderRadius: 6, border: `1.5px solid ${C.amberBorder}`,
-                        }}>
-                          <Timer size={11} /> Closes: {fmtDeadlinePreview(form.deadline)}
-                        </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                      {form.job_level && (
+                        <span style={{ padding: '3px 12px', borderRadius: 99, background: B.blueXLight, border: `1.5px solid ${B.blue}40`, color: B.blueDark, fontSize: '.75rem', fontWeight: 800 }}>
+                          Level {form.job_level}
+                        </span>
                       )}
-
-                      {form.description && (
-                        <p style={{ color: C.gray700, marginBottom: 12, fontWeight: 500, lineHeight: 1.6 }}>
-                          {form.description}
-                        </p>
+                      {form.number_of_posts && (
+                        <span style={{ padding: '3px 12px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}40`, color: B.violet, fontSize: '.75rem', fontWeight: 800 }}>
+                          {form.number_of_posts} Post{form.number_of_posts > 1 ? 's' : ''}
+                        </span>
                       )}
-
-                      {form.required_skills.length > 0 && (
-                        <>
-                          <div style={{ fontSize: '0.7rem', fontWeight: 800, color: C.gray600, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-                            Key Skills
-                          </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 10 }}>
-                            {form.required_skills.slice(0, 6).map((s, i) => (
-                              <span key={i} style={{
-                                padding: '3px 10px', borderRadius: 99,
-                                background: C.purpleLight, border: `1.5px solid ${C.purpleBorder}`,
-                                color: C.purple, fontSize: '0.7rem', fontWeight: 700,
-                              }}>
-                                {s}
-                              </span>
-                            ))}
-                            {form.required_skills.length > 6 && (
-                              <span style={{ fontSize: '0.7rem', color: C.gray400, fontWeight: 600, alignSelf: 'center' }}>
-                                +{form.required_skills.length - 6} more
-                              </span>
-                            )}
-                          </div>
-                        </>
-                      )}
-
-                      {form.responsibilities.length > 0 && (
-                        <>
-                          <div style={{ fontSize: '0.7rem', fontWeight: 800, color: C.gray600, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-                            Responsibilities
-                          </div>
-                          <ul style={{ margin: 0, paddingLeft: 18, color: C.gray700, fontSize: '0.78rem', fontWeight: 500 }}>
-                            {form.responsibilities.slice(0, 4).map((r, i) => (
-                              <li key={i} style={{ marginBottom: 4 }}>{r}</li>
-                            ))}
-                            {form.responsibilities.length > 4 && (
-                              <li style={{ color: C.gray400, listStyle: 'none', marginLeft: -18 }}>
-                                +{form.responsibilities.length - 4} more…
-                              </li>
-                            )}
-                          </ul>
-                        </>
+                      {form.employment_type && (
+                        <span style={{ padding: '3px 12px', borderRadius: 99, background: B.bg, border: `1.5px solid ${B.border}`, color: B.textMid, fontSize: '.75rem', fontWeight: 700 }}>
+                          {form.employment_type}
+                        </span>
                       )}
                     </div>
-                  )}
+
+                    {form.deadline && (
+                      <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}>
+                        <Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}
+                      </div>
+                    )}
+
+                    {form.description && (
+                      <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>
+                    )}
+
+                    {form.required_skills.length > 0 && (
+                      <>
+                        <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 7 }}>
+                          Skills
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                          {form.required_skills.slice(0, 6).map((s, i) => (
+                            <span key={i} style={{
+                              padding:    '3px 10px',
+                              borderRadius: 99,
+                              background: B.violetLight,
+                              border:     `1.5px solid ${B.violet}40`,
+                              color:      B.violet,
+                              fontSize:   '.73rem',
+                              fontWeight: 700,
+                            }}>
+                              {s}
+                            </span>
+                          ))}
+                          {form.required_skills.length > 6 && (
+                            <span style={{ fontSize: '.73rem', color: B.textLight, alignSelf: 'center' }}>
+                              +{form.required_skills.length - 6} more
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    )}
+
+                    {/* Switch to preview tab CTA */}
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('preview')}
+                      style={{
+                        marginTop:    18,
+                        width:        '100%',
+                        padding:      '10px',
+                        borderRadius: 8,
+                        border:       `2px solid ${B.blue}`,
+                        background:   'transparent',
+                        color:        B.blue,
+                        fontWeight:   700,
+                        cursor:       'pointer',
+                        fontSize:     '0.82rem',
+                      }}
+                    >
+                      View Full Preview →
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
 
-            {/* ── Preview tab full view ── */}
+            {/* ══════════════════════════════════════════════════
+                PREVIEW TAB
+            ══════════════════════════════════════════════════ */}
             {activeTab === 'preview' && (
               <div style={{
-                background:   C.white,
-                border:       `2px solid ${C.gray200}`,
-                borderTop:    `5px solid ${C.navy}`,
-                borderRadius: 12,
-                padding:      '40px 48px',
-                maxWidth:     780,
+                background:   B.white,
+                border:       `1.5px solid ${B.borderLight}`,
+                borderRadius: 14,
+                padding:      '40px 44px',
+                maxWidth:     760,
                 margin:       '0 auto',
                 width:        '100%',
-                boxShadow:    '0 4px 24px rgba(0,0,0,0.08)',
+                boxShadow:    '0 2px 12px rgba(15,23,42,.08)',
               }}>
                 <div style={{
-                  fontSize: '0.72rem', fontWeight: 800, color: C.blue,
-                  textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 20,
+                  fontSize:      '.72rem',
+                  fontWeight:    800,
+                  color:         B.blue,
+                  textTransform: 'uppercase',
+                  letterSpacing: '.1em',
+                  marginBottom:  22,
                 }}>
                   Job Posting Preview
                 </div>
 
                 {form.title && (
-                  <h2 style={{ fontSize: '1.7rem', fontWeight: 900, color: C.gray900, marginBottom: 14, letterSpacing: '-0.02em' }}>
+                  <h2 style={{ fontSize: '1.65rem', fontWeight: 900, color: B.text, marginBottom: 14, letterSpacing: '-.02em' }}>
                     {form.title}
                   </h2>
                 )}
 
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
+                  {form.location && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 14px', borderRadius: 99, background: B.bg, border: `1.5px solid ${B.border}`, color: B.textMid, fontSize: '.8rem', fontWeight: 700 }}>
+                      <MapPin size={12} /> {form.location}
+                    </span>
+                  )}
                   {form.employment_type && (
-                    <span style={{ padding: '4px 14px', borderRadius: 99, background: C.blueLight, border: `1.5px solid ${C.blueBorder}`, color: C.blueDark, fontSize: '0.78rem', fontWeight: 700 }}>
+                    <span style={{ padding: '4px 14px', borderRadius: 99, background: B.blueXLight, border: `1.5px solid ${B.blue}40`, color: B.blueDark, fontSize: '.8rem', fontWeight: 700 }}>
                       {form.employment_type}
                     </span>
                   )}
-                  {form.location && (
-                    <span style={{ padding: '4px 14px', borderRadius: 99, background: C.tealLight, border: `1.5px solid ${C.tealBorder}`, color: C.teal, fontSize: '0.78rem', fontWeight: 700 }}>
-                      📍 {form.location}
+                  {form.job_level && (
+                    <span style={{ padding: '4px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}40`, color: B.violet, fontSize: '.8rem', fontWeight: 700 }}>
+                      Level {form.job_level}
                     </span>
                   )}
-                  {form.job_level && (
-                    <span style={{ padding: '4px 14px', borderRadius: 99, background: C.purpleLight, border: `1.5px solid ${C.purpleBorder}`, color: C.purple, fontSize: '0.78rem', fontWeight: 700 }}>
-                      Level {form.job_level}
+                  {form.number_of_posts && (
+                    <span style={{ padding: '4px 14px', borderRadius: 99, background: B.emeraldLight, border: `1.5px solid ${B.emerald}40`, color: B.emerald, fontSize: '.8rem', fontWeight: 700 }}>
+                      {form.number_of_posts} Opening{form.number_of_posts > 1 ? 's' : ''}
                     </span>
                   )}
                 </div>
 
                 {form.deadline && (
-                  <div style={{
-                    padding: '10px 16px', background: C.amberLight,
-                    border: `2px solid ${C.amberBorder}`, borderRadius: 8,
-                    fontSize: '0.82rem', color: C.amber, fontWeight: 700,
-                    display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20,
-                  }}>
-                    <Timer size={14} /> Application deadline: {fmtDeadlinePreview(form.deadline)}
+                  <div style={{ padding: '10px 16px', borderRadius: 8, background: '#fff7ed', border: '1.5px solid #fed7aa', color: '#9a3412', fontSize: '0.83rem', fontWeight: 700, display: 'flex', gap: 7, alignItems: 'center', marginBottom: 22 }}>
+                    <Timer size={14} /> Application Deadline: {fmtDeadlinePreview(form.deadline)}
                   </div>
                 )}
 
                 {form.description && (
-                  <p style={{ color: C.gray700, lineHeight: 1.8, marginBottom: 24, fontSize: '0.95rem', fontWeight: 500 }}>
+                  <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.95rem', marginBottom: 22 }}>
                     {form.description}
                   </p>
                 )}
 
                 {form.about_role && (
                   <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: C.gray900, marginBottom: 10, borderBottom: `2px solid ${C.blue}`, paddingBottom: 8 }}>
-                      About the Role
-                    </h3>
-                    <p style={{ color: C.gray700, lineHeight: 1.8, marginBottom: 24, fontSize: '0.9rem' }}>
-                      {form.about_role}
-                    </p>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>About the Role</h3>
+                    <p style={{ color: B.textMid, lineHeight: 1.8, fontSize: '0.92rem', marginBottom: 16 }}>{form.about_role}</p>
                   </>
                 )}
 
                 {form.responsibilities.length > 0 && (
                   <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: C.gray900, marginBottom: 10, borderBottom: `2px solid ${C.purple}`, paddingBottom: 8 }}>
-                      Key Responsibilities
-                    </h3>
-                    <ul style={{ margin: '0 0 24px', paddingLeft: 20, color: C.gray700, fontSize: '0.9rem', lineHeight: 1.9 }}>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 10, marginTop: 26 }}>Key Responsibilities</h3>
+                    <ul style={{ margin: 0, paddingLeft: 22, color: B.textMid, lineHeight: 1.9, fontSize: '0.9rem' }}>
                       {form.responsibilities.map((r, i) => <li key={i}>{r}</li>)}
                     </ul>
                   </>
@@ -1153,12 +1171,10 @@ export default function HRJobCreate() {
 
                 {form.required_skills.length > 0 && (
                   <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: C.gray900, marginBottom: 12, borderBottom: `2px solid ${C.teal}`, paddingBottom: 8 }}>
-                      Required Skills
-                    </h3>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 24 }}>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Skills</h3>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                       {form.required_skills.map((s, i) => (
-                        <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: C.purpleLight, border: `1.5px solid ${C.purpleBorder}`, color: C.purple, fontSize: '0.8rem', fontWeight: 700 }}>
+                        <span key={i} style={{ padding: '5px 14px', borderRadius: 99, background: B.violetLight, border: `1.5px solid ${B.violet}50`, color: B.violet, fontSize: '0.82rem', fontWeight: 700 }}>
                           {s}
                         </span>
                       ))}
@@ -1166,13 +1182,19 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                <div style={{ marginTop: 32, paddingTop: 22, borderTop: `2px solid ${C.gray200}`, display: 'flex', gap: 14 }}>
+                {/* Preview actions */}
+                <div style={{ marginTop: 36, paddingTop: 24, borderTop: `2px solid ${B.borderLight}`, display: 'flex', gap: 14 }}>
                   <button
                     onClick={() => setActiveTab('form')}
                     style={{
-                      padding: '11px 22px', borderRadius: 8,
-                      border: `2px solid ${C.gray300}`, background: C.white,
-                      color: C.gray700, fontWeight: 700, cursor: 'pointer', fontSize: '0.9rem',
+                      padding:      '11px 22px',
+                      borderRadius: 8,
+                      border:       `2px solid ${B.border}`,
+                      background:   B.white,
+                      color:        B.textMid,
+                      fontWeight:   700,
+                      cursor:       'pointer',
+                      fontSize:     '0.9rem',
                     }}
                   >
                     ← Back to Edit
@@ -1181,13 +1203,22 @@ export default function HRJobCreate() {
                     disabled={loading}
                     onClick={submit}
                     style={{
-                      padding: '11px 28px', borderRadius: 8,
-                      border: 'none', background: loading ? C.gray400 : C.blue,
-                      color: C.white, fontWeight: 800, cursor: loading ? 'not-allowed' : 'pointer',
-                      fontSize: '0.95rem', boxShadow: loading ? 'none' : `0 4px 14px ${C.blue}55`,
+                      padding:    '11px 28px',
+                      borderRadius:8,
+                      border:     'none',
+                      background: `linear-gradient(135deg, ${B.blue} 0%, ${B.blueDark} 100%)`,
+                      color:      B.white,
+                      fontWeight: 800,
+                      cursor:     'pointer',
+                      fontSize:   '0.9rem',
+                      boxShadow:  '0 4px 14px rgba(37,99,235,.4)',
+                      display:    'flex',
+                      alignItems: 'center',
+                      gap:        8,
                     }}
                   >
-                    {loading ? 'Posting…' : '✓ Post This Job'}
+                    <Briefcase size={16} />
+                    {loading ? 'Posting…' : 'Post This Job'}
                   </button>
                 </div>
               </div>
