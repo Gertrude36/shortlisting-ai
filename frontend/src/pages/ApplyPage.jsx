@@ -1,33 +1,18 @@
 /**
- * ApplyPage.jsx — v5.11.0
+ * ApplyPage.jsx — v5.12.0
  *
- * FIXES in v5.11.0:
+ * FIXES in v5.12.0:
  *
- *  ✅ FIX 1 — Profile gate now reads directly from AuthContext (user object)
- *     instead of fetching /applications/my on every mount. AuthContext v2.0.0
- *     is the single source of truth: after a profile save, user.national_id,
- *     user.address, and user.phone are updated in-place and the gate clears
- *     immediately — no extra round-trips, no stale state, no repeated banners.
+ *  ✅ FIX — Client-side file type and size validation in handleFileChange.
+ *     Previously, unsupported types (e.g. .docx, .zip, .heic) were sent to
+ *     the server which returned a cryptic error with no clear UI feedback.
+ *     Now validated BEFORE upload:
+ *       - Wrong type  → red toast + red error card on the doc slot
+ *       - File too big → red toast + red error card on the doc slot
+ *     The <input accept> filters the OS picker but not drag-and-drop or
+ *     manual path entry — this fix covers those cases too.
  *
- *  ✅ FIX 2 — Removed the two profileSrc / profileLoading useEffects that
- *     previously re-fetched /applications/my to infer national_id from
- *     doc_verified. That heuristic was fragile (new users had no apps) and
- *     caused the gate to fire even after a valid profile save.
- *
- *  ✅ FIX 3 — profileLoading state removed entirely. The page now shows its
- *     loading spinner only while loadingJob is true, which is the correct
- *     condition. This eliminates a full-page spinner flash on every visit.
- *
- *  ✅ FIX 4 — 'profile-updated' event handler simplified: it just re-reads
- *     the user object from AuthContext (which was already updated by
- *     updateProfile()). No fetch needed.
- *
- *  ✅ FIX 5 — getProfileIssues() now checks user.phone, user.address, and
- *     user.national_id — all fields AuthContext v2.0.0 exposes — so the
- *     missing-fields chip list is always accurate.
- *
- * All fixes from v5.9.0 / v5.10.0 (server wake gate, profile doc pre-fill,
- * draft cleanup, upload queue) are retained unchanged.
+ * All v5.11.0 fixes retained unchanged.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -91,8 +76,13 @@ const DOC_TYPES = [
   },
 ]
 
-const REQUIRED_DOC_KEYS = DOC_TYPES.filter(d => d.required).map(d => d.key)
-const STEPS = ['Position Info', 'Your Details', 'Documents', 'Submit']
+const REQUIRED_DOC_KEYS  = DOC_TYPES.filter(d => d.required).map(d => d.key)
+const STEPS              = ['Position Info', 'Your Details', 'Documents', 'Submit']
+
+// ✅ FIX: client-side validation constants (mirrors backend limits)
+const ALLOWED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg']
+const MAX_FILE_SIZE_MB   = 5
+const MAX_FILE_SIZE_B    = MAX_FILE_SIZE_MB * 1024 * 1024
 
 const STEP_COLORS = {
   done:    { bg: '#2563eb', color: '#ffffff', border: '#2563eb' },
@@ -132,10 +122,6 @@ const _isAdvisory = msg =>
     msg.toLowerCase().includes('cross-checked')
   )
 
-/**
- * ✅ FIX 5 — checks the three fields AuthContext v2.0.0 always exposes.
- * Returns an array of human-readable missing field labels (empty = complete).
- */
 function getProfileIssues(user) {
   const issues = []
   if (!user?.phone)       issues.push('Phone number')
@@ -273,7 +259,6 @@ function ProfileGateBanner({ issues, onOpenProfile }) {
             <strong>Complete My Profile</strong> button below.
           </div>
 
-          {/* Missing field chips */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
             <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#9a3412', alignSelf: 'center' }}>
               MISSING:
@@ -333,31 +318,20 @@ export default function ApplyPage() {
   const [queuedCount,   setQueuedCount]   = useState(0)
   const [profileDocCount, setProfileDocCount] = useState(0)
 
-  // ✅ FIX 1 + FIX 2 + FIX 3 — derive profile completeness directly from the
-  // AuthContext user object. No extra fetch, no profileLoading state.
-  // When updateProfile() is called in the Navbar modal it updates user in-place,
-  // so this useMemo re-evaluates automatically and the gate clears.
-  const profileIssues  = useMemo(() => getProfileIssues(user), [user])
+  const profileIssues   = useMemo(() => getProfileIssues(user), [user])
   const profileComplete = profileIssues.length === 0
 
   const openProfileModal = () => {
     window.dispatchEvent(new Event('open-profile-modal'))
   }
 
-  // ✅ FIX 4 — 'profile-updated' no longer needs to fetch anything.
-  // AuthContext already updated user; React will re-render this component
-  // because user changed, and profileIssues will recompute via useMemo.
-  // We keep the listener only to support any other consumers that rely on it.
   useEffect(() => {
-    const handler = () => { /* AuthContext already updated user — nothing to do */ }
+    const handler = () => { /* AuthContext already updated user */ }
     window.addEventListener('profile-updated', handler)
     return () => window.removeEventListener('profile-updated', handler)
   }, [])
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Refs
-  // ─────────────────────────────────────────────────────────────────────────
-
+  // ── Refs ───────────────────────────────────────────────────────────────────
   const applicationIdRef   = useRef(null)
   const submittedRef       = useRef(false)
   const uploadingRef       = useRef(new Set())
@@ -707,7 +681,7 @@ export default function ApplyPage() {
           ...prev,
           [docType]: { status: 'error', message, fileName: file.name, isAdvisory: false, isNetwork: false, fromProfile: false },
         }))
-        toast.error(`Rejected: ${message}`, { duration: 8000 })
+        toast.error(`Upload failed: ${message}`, { duration: 8000 })
       }
 
     } finally {
@@ -719,10 +693,43 @@ export default function ApplyPage() {
 
   useEffect(() => { handleUploadRef.current = handleUpload }, [handleUpload])
 
+  // ✅ FIX: validate file type and size BEFORE sending to server
   const handleFileChange = (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
-    e.target.value = ''
+    e.target.value = '' // reset so same file can be re-selected after an error
+
+    // ── File type check ─────────────────────────────────────────────────────
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase()
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      const errMsg = `"${file.name}" is not supported. Please upload a PDF, PNG, JPG, or JPEG file.`
+      toast.error(errMsg, { duration: 7000, icon: '📎' })
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: {
+          status: 'error', message: errMsg, fileName: file.name,
+          isAdvisory: false, isNetwork: false, fromProfile: false,
+        },
+      }))
+      return
+    }
+
+    // ── File size check ─────────────────────────────────────────────────────
+    if (file.size > MAX_FILE_SIZE_B) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1)
+      const errMsg = `"${file.name}" is ${sizeMB} MB — the maximum allowed size is ${MAX_FILE_SIZE_MB} MB. Please compress or choose a smaller file.`
+      toast.error(errMsg, { duration: 7000, icon: '📦' })
+      setDocStatus(prev => ({
+        ...prev,
+        [docType]: {
+          status: 'error', message: errMsg, fileName: file.name,
+          isAdvisory: false, isNetwork: false, fromProfile: false,
+        },
+      }))
+      return
+    }
+
+    // ── All good — proceed ──────────────────────────────────────────────────
     handleUpload(docType, file)
   }
 
@@ -801,7 +808,6 @@ export default function ApplyPage() {
   // Loading / not-found / success screens
   // ─────────────────────────────────────────────────────────────────────────
 
-  // ✅ FIX 3 — only loadingJob matters; profileLoading is gone
   if (loadingJob) return (
     <div className="page-wrapper">
       <Navbar />
@@ -882,7 +888,6 @@ export default function ApplyPage() {
                 <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#111827', marginBottom: 6 }}>About This Role</h2>
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 20 }} />
 
-                {/* Profile gate — only shown when profile is genuinely incomplete */}
                 <ProfileGateBanner issues={profileIssues} onOpenProfile={openProfileModal} />
 
                 <p style={{ color: '#4b5563', fontSize: '1rem', lineHeight: 1.8, marginBottom: 24 }}>
@@ -912,7 +917,8 @@ export default function ApplyPage() {
                 <div style={{ padding: '16px 20px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, marginBottom: 30, fontSize: '.88rem', color: '#78350f', lineHeight: 1.7 }}>
                   <strong>📋 Documents required:</strong><br />
                   <strong>Required (3):</strong> National ID/Passport, CV/Resume, Academic Diploma<br />
-                  <strong>Optional (2):</strong> Professional Certificate, Experience Document
+                  <strong>Optional (2):</strong> Professional Certificate, Experience Document<br />
+                  <strong>Accepted formats:</strong> PDF, PNG, JPG, JPEG (max {MAX_FILE_SIZE_MB} MB each)
                 </div>
 
                 {profileComplete ? (
@@ -1032,7 +1038,8 @@ export default function ApplyPage() {
                 <div style={{ width: 40, height: 3, background: '#2563eb', borderRadius: 99, marginBottom: 18 }} />
                 <p style={{ color: '#4b5563', fontSize: '.92rem', lineHeight: 1.75, marginBottom: 16 }}>
                   Upload your <strong style={{ color: '#111827' }}>3 required documents</strong>. Ensure your name matches your account:{' '}
-                  <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>. Accepted: PDF, PNG, JPG (max 5 MB).
+                  <strong style={{ color: '#111827' }}>{user?.full_name || user?.fullName}</strong>.{' '}
+                  <strong>Accepted formats: PDF, PNG, JPG, JPEG</strong> (max {MAX_FILE_SIZE_MB} MB each).
                 </p>
 
                 <ProfileDocsBanner count={activeProfileDocCount} />
@@ -1112,12 +1119,18 @@ export default function ApplyPage() {
                               <div style={{ fontSize: '.82rem', lineHeight: 1.6, marginBottom: 10, padding: '10px 14px', borderRadius: 6, background: '#fee2e2', color: '#7f1d1d', border: '1px solid #fca5a5' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, marginBottom: 4, fontSize: '.83rem' }}>
                                   <XCircle size={13} style={{ flexShrink: 0 }} />
-                                  {isIDReject ? 'ID name mismatch' : 'Document rejected'}
+                                  {isIDReject ? 'ID name mismatch' : 'Upload failed'}
                                 </div>
                                 <div style={{ paddingLeft: 19 }}>{state.message}</div>
                                 {isIDReject && (
                                   <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff7f7', borderRadius: 4, border: '1px solid #fecaca', fontSize: '.78rem', color: '#991b1b' }}>
                                     <strong>💡 Tip:</strong> Your account name is <strong>{user?.full_name || user?.fullName}</strong>. Make sure this exactly matches the name on your National ID or Passport.
+                                  </div>
+                                )}
+                                {/* ✅ FIX: show accepted formats hint on type errors */}
+                                {state.message?.includes('not supported') && (
+                                  <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff7f7', borderRadius: 4, border: '1px solid #fecaca', fontSize: '.78rem', color: '#991b1b' }}>
+                                    <strong>💡 Accepted formats:</strong> PDF, PNG, JPG, JPEG (max {MAX_FILE_SIZE_MB} MB)
                                   </div>
                                 )}
                               </div>
@@ -1156,7 +1169,12 @@ export default function ApplyPage() {
                                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 6, border: 'none', background: isError ? '#dc2626' : '#2563eb', color: '#ffffff', fontWeight: 700, fontSize: '.82rem', cursor: 'pointer' }}>
                                   <Upload size={13} />
                                   {isError ? 'Try Again' : 'Choose File'}
-                                  <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{ display: 'none' }} onChange={e => handleFileChange(doc.key, e)} />
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg"
+                                    style={{ display: 'none' }}
+                                    onChange={e => handleFileChange(doc.key, e)}
+                                  />
                                 </label>
                               )}
                             </div>
