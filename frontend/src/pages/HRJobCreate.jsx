@@ -75,6 +75,26 @@ function serializeDegreesWithExp(degrees, baseMin, baseMax) {
     .join(' | ')
 }
 
+// ── Parse backend serialized string → [{name, exp}] ──────────
+// Handles: "Bachelor of Commerce [min 2 yrs] | Master's [min 1 yr]"
+// Also handles legacy formats where the whole string is one chunk
+function parseSerializedDegrees(raw) {
+  if (!raw || typeof raw !== 'string') return []
+
+  // Split on pipe separator (with or without spaces)
+  const chunks = raw.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean)
+
+  return chunks.map(chunk => {
+    // Match: "Degree Name [min N yr(s)]"
+    const m = chunk.match(/^(.*?)\s*\[min\s+(\d+)\s+yrs?\s*\]$/i)
+    if (m) {
+      return { name: m[1].trim(), exp: parseInt(m[2], 10) }
+    }
+    // No bracket tag found — return as-is with null exp
+    return { name: chunk, exp: null }
+  })
+}
+
 // ── Experience badge label — human-readable ───────────────────
 function expLabel(exp) {
   if (exp === 0) return '0 Years of relevant experience'
@@ -1318,7 +1338,7 @@ function fmtDeadlinePreview(dtStr) {
   catch { return dtStr }
 }
 
-// ── NumberedList — responsibilities, skills, certs ────────────
+// ── NumberedList ──────────────────────────────────────────────
 function NumberedList({ items }) {
   if (!items || !items.length) return null
   return (
@@ -1348,36 +1368,30 @@ function NumberedList({ items }) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// ── QualificationsBlock — SINGLE clean Mifotra-style display ──
-// Used in BOTH sidebar preview and full preview.
-// NEVER shows [min N yrs] brackets or pipe characters to users.
+// ── QualificationsBlock
 //
-// Props (two modes):
-//   Mode A — live form array (HR preview):
+// Renders a clean Mifotra-style numbered list.
+// NEVER shows [min N yrs] brackets or pipe characters.
+//
+// Two input modes:
+//   Mode A — live form arrays (HR editing):
 //     degrees={string[]}  baseMin={number}  baseMax={number}
-//   Mode B — parsed DB string (applicant view / any read-only view):
-//     raw={string}   e.g. "Bachelor of Commerce [min 2 yrs] | Master's [min 1 yr]"
-//   Both modes accept:
-//     fields={string}   comma-separated fields of study (optional sub-label)
-//     compact={boolean} smaller padding for sidebar
+//
+//   Mode B — backend-serialized string (applicant / read-only view):
+//     raw={string}  e.g. "Bachelor of Commerce [min 2 yrs] | Master's [min 1 yr]"
+//
+//   Both accept:
+//     fields={string}   — accepted fields of study sub-label
+//     compact={boolean} — smaller padding for sidebar
 // ════════════════════════════════════════════════════════════════
 function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, compact = false }) {
   // ── Build unified [{name, exp}] list ──────────────────────
   let rows = []
 
   if (raw && typeof raw === 'string') {
-    // Parse the backend-serialized string:
-    //   "Bachelor of Commerce [min 2 yrs] | Master of Science [min 1 yr]"
-    rows = raw
-      .split('|')
-      .map(chunk => chunk.trim())
-      .filter(Boolean)
-      .map(chunk => {
-        const m = chunk.match(/^(.*?)\s*\[min\s+(\d+)\s+yrs?\s*\]$/i)
-        return m
-          ? { name: m[1].trim(), exp: parseInt(m[2], 10) }
-          : { name: chunk, exp: null }
-      })
+    // Parse backend-serialized string:
+    // "Bachelor of Commerce [min 2 yrs] | Master of Science [min 1 yr]"
+    rows = parseSerializedDegrees(raw)
   } else if (Array.isArray(degrees) && degrees.length > 0) {
     rows = degrees.map(name => ({
       name,
@@ -1404,7 +1418,7 @@ function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, 
         </p>
       )}
 
-      {/* ── Numbered rows — Mifotra style ── */}
+      {/* Numbered rows — Mifotra style */}
       <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
         {rows.map((row, i) => (
           <div
@@ -1448,7 +1462,7 @@ function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, 
                 {row.name}
               </div>
 
-              {/* Dark pill badge — exactly matching the Mifotra screenshot */}
+              {/* Dark pill badge — Mifotra style */}
               <span style={{
                 display:       'inline-flex',
                 alignItems:    'center',
@@ -1458,7 +1472,7 @@ function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, 
                 borderRadius:  6,
                 fontSize:      compact ? '0.72rem' : '0.78rem',
                 fontWeight:    700,
-                background:    B.navyMid,   // #1e293b — same dark slate as Mifotra
+                background:    B.navyMid,
                 color:         '#ffffff',
                 whiteSpace:    'nowrap',
                 letterSpacing: '.01em',
@@ -1489,7 +1503,7 @@ function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, 
   )
 }
 
-// ── DegreeExpMatrix — HR-only admin table, shown in the form editor ──
+// ── DegreeExpMatrix — HR-only admin table ─────────────────────
 function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
   if (!degrees.length) return null
   return (
@@ -1602,6 +1616,7 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
+      // Serialize for backend — brackets/pipes are ONLY for backend parsing
       const enrichedDegrees = serializeDegreesWithExp(
         form.required_degrees,
         Number(form.required_min_experience),
@@ -1786,7 +1801,7 @@ export default function HRJobCreate() {
                     Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the live matrix below.
                   </InfoBanner>
                   <TagInput label="Accepted Degrees / Qualifications" hint="— one per entry, press Enter" icon={<GraduationCap size={14} />} tags={form.required_degrees} onChange={setArr('required_degrees')} placeholder="e.g. Bachelor of Commerce in Accounting" color={B.sky} />
-                  {/* HR-only admin matrix — never shown to applicants */}
+                  {/* HR-only admin matrix */}
                   <DegreeExpMatrix degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
@@ -1898,7 +1913,7 @@ export default function HRJobCreate() {
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
 
-                    {/* ── Sidebar qualifications — clean Mifotra rows, compact ── */}
+                    {/* Sidebar qualifications — clean Mifotra rows, no raw strings */}
                     {form.required_degrees.length > 0 && (
                       <div style={{ marginBottom: 14 }}>
                         <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
@@ -1965,7 +1980,7 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── QUALIFICATIONS — clean Mifotra-style, no brackets, no pipes ── */}
+                {/* Qualifications — clean Mifotra-style, no brackets, no pipes */}
                 {form.required_degrees.length > 0 && (
                   <div style={{ marginTop: 30 }}>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14 }}>Qualifications</h3>
@@ -2017,4 +2032,25 @@ export default function HRJobCreate() {
       </div>
     </>
   )
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// EXPORTED UTILITY — use this in your applicant-facing modal/page
+// to display qualifications cleanly from the backend string.
+//
+// Usage in any other component:
+//
+//   import { QualificationsDisplay } from './HRJobCreate'
+//
+//   // job.required_education_levels is the backend serialized string
+//   <QualificationsDisplay
+//     raw={job.required_education_levels}
+//     fields={job.required_fields}
+//   />
+//
+// This guarantees NO pipes, NO brackets ever appear to applicants.
+// ════════════════════════════════════════════════════════════════
+export function QualificationsDisplay({ raw, fields }) {
+  return <QualificationsBlock raw={raw} fields={fields} />
 }
