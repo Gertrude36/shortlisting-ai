@@ -1347,56 +1347,149 @@ function NumberedList({ items }) {
   )
 }
 
-// ── DegreeRow — one degree per row, Mifotra-style ─────────────
-// Used in BOTH the sidebar preview and the full preview tab
-function DegreeRows({ degrees, baseMin, baseMax, compact = false }) {
-  if (!degrees || !degrees.length) return null
+// ════════════════════════════════════════════════════════════════
+// ── QualificationsBlock — SINGLE clean Mifotra-style display ──
+// Used in BOTH sidebar preview and full preview.
+// NEVER shows [min N yrs] brackets or pipe characters to users.
+//
+// Props (two modes):
+//   Mode A — live form array (HR preview):
+//     degrees={string[]}  baseMin={number}  baseMax={number}
+//   Mode B — parsed DB string (applicant view / any read-only view):
+//     raw={string}   e.g. "Bachelor of Commerce [min 2 yrs] | Master's [min 1 yr]"
+//   Both modes accept:
+//     fields={string}   comma-separated fields of study (optional sub-label)
+//     compact={boolean} smaller padding for sidebar
+// ════════════════════════════════════════════════════════════════
+function QualificationsBlock({ raw, degrees, baseMin = 0, baseMax = 20, fields, compact = false }) {
+  // ── Build unified [{name, exp}] list ──────────────────────
+  let rows = []
+
+  if (raw && typeof raw === 'string') {
+    // Parse the backend-serialized string:
+    //   "Bachelor of Commerce [min 2 yrs] | Master of Science [min 1 yr]"
+    rows = raw
+      .split('|')
+      .map(chunk => chunk.trim())
+      .filter(Boolean)
+      .map(chunk => {
+        const m = chunk.match(/^(.*?)\s*\[min\s+(\d+)\s+yrs?\s*\]$/i)
+        return m
+          ? { name: m[1].trim(), exp: parseInt(m[2], 10) }
+          : { name: chunk, exp: null }
+      })
+  } else if (Array.isArray(degrees) && degrees.length > 0) {
+    rows = degrees.map(name => ({
+      name,
+      exp: calcExpForDegree(degreeTier(name), Number(baseMin), Number(baseMax)),
+    }))
+  }
+
+  if (!rows.length) return null
+
+  const rowPad = compact ? '12px 16px' : '16px 22px'
+
   return (
-    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
-      {degrees.map((d, i) => {
-        const tier = degreeTier(d)
-        const exp  = calcExpForDegree(tier, baseMin, baseMax)
-        return (
-          <div key={i} style={{
-            display: 'flex', alignItems: 'center', gap: compact ? 12 : 16,
-            padding: compact ? '11px 14px' : '14px 20px',
-            background: i % 2 === 0 ? B.white : B.bg,
-            borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
-          }}>
+    <div>
+      {/* Fields of study sub-label */}
+      {fields && (
+        <p style={{
+          fontSize: compact ? '0.78rem' : '0.84rem',
+          color: B.textLight,
+          marginBottom: compact ? 10 : 12,
+          lineHeight: 1.5,
+        }}>
+          Accepted fields of study:{' '}
+          <strong style={{ color: B.textMid }}>{fields}</strong>
+        </p>
+      )}
+
+      {/* ── Numbered rows — Mifotra style ── */}
+      <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+        {rows.map((row, i) => (
+          <div
+            key={i}
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: compact ? 14 : 18,
+              padding: rowPad,
+              background: i % 2 === 0 ? B.white : B.bg,
+              borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
+            }}
+          >
             {/* Circle number */}
             <div style={{
-              width: compact ? 30 : 36, height: compact ? 30 : 36,
-              borderRadius: '50%', flexShrink: 0,
-              border: `2px solid ${B.border}`, background: B.white,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: compact ? '0.78rem' : '0.85rem', fontWeight: 800, color: B.textMid,
+              width:          compact ? 32 : 38,
+              height:         compact ? 32 : 38,
+              minWidth:       compact ? 32 : 38,
+              borderRadius:   '50%',
+              border:         `2px solid ${B.border}`,
+              background:     B.white,
+              display:        'flex',
+              alignItems:     'center',
+              justifyContent: 'center',
+              fontSize:       compact ? '0.78rem' : '0.85rem',
+              fontWeight:     800,
+              color:          B.textMid,
+              marginTop:      2,
             }}>
               {i + 1}
             </div>
-            {/* Degree name + experience badge */}
+
+            {/* Degree name + dark experience badge */}
             <div>
-              <div style={{ fontSize: compact ? '0.82rem' : '0.92rem', color: B.text, fontWeight: 600, lineHeight: 1.4 }}>
-                {d}
-              </div>
-              {/* Dark pill badge — exactly like Mifotra */}
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 5,
-                marginTop: 5, padding: '3px 12px', borderRadius: 6,
-                fontSize: compact ? '0.72rem' : '0.76rem', fontWeight: 700,
-                background: B.navyMid, color: B.white,
+              <div style={{
+                fontSize:   compact ? '0.85rem' : '0.95rem',
+                fontWeight: 700,
+                color:      B.text,
+                lineHeight: 1.4,
               }}>
-                <Clock size={compact ? 10 : 11} />
-                {expLabel(exp)}
+                {row.name}
+              </div>
+
+              {/* Dark pill badge — exactly matching the Mifotra screenshot */}
+              <span style={{
+                display:       'inline-flex',
+                alignItems:    'center',
+                gap:           6,
+                marginTop:     6,
+                padding:       compact ? '3px 12px' : '4px 14px',
+                borderRadius:  6,
+                fontSize:      compact ? '0.72rem' : '0.78rem',
+                fontWeight:    700,
+                background:    B.navyMid,   // #1e293b — same dark slate as Mifotra
+                color:         '#ffffff',
+                whiteSpace:    'nowrap',
+                letterSpacing: '.01em',
+              }}>
+                <Clock size={compact ? 10 : 12} />
+                {row.exp === null
+                  ? 'Experience: see job description'
+                  : row.exp === 0
+                    ? '0 Years of relevant experience'
+                    : `${row.exp} Year${row.exp !== 1 ? 's' : ''} of relevant experience`
+                }
               </span>
             </div>
           </div>
-        )
-      })}
+        ))}
+      </div>
+
+      {/* Footer note */}
+      <p style={{
+        fontSize:   compact ? '0.7rem' : '0.74rem',
+        color:      B.textLight,
+        marginTop:  8,
+        lineHeight: 1.6,
+      }}>
+        Experience requirements vary by qualification level — higher degrees require fewer years of experience.
+      </p>
     </div>
   )
 }
 
-// ── DegreeExpMatrix — compact admin table for form (editor only) ──
+// ── DegreeExpMatrix — HR-only admin table, shown in the form editor ──
 function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
   if (!degrees.length) return null
   return (
@@ -1509,7 +1602,6 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
-      // serializeDegreesWithExp is ONLY used here for the backend payload — never shown in UI
       const enrichedDegrees = serializeDegreesWithExp(
         form.required_degrees,
         Number(form.required_min_experience),
@@ -1694,6 +1786,7 @@ export default function HRJobCreate() {
                     Enter each accepted degree exactly as it appears on a certificate — e.g. <strong>"Bachelor of Commerce in Accounting"</strong>. The system automatically sets a <strong>lower experience threshold for higher-level degrees</strong> (Master's/PhD) and a <strong>higher threshold for Diploma holders</strong>. See the live matrix below.
                   </InfoBanner>
                   <TagInput label="Accepted Degrees / Qualifications" hint="— one per entry, press Enter" icon={<GraduationCap size={14} />} tags={form.required_degrees} onChange={setArr('required_degrees')} placeholder="e.g. Bachelor of Commerce in Accounting" color={B.sky} />
+                  {/* HR-only admin matrix — never shown to applicants */}
                   <DegreeExpMatrix degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                     <div>
@@ -1805,24 +1898,19 @@ export default function HRJobCreate() {
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
 
-                    {/* ── Sidebar degrees — Mifotra style, compact ── */}
+                    {/* ── Sidebar qualifications — clean Mifotra rows, compact ── */}
                     {form.required_degrees.length > 0 && (
                       <div style={{ marginBottom: 14 }}>
                         <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
                           Qualifications
                         </div>
-                        {/* Show up to 5 degrees; each on its own row */}
-                        <DegreeRows
-                          degrees={form.required_degrees.slice(0, 5)}
+                        <QualificationsBlock
+                          degrees={form.required_degrees}
                           baseMin={bMin}
                           baseMax={bMax}
+                          fields={form.required_fields}
                           compact={true}
                         />
-                        {form.required_degrees.length > 5 && (
-                          <div style={{ padding: '8px 14px', fontSize: '.72rem', color: B.textLight, border: `1.5px solid ${B.borderLight}`, borderTop: 'none', borderRadius: '0 0 8px 8px', background: B.bg }}>
-                            +{form.required_degrees.length - 5} more qualifications
-                          </div>
-                        )}
                       </div>
                     )}
 
@@ -1877,21 +1965,17 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── QUALIFICATIONS — one row per degree, Mifotra style ── */}
+                {/* ── QUALIFICATIONS — clean Mifotra-style, no brackets, no pipes ── */}
                 {form.required_degrees.length > 0 && (
-                  <>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 4, marginTop: 30 }}>Qualifications</h3>
-                    {form.required_fields && (
-                      <p style={{ color: B.textLight, fontSize: '0.82rem', marginBottom: 12 }}>
-                        Accepted fields of study: <strong style={{ color: B.textMid }}>{form.required_fields}</strong>
-                      </p>
-                    )}
-                    {/* Each degree on its own numbered row with dark badge */}
-                    <DegreeRows degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
-                    <div style={{ marginTop: 8, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
-                      <strong style={{ color: B.textMid }}>Note:</strong> Experience requirements adjust by qualification level — PhD (base−3 yrs) · Master's (base−1 yr) · Bachelor's (base) · Diploma (base+3 yrs)
-                    </div>
-                  </>
+                  <div style={{ marginTop: 30 }}>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14 }}>Qualifications</h3>
+                    <QualificationsBlock
+                      degrees={form.required_degrees}
+                      baseMin={bMin}
+                      baseMax={bMax}
+                      fields={form.required_fields}
+                    />
+                  </div>
                 )}
 
                 {/* Required Skills */}
