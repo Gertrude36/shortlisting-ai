@@ -64,7 +64,7 @@ function calcExpForDegree(tier, baseMin, baseMax) {
   return Math.min(adjusted, baseMax)
 }
 
-// ── Serialize for backend ─────────────────────────────────────
+// ── Serialize for backend ONLY — never shown to users ─────────
 function serializeDegreesWithExp(degrees, baseMin, baseMax) {
   return degrees
     .map(d => {
@@ -73,6 +73,12 @@ function serializeDegreesWithExp(degrees, baseMin, baseMax) {
       return `${d} [min ${exp} yr${exp !== 1 ? 's' : ''}]`
     })
     .join(' | ')
+}
+
+// ── Experience badge label — human-readable ───────────────────
+function expLabel(exp) {
+  if (exp === 0) return '0 Years of relevant experience'
+  return `${exp} Year${exp !== 1 ? 's' : ''} of relevant experience`
 }
 
 // ── 60 JOB TEMPLATES ─────────────────────────────────────────
@@ -219,7 +225,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Comprehensive Emergency Obstetric and Newborn Care (CEmONC) training","Advanced midwifery postgraduate certificate","Kangaroo Mother Care (KMC) certification","IYCF counsellor certification"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ EDUCATION ═══════════════════
   {
     title: "Secondary School Teacher — Sciences", domain: "Education", emoji: "🧪",
@@ -335,7 +340,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Rwanda Education Board Head Teacher Development Programme (HTDP)","Child safeguarding lead training","School inspection preparation experience","Special Needs Education (SNE) inclusive school leadership experience"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ TECHNOLOGY ═══════════════════
   {
     title: "Software Engineer", domain: "Technology", emoji: "👨‍💻",
@@ -452,7 +456,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Oracle Certified Professional (OCP) or PostgreSQL Associate Certification","AWS RDS / Azure SQL Database managed services experience","Data Warehouse platforms: Snowflake, BigQuery, or Redshift","ITIL Foundation — Change Management for database operations"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ FINANCE ═══════════════════
   {
     title: "Accountant", domain: "Finance", emoji: "📒",
@@ -569,7 +572,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["ACCA or CIMA full qualification","CFA Charter holder or CFA Level II+","SAP ERP S/4HANA or Oracle Financials implementation experience","Executive leadership or management programme certificate"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ AGRICULTURE ═══════════════════
   {
     title: "Agronomist", domain: "Agriculture", emoji: "🌾",
@@ -662,7 +664,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["CROPWAT or EPANET irrigation software proficiency","World Bank / AfDB irrigation project implementation experience","ESIA knowledge for water infrastructure projects","Valid vehicle or motorcycle driving licence"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ ENGINEERING ═══════════════════
   {
     title: "Civil Engineer", domain: "Engineering", emoji: "🏗️",
@@ -756,7 +757,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["EPANET or WaterCAD hydraulic modelling proficiency","Rwanda WASAC technical standards training","World Bank / UNICEF / USAID WASH project experience","CLTS (Community Led Total Sanitation) facilitation training"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ GOVERNMENT ═══════════════════
   {
     title: "Human Resources Officer", domain: "Government", emoji: "👥",
@@ -826,7 +826,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Rwanda Leadership Academy (RMA) Senior Leadership Programme certificate","Central government ministry or cabinet-level experience","Demonstrated Imihigo performance achievement in prior post","PFM training certificate — MINECOFIN"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ NGO ═══════════════════
   {
     title: "Project Manager", domain: "NGO", emoji: "📋",
@@ -942,7 +941,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["GBV Information Management System (GBVIMS) training","MIGEPROF / ONE UN Rwanda / UNFPA programme experience","Psychological First Aid (PFA) certification","Men Engage or SASA! methodology training"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ HOSPITALITY ═══════════════════
   {
     title: "Hotel Manager", domain: "Hospitality", emoji: "🏨",
@@ -990,7 +988,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Additional European or Asian language: Spanish, German, or Chinese","Ornithology or primate behaviour specialist training","Drone operation licence for aerial photography tours","MICE and cultural diplomacy tour experience"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ LEGAL ═══════════════════
   {
     title: "Legal Counsel", domain: "Legal", emoji: "⚖️",
@@ -1015,7 +1012,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Master of Laws (LLM) in Commercial or International Law","KIAC (Kigali International Arbitration Centre) arbitration certification","Bilingual legal practice: English and French","Financial sector, NGO, or public sector legal practice experience"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ MEDIA ═══════════════════
   {
     title: "Communications and PR Officer", domain: "Media", emoji: "📣",
@@ -1040,7 +1036,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["Google Digital Marketing and E-Commerce Certificate","Crisis Communications certificate","International development or government communications experience","Podcast production or broadcast media experience"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ ENERGY ═══════════════════
   {
     title: "Renewable Energy Engineer — Solar PV", domain: "Energy", emoji: "☀️",
@@ -1065,7 +1060,6 @@ const RWANDA_JOBS_DATA = [
     preferred: ["NABCEP Solar PV Installation Professional certification","Mini-grid project implementation in rural Rwanda","ESMAP / SREP / REA energy access programme experience","Battery Energy Storage System (BESS) design competency"],
     employment_type: "Full-time",
   },
-
   // ═══════════════════ OTHER ═══════════════════
   {
     title: "Architect", domain: "Other", emoji: "📐",
@@ -1324,8 +1318,8 @@ function fmtDeadlinePreview(dtStr) {
   catch { return dtStr }
 }
 
-// ── NumberedList — clean numbered row component (like screenshot) ──
-function NumberedList({ items, color = B.blue, badgeRenderer }) {
+// ── NumberedList — responsibilities, skills, certs ────────────
+function NumberedList({ items }) {
   if (!items || !items.length) return null
   return (
     <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
@@ -1336,7 +1330,6 @@ function NumberedList({ items, color = B.blue, badgeRenderer }) {
           background: i % 2 === 0 ? B.white : B.bg,
           borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
         }}>
-          {/* Circle number */}
           <div style={{
             width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
             border: `2px solid ${B.border}`, background: B.white,
@@ -1345,13 +1338,8 @@ function NumberedList({ items, color = B.blue, badgeRenderer }) {
           }}>
             {i + 1}
           </div>
-          {/* Content */}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 600, lineHeight: 1.5 }}>
-              {typeof item === 'string' ? item : item.label}
-            </div>
-            {/* Optional badge rendered below the text */}
-            {badgeRenderer && badgeRenderer(item, i)}
+          <div style={{ fontSize: '0.88rem', color: B.text, fontWeight: 600, lineHeight: 1.5 }}>
+            {typeof item === 'string' ? item : item.label}
           </div>
         </div>
       ))}
@@ -1359,7 +1347,56 @@ function NumberedList({ items, color = B.blue, badgeRenderer }) {
   )
 }
 
-// ── DegreeExpMatrix — live preview in form (compact table) ────
+// ── DegreeRow — one degree per row, Mifotra-style ─────────────
+// Used in BOTH the sidebar preview and the full preview tab
+function DegreeRows({ degrees, baseMin, baseMax, compact = false }) {
+  if (!degrees || !degrees.length) return null
+  return (
+    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
+      {degrees.map((d, i) => {
+        const tier = degreeTier(d)
+        const exp  = calcExpForDegree(tier, baseMin, baseMax)
+        return (
+          <div key={i} style={{
+            display: 'flex', alignItems: 'center', gap: compact ? 12 : 16,
+            padding: compact ? '11px 14px' : '14px 20px',
+            background: i % 2 === 0 ? B.white : B.bg,
+            borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
+          }}>
+            {/* Circle number */}
+            <div style={{
+              width: compact ? 30 : 36, height: compact ? 30 : 36,
+              borderRadius: '50%', flexShrink: 0,
+              border: `2px solid ${B.border}`, background: B.white,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: compact ? '0.78rem' : '0.85rem', fontWeight: 800, color: B.textMid,
+            }}>
+              {i + 1}
+            </div>
+            {/* Degree name + experience badge */}
+            <div>
+              <div style={{ fontSize: compact ? '0.82rem' : '0.92rem', color: B.text, fontWeight: 600, lineHeight: 1.4 }}>
+                {d}
+              </div>
+              {/* Dark pill badge — exactly like Mifotra */}
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                marginTop: 5, padding: '3px 12px', borderRadius: 6,
+                fontSize: compact ? '0.72rem' : '0.76rem', fontWeight: 700,
+                background: B.navyMid, color: B.white,
+              }}>
+                <Clock size={compact ? 10 : 11} />
+                {expLabel(exp)}
+              </span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── DegreeExpMatrix — compact admin table for form (editor only) ──
 function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
   if (!degrees.length) return null
   return (
@@ -1398,7 +1435,7 @@ function DegreeExpMatrix({ degrees, baseMin, baseMax }) {
                   border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
                   color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
                 }}>
-                  <Clock size={11} /> {exp === 0 ? 'Entry-level (0 yrs)' : `Min ${exp} yr${exp !== 1 ? 's' : ''}`}
+                  <Clock size={11} /> {expLabel(exp)}
                 </span>
               </div>
             </div>
@@ -1472,6 +1509,7 @@ export default function HRJobCreate() {
     const deadlineWithSeconds = form.deadline.length === 16 ? form.deadline + ':00' : form.deadline
     setLoading(true)
     try {
+      // serializeDegreesWithExp is ONLY used here for the backend payload — never shown in UI
       const enrichedDegrees = serializeDegreesWithExp(
         form.required_degrees,
         Number(form.required_min_experience),
@@ -1518,16 +1556,6 @@ export default function HRJobCreate() {
 
   const bMin = Number(form.required_min_experience)
   const bMax = Number(form.required_max_experience)
-
-  // ── Exp badge colour helper ──────────────────────────────────
-  const expBadgeStyle = (exp) => ({
-    display: 'inline-flex', alignItems: 'center', gap: 5,
-    padding: '3px 12px', borderRadius: 99, fontSize: '0.76rem', fontWeight: 800, whiteSpace: 'nowrap',
-    background: exp === 0 ? B.emeraldLight : exp <= 2 ? B.blueXLight : exp <= 5 ? B.amberLight : B.redLight,
-    border: `1.5px solid ${(exp === 0 ? B.emerald : exp <= 2 ? B.blue : exp <= 5 ? B.amber : B.red)}50`,
-    color: exp === 0 ? B.emerald : exp <= 2 ? B.blueDark : exp <= 5 ? B.amber : B.red,
-    marginTop: 6,
-  })
 
   return (
     <>
@@ -1777,42 +1805,24 @@ export default function HRJobCreate() {
                     {form.deadline && <div style={{ fontSize: '.77rem', color: '#9a3412', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}><Timer size={12} /> Closes: {fmtDeadlinePreview(form.deadline)}</div>}
                     {form.description && <p style={{ color: B.textMid, marginBottom: 12, lineHeight: 1.7 }}>{form.description}</p>}
 
-                    {/* Sidebar degrees preview — numbered list style */}
+                    {/* ── Sidebar degrees — Mifotra style, compact ── */}
                     {form.required_degrees.length > 0 && (
                       <div style={{ marginBottom: 14 }}>
                         <div style={{ fontSize: '.72rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
                           Qualifications
                         </div>
-                        <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 8, overflow: 'hidden' }}>
-                          {form.required_degrees.slice(0, 5).map((d, i) => {
-                            const tier = degreeTier(d)
-                            const exp  = calcExpForDegree(tier, bMin, bMax)
-                            return (
-                              <div key={i} style={{
-                                display: 'flex', alignItems: 'center', gap: 12,
-                                padding: '11px 14px',
-                                background: i % 2 === 0 ? B.white : B.bg,
-                                borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
-                              }}>
-                                <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, border: `2px solid ${B.border}`, background: B.white, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 800, color: B.textMid }}>
-                                  {i + 1}
-                                </div>
-                                <div>
-                                  <div style={{ fontSize: '0.8rem', color: B.text, fontWeight: 600 }}>{d}</div>
-                                  <span style={expBadgeStyle(exp)}>
-                                    <Clock size={10} />
-                                    {exp === 0 ? '0 Years of relevant experience' : `${exp} Year${exp !== 1 ? 's' : ''} of relevant experience`}
-                                  </span>
-                                </div>
-                              </div>
-                            )
-                          })}
-                          {form.required_degrees.length > 5 && (
-                            <div style={{ padding: '8px 14px', fontSize: '.72rem', color: B.textLight, borderTop: `1px solid ${B.borderLight}`, background: B.bg }}>
-                              +{form.required_degrees.length - 5} more qualifications
-                            </div>
-                          )}
-                        </div>
+                        {/* Show up to 5 degrees; each on its own row */}
+                        <DegreeRows
+                          degrees={form.required_degrees.slice(0, 5)}
+                          baseMin={bMin}
+                          baseMax={bMax}
+                          compact={true}
+                        />
+                        {form.required_degrees.length > 5 && (
+                          <div style={{ padding: '8px 14px', fontSize: '.72rem', color: B.textLight, border: `1.5px solid ${B.borderLight}`, borderTop: 'none', borderRadius: '0 0 8px 8px', background: B.bg }}>
+                            +{form.required_degrees.length - 5} more qualifications
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1859,7 +1869,7 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── KEY RESPONSIBILITIES — numbered list ── */}
+                {/* Key Responsibilities */}
                 {form.responsibilities.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 14, marginTop: 26 }}>Key Responsibilities</h3>
@@ -1867,7 +1877,7 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── QUALIFICATIONS — numbered list with exp badge ── */}
+                {/* ── QUALIFICATIONS — one row per degree, Mifotra style ── */}
                 {form.required_degrees.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 4, marginTop: 30 }}>Qualifications</h3>
@@ -1876,51 +1886,15 @@ export default function HRJobCreate() {
                         Accepted fields of study: <strong style={{ color: B.textMid }}>{form.required_fields}</strong>
                       </p>
                     )}
-                    {/* Numbered list — one row per degree, exp badge below the degree name */}
-                    <div style={{ border: `1.5px solid ${B.borderLight}`, borderRadius: 10, overflow: 'hidden' }}>
-                      {form.required_degrees.map((d, i) => {
-                        const tier = degreeTier(d)
-                        const exp  = calcExpForDegree(tier, bMin, bMax)
-                        return (
-                          <div key={i} style={{
-                            display: 'flex', alignItems: 'center', gap: 16,
-                            padding: '14px 20px',
-                            background: i % 2 === 0 ? B.white : B.bg,
-                            borderTop: i > 0 ? `1px solid ${B.borderLight}` : 'none',
-                          }}>
-                            {/* Circle number — matches screenshot style */}
-                            <div style={{
-                              width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                              border: `2px solid ${B.border}`, background: B.white,
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontSize: '0.85rem', fontWeight: 800, color: B.textMid,
-                            }}>
-                              {i + 1}
-                            </div>
-                            {/* Degree name + experience badge */}
-                            <div>
-                              <div style={{ fontSize: '0.92rem', color: B.text, fontWeight: 600 }}>{d}</div>
-                              <span style={{
-                                display: 'inline-flex', alignItems: 'center', gap: 5,
-                                marginTop: 6, padding: '3px 12px', borderRadius: 6,
-                                fontSize: '0.76rem', fontWeight: 700,
-                                background: B.navyMid, color: B.white,
-                              }}>
-                                <Clock size={11} />
-                                {exp === 0 ? '0 Years of relevant experience' : `${exp} Year${exp !== 1 ? 's' : ''} of relevant experience`}
-                              </span>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                    {/* Each degree on its own numbered row with dark badge */}
+                    <DegreeRows degrees={form.required_degrees} baseMin={bMin} baseMax={bMax} />
                     <div style={{ marginTop: 8, fontSize: '.71rem', color: B.textLight, lineHeight: 1.7 }}>
                       <strong style={{ color: B.textMid }}>Note:</strong> Experience requirements adjust by qualification level — PhD (base−3 yrs) · Master's (base−1 yr) · Bachelor's (base) · Diploma (base+3 yrs)
                     </div>
                   </>
                 )}
 
-                {/* ── REQUIRED SKILLS ── */}
+                {/* Required Skills */}
                 {form.required_skills.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Competencies</h3>
@@ -1928,7 +1902,7 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── REQUIRED CERTIFICATIONS ── */}
+                {/* Required Certifications */}
                 {form.required_certifications.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Required Certifications &amp; Licences</h3>
@@ -1936,7 +1910,7 @@ export default function HRJobCreate() {
                   </>
                 )}
 
-                {/* ── PREFERRED QUALIFICATIONS ── */}
+                {/* Preferred Qualifications */}
                 {form.preferred_qualifications.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: B.text, marginBottom: 12, marginTop: 26 }}>Preferred Qualifications</h3>
