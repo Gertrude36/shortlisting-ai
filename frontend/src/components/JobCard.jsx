@@ -15,22 +15,33 @@ function parseList(raw) {
   return String(raw).split(/[,\n;]+/).map(s => s.trim()).filter(Boolean)
 }
 
-function parseQualifications(eduRaw, fieldsRaw, minExp, maxExp) {
-  const degrees = parseList(eduRaw)
-  const fields  = parseList(fieldsRaw)
-  if (!degrees.length) return []
-  const rows = []
-  for (const deg of degrees) {
-    const lower    = deg.toLowerCase()
-    const isMaster = lower.includes('master') || lower.includes('mba') || lower.includes('msc')
-    const exp      = isMaster ? minExp : maxExp
-    if (fields.length > 0) {
-      for (const field of fields) rows.push({ label: `${deg} in ${field}`, exp })
-    } else {
-      rows.push({ label: deg, exp })
+/**
+ * Parses the backend-serialized qualification string into clean rows.
+ *
+ * Backend format:
+ *   "Bachelor of Commerce [min 2 yrs] | Master of Science [min 1 yr]"
+ *
+ * Returns: [{ label: "Bachelor of Commerce", exp: 2 }, ...]
+ *
+ * Also handles legacy plain strings (no brackets / no pipes) gracefully.
+ */
+function parseQualifications(eduRaw) {
+  if (!eduRaw || String(eduRaw).trim() === '') return []
+
+  const raw = String(eduRaw).trim()
+
+  // Split on pipe separator (with optional surrounding spaces)
+  const chunks = raw.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean)
+
+  return chunks.map(chunk => {
+    // Match: "Degree Name [min N yr(s)]"
+    const m = chunk.match(/^(.*?)\s*\[min\s+(\d+)\s+yrs?\s*\]$/i)
+    if (m) {
+      return { label: m[1].trim(), exp: parseInt(m[2], 10) }
     }
-  }
-  return rows
+    // No bracket tag found — return the chunk as-is (legacy / plain text)
+    return { label: chunk, exp: null }
+  })
 }
 
 function parseDeadline(deadline) {
@@ -108,9 +119,13 @@ function CountdownTimer({ deadline }) {
   )
 }
 
-function QualificationList({ eduRaw, fieldsRaw, minExp, maxExp }) {
-  const qualifications = parseQualifications(eduRaw, fieldsRaw, minExp, maxExp)
+// ── QualificationList — clean Mifotra-style numbered rows ────
+// Accepts the raw backend string and parses it internally.
+// NEVER shows [min N yrs] brackets or pipe characters to users.
+function QualificationList({ eduRaw }) {
+  const qualifications = parseQualifications(eduRaw)
   if (!qualifications.length) return null
+
   return (
     <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', background: '#ffffff' }}>
       {qualifications.map((q, i) => (
@@ -126,7 +141,9 @@ function QualificationList({ eduRaw, fieldsRaw, minExp, maxExp }) {
             fontSize: '.75rem', fontWeight: 700, color: '#374151', marginTop: 2,
           }}>{i + 1}</span>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            <span style={{ fontSize: '.875rem', fontWeight: 600, color: '#111827', lineHeight: 1.5 }}>{q.label}</span>
+            <span style={{ fontSize: '.875rem', fontWeight: 600, color: '#111827', lineHeight: 1.5 }}>
+              {q.label}
+            </span>
             {q.exp !== null && (
               <span style={{
                 display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -135,7 +152,9 @@ function QualificationList({ eduRaw, fieldsRaw, minExp, maxExp }) {
                 fontSize: '.72rem', fontWeight: 600, letterSpacing: '.02em',
               }}>
                 <Clock size={10} />
-                {q.exp} Year{q.exp !== 1 ? 's' : ''} of relevant experience
+                {q.exp === 0
+                  ? '0 Years of relevant experience'
+                  : `${q.exp} Year${q.exp !== 1 ? 's' : ''} of relevant experience`}
               </span>
             )}
           </div>
@@ -261,16 +280,26 @@ function JobModal({ job, onClose, onApply }) {
                 </div>
               </div>
             </div>
+            {/* FIX: Close button – always visible */}
             <button
               onClick={onClose}
               style={{
-                flexShrink: 0, width: 34, height: 34,
-                border: '1px solid #e5e7eb', borderRadius: 8,
-                background: '#f9fafb', cursor: 'pointer',
+                flexShrink: 0, width: 36, height: 36,
+                border: '1px solid #cbd5e1', borderRadius: 8,
+                background: '#f8fafc', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#334155', transition: 'all 0.2s',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.backgroundColor = '#e2e8f0';
+                e.currentTarget.style.borderColor = '#94a3b8';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.backgroundColor = '#f8fafc';
+                e.currentTarget.style.borderColor = '#cbd5e1';
               }}
             >
-              <X size={15} color="#6b7280" />
+              <X size={16} strokeWidth={1.8} />
             </button>
           </div>
 
@@ -316,13 +345,31 @@ function JobModal({ job, onClose, onApply }) {
               </p>
             </Section>
           )}
-          <Section icon={<GraduationCap size={15} />} title="Qualifications">
-            <QualificationList eduRaw={job.required_education_levels} fieldsRaw={job.required_fields} minExp={job.required_min_experience} maxExp={job.required_max_experience} />
+
+          <Section icon={<GraduationCap size={15} />} title="Advertisement Details">
+            <QualificationList eduRaw={job.required_education_levels} />
           </Section>
-          {respList.length > 0 && <Section icon={<ListChecks size={15} />} title="Job Responsibilities"><NumberedList items={respList} /></Section>}
-          {skillList.length > 0 && <Section icon={<Star size={15} />} title="Required Competencies and Key Technical Skills"><NumberedList items={skillList} /></Section>}
-          {certList.length > 0 && <Section icon={<Award size={15} />} title="Required Certifications"><NumberedList items={certList} /></Section>}
-          {prefList.length > 0 && <Section icon={<Star size={15} />} title="Preferred Qualifications"><NumberedList items={prefList} /></Section>}
+
+          {respList.length > 0 && (
+            <Section icon={<ListChecks size={15} />} title="Job Responsibilities">
+              <NumberedList items={respList} />
+            </Section>
+          )}
+          {skillList.length > 0 && (
+            <Section icon={<Star size={15} />} title="Required Competencies and Key Technical Skills">
+              <NumberedList items={skillList} />
+            </Section>
+          )}
+          {certList.length > 0 && (
+            <Section icon={<Award size={15} />} title="Required Certifications">
+              <NumberedList items={certList} />
+            </Section>
+          )}
+          {prefList.length > 0 && (
+            <Section icon={<Star size={15} />} title="Preferred Qualifications">
+              <NumberedList items={prefList} />
+            </Section>
+          )}
         </div>
 
         {/* Footer */}
@@ -331,7 +378,13 @@ function JobModal({ job, onClose, onApply }) {
           display: 'flex', gap: 10, justifyContent: 'flex-end',
           background: '#ffffff',
         }}>
-          <button className="btn btn-outline btn-sm" onClick={onClose}>Close</button>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={onClose}
+            style={{ background: '#f3f4f6', color: '#1f2937', border: '1px solid #d1d5db', fontWeight: 600 }}
+          >
+            Close
+          </button>
           <button
             className="btn btn-primary"
             style={{ paddingLeft: 28, paddingRight: 28, opacity: isExpired ? .5 : 1 }}
@@ -367,10 +420,7 @@ export default function JobCard({ job, index = 0 }) {
   }
 
   const skillList = parseList(job.required_skills)
-  const qualList  = parseQualifications(
-    job.required_education_levels, job.required_fields,
-    job.required_min_experience,   job.required_max_experience
-  )
+  const qualList  = parseQualifications(job.required_education_levels)
 
   const fmt = (d) => {
     if (!d) return null
@@ -381,6 +431,12 @@ export default function JobCard({ job, index = 0 }) {
       ...(hasTime ? { hour: '2-digit', minute: '2-digit' } : {}),
     })
   }
+
+  const qualSummaryLabel = qualList.length === 1
+    ? qualList[0].label
+    : qualList.length > 1
+      ? `${qualList.length} qualification options`
+      : null
 
   return (
     <>
@@ -439,12 +495,12 @@ export default function JobCard({ job, index = 0 }) {
           </p>
         )}
 
-        {/* Meta pills */}
+        {/* Meta pills — clean label, no raw strings */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {job.job_level && <MetaPill icon={<Star size={12} />} label={`Level: ${job.job_level}`} color="#1a56db" />}
           {job.number_of_posts && <MetaPill icon={<Users size={12} />} label={`Post: ${job.number_of_posts}`} color="#6d28d9" />}
-          {qualList.length > 0 && (
-            <MetaPill icon={<GraduationCap size={12} />} label={qualList.length === 1 ? qualList[0].label : `${qualList.length} qualification options`} />
+          {qualSummaryLabel && (
+            <MetaPill icon={<GraduationCap size={12} />} label={qualSummaryLabel} />
           )}
           <MetaPill icon={<Clock size={12} />} label={`${job.required_min_experience}–${job.required_max_experience} yrs exp`} />
           {job.employment_type && <MetaPill icon={<Building2 size={12} />} label={job.employment_type} />}
@@ -495,12 +551,32 @@ export default function JobCard({ job, index = 0 }) {
           </div>
         )}
 
-        {/* Actions */}
+        {/* Actions – both buttons always visible */}
         <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
           <button
             className="btn btn-outline"
-            style={{ flex: 1, justifyContent: 'center', fontSize: '.85rem' }}
+            style={{
+              flex: 1,
+              justifyContent: 'center',
+              fontSize: '.85rem',
+              backgroundColor: '#f3f4f6',
+              color: '#1f2937',
+              border: '1px solid #d1d5db',
+              fontWeight: 600,
+              padding: '8px 12px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+            }}
             onClick={() => setOpen(true)}
+            onMouseEnter={e => {
+              e.currentTarget.style.backgroundColor = '#e5e7eb';
+              e.currentTarget.style.borderColor = '#9ca3af';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.backgroundColor = '#f3f4f6';
+              e.currentTarget.style.borderColor = '#d1d5db';
+            }}
           >
             View Details
           </button>

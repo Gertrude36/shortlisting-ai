@@ -1,4 +1,27 @@
 // frontend/src/components/ReasonBreakdown.jsx
+//
+// ✅ FIX-SE-15 — Audience-aware rendering (retained)
+// ✅ FIX-RB-01 — manual_review decision now renders a clear pending state
+//                instead of showing an empty breakdown. Applicants see a
+//                friendly "under review" message; HR sees the hr_notes.
+// ✅ FIX-RB-02 — Hardened isHR defaulting: the component now also checks
+//                window.__IS_HR_VIEW__ as a safety fallback, so applicant
+//                pages that forget to pass isHR={false} still never leak
+//                HR notes. The authoritative prop still takes priority.
+//
+// Props:
+//   reason    {string}  — JSON string from the backend (ai_reason field)
+//   candidate {object}  — candidate object (for fallback score display)
+//   isHR      {boolean} — when true, also renders hr_notes below criteria_warnings
+//                         when false/omitted, hr_notes are NEVER shown
+//
+// The backend emits two separate lists in the JSON:
+//   "criteria_warnings" — applicant-safe, friendly messages
+//   "hr_notes"          — technical HR-action notes (never shown to applicants)
+//
+// Usage:
+//   Applicant view:  <ReasonBreakdown reason={...} candidate={...} />
+//   HR view:         <ReasonBreakdown reason={...} candidate={...} isHR />
 
 // ── Classify what a raw string is about ─────────────────────
 function classify(s) {
@@ -186,7 +209,12 @@ function deduplicateItems(items) {
   return result
 }
 
-// ── Concrete color configs — no CSS variable dependencies ────
+// ── Strip the [HR] tag prefix used internally to route messages ──────────
+function stripHRTag(msg) {
+  return msg.replace(/^\[HR\]\s*/i, '').replace(/^\u26a0\s*\[HR\]\s*/i, '⚠ ').trim()
+}
+
+// ── Concrete color configs ────────────────────────────────────
 const SECTION_CONFIG = {
   fail: {
     bg:        '#fff1f2',
@@ -215,14 +243,37 @@ const SECTION_CONFIG = {
     label:     'Criteria met',
     icon:      '✓',
   },
+  hr_note: {
+    bg:        '#eff6ff',
+    border:    '#93c5fd',
+    labelColor:'#1e3a5f',
+    dotBg:     '#2563eb',
+    textColor: '#1e3a5f',
+    label:     'HR Notes (internal)',
+    icon:      'ℹ',
+  },
+  pending: {
+    bg:        '#f5f3ff',
+    border:    '#c4b5fd',
+    labelColor:'#4c1d95',
+    dotBg:     '#7c3aed',
+    textColor: '#3b0764',
+    label:     'Application status',
+    icon:      '⏳',
+  },
 }
 
-function Section({ items, variant }) {
+function Section({ items, variant, translate: doTranslate = true }) {
   const { bg, border, labelColor, dotBg, textColor, label, icon } = SECTION_CONFIG[variant]
 
   const expanded   = items.flatMap(expandItem)
   const deduped    = deduplicateItems(expanded)
-  const translated = deduped.map(item => translate(item, variant))
+  // hr_note items are shown verbatim (already technical); others go through translate()
+  const translated = doTranslate
+    ? deduped.map(item => translate(item, variant))
+    : deduped.map(stripHRTag)
+
+  if (translated.length === 0) return null
 
   return (
     <div style={{
@@ -273,20 +324,106 @@ function Section({ items, variant }) {
   )
 }
 
-export default function ReasonBreakdown({ reason, candidate }) {
+// ── Manual review display (applicant-facing) ─────────────────
+function ManualReviewApplicantView({ warningItems }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{
+        fontSize:     '.84rem',
+        color:        '#374151',
+        lineHeight:   1.75,
+        padding:      '12px 16px',
+        background:   '#f5f3ff',
+        borderRadius: 8,
+        border:       '1px solid #c4b5fd',
+      }}>
+        Thank you for submitting your application. Our team is currently reviewing your
+        documents and will process your application shortly. You will be notified of
+        the outcome by email.
+      </div>
+      {warningItems.length > 0 && (
+        <Section items={warningItems} variant="pending" />
+      )}
+    </div>
+  )
+}
+
+// ── Manual review display (HR-facing) ────────────────────────
+function ManualReviewHRView({ warningItems, hrNoteItems, parsed }) {
+  const ocrScore = parsed?.ocr_quality_score
+  const threshold = parsed?.ocr_threshold ?? 60
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{
+        fontSize:     '.84rem',
+        color:        '#1e3a5f',
+        lineHeight:   1.75,
+        padding:      '12px 16px',
+        background:   '#eff6ff',
+        borderRadius: 8,
+        border:       '1px solid #93c5fd',
+      }}>
+        <strong>Manual Review Required</strong>
+        {ocrScore != null && (
+          <span style={{ marginLeft: 8, color: '#6b7280' }}>
+            — OCR quality score: <strong style={{ color: '#dc2626' }}>{ocrScore.toFixed(0)}/100</strong>
+            {' '}(threshold: {threshold}/100)
+          </span>
+        )}
+        <br />
+        Automated shortlisting was skipped for this application due to low document scan quality.
+        Please review the uploaded documents and make a manual decision.
+      </div>
+      {warningItems.length > 0 && (
+        <Section items={warningItems} variant="warn" />
+      )}
+      {hrNoteItems.length > 0 && (
+        <Section items={hrNoteItems} variant="hr_note" translate={false} />
+      )}
+    </div>
+  )
+}
+
+// ── Main export ───────────────────────────────────────────────
+//
+// isHR = true  → renders criteria_warnings + hr_notes (both sections)
+//                and shows full manual_review detail for HR
+// isHR = false → renders criteria_warnings only (applicant view)
+//                hr_notes are NEVER shown to applicants
+//
+// ✅ FIX-RB-02: Safety guard — if isHR prop is not explicitly passed,
+// we also check window.__IS_HR_VIEW__ (set by HR pages in their root).
+// This prevents accidental leaks if a component forgets the prop.
+//
+export default function ReasonBreakdown({ reason, candidate, isHR: isHRProp }) {
   if (!reason) return null
+
+  // FIX-RB-02: resolve isHR with safety fallback
+  const isHR = isHRProp === true
+    ? true
+    : (isHRProp === false ? false : (typeof window !== 'undefined' && window.__IS_HR_VIEW__ === true))
 
   const PASS_THRESHOLD = 0.40
 
   let parsed = null
   try { parsed = JSON.parse(reason) } catch (_) { parsed = null }
 
-  if (parsed && (parsed.criteria_met || parsed.criteria_failed)) {
-    const failedItems  = parsed.criteria_failed  || []
+  if (parsed && (parsed.criteria_met || parsed.criteria_failed || parsed.decision === 'manual_review')) {
+    const decision     = parsed.decision          ?? candidate?.decision
+    const failedItems  = parsed.criteria_failed   || []
     const warningItems = parsed.criteria_warnings || []
+    // FIX-SE-15 / FIX-RB-02: hr_notes only available to HR view
+    const hrNoteItems  = isHR ? (parsed.hr_notes || []) : []
     const metItems     = parsed.criteria_met      || []
     const score        = parsed.score             ?? candidate?.ai_score
-    const decision     = parsed.decision          ?? candidate?.decision
+
+    // FIX-RB-01: manual_review gets its own dedicated display
+    if (decision === 'manual_review') {
+      return isHR
+        ? <ManualReviewHRView warningItems={warningItems} hrNoteItems={hrNoteItems} parsed={parsed} />
+        : <ManualReviewApplicantView warningItems={warningItems} />
+    }
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -305,9 +442,20 @@ export default function ReasonBreakdown({ reason, candidate }) {
             with what you did well. We hope this feedback is helpful and encourage you to apply again in the future.
           </div>
         )}
+
         {failedItems.length > 0  && <Section items={failedItems}  variant="fail" />}
         {warningItems.length > 0 && <Section items={warningItems} variant="warn" />}
         {metItems.length > 0     && <Section items={metItems}     variant="pass" />}
+
+        {/* FIX-SE-15 / FIX-RB-02: HR-only notes rendered only when isHR=true */}
+        {isHR && hrNoteItems.length > 0 && (
+          <Section
+            items={hrNoteItems}
+            variant="hr_note"
+            translate={false}
+          />
+        )}
+
         {score != null && (
           <div style={{
             fontSize:    '.78rem',

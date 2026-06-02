@@ -1,14 +1,14 @@
 <mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
   <diagram name="Page-1" id="lSlS8-I9Y_Vq0igIC458">
-    <mxGraphModel dx="786" dy="516" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+    <mxGraphModel dx="925" dy="607" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
         <mxCell id="-cG94O7dNTnSK4evAubz-1" parent="1" style="swimlane;horizontal=0;whiteSpace=wrap;html=1;rotation=90;shadow=1;labelBackgroundColor=none;fillColor=#7D99E8;strokeColor=#000000;" value="&lt;font style=&quot;color: rgb(0, 0, 0);&quot;&gt;Presentation Layer (React.js Frontend UI)&lt;/font&gt;" vertex="1">
-          <mxGeometry height="311.25" width="100.93" x="246.23000000000002" y="160" as="geometry" />
+          <mxGeometry height="311.25" width="130.65" x="266.86" y="150" as="geometry" />
         </mxCell>
-        <mxCell id="-cG94O7dNTnSK4evAubz-3" parent="-cG94O7dNTnSK4evAubz-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;fontColor=#5C5C5C;" value="&lt;ul&gt;&lt;li&gt;&lt;b&gt;&lt;font style=&quot;color: rgb(0, 0, 0);&quot;&gt;HR Dashboard&lt;/font&gt;&lt;/b&gt;&lt;/li&gt;&lt;li&gt;&lt;b&gt;&lt;font style=&quot;color: rgb(0, 0, 0);&quot;&gt;Applicant Dashboard&lt;/font&gt;&lt;/b&gt;&lt;/li&gt;&lt;/ul&gt;" vertex="1">
-          <mxGeometry height="42" width="248.76" x="-117.75999999999999" y="150.00000000000003" as="geometry" />
+        <mxCell id="-cG94O7dNTnSK4evAubz-3" parent="-cG94O7dNTnSK4evAubz-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;fontColor=#5C5C5C;" value="&lt;ul&gt;&lt;li&gt;&lt;font color=&quot;#000000&quot;&gt;&lt;b&gt;SYSTEM ADMINISTATOR Dashboard&lt;/b&gt;&lt;/font&gt;&lt;/li&gt;&lt;li&gt;&lt;font color=&quot;#000000&quot;&gt;&lt;b&gt;HR Dashboard&lt;/b&gt;&lt;/font&gt;&lt;/li&gt;&lt;li&gt;&lt;font color=&quot;#000000&quot;&gt;&lt;b&gt;APPLICANT Dashboard&lt;/b&gt;&lt;/font&gt;&lt;/li&gt;&lt;/ul&gt;" vertex="1">
+          <mxGeometry height="42" width="270.13" x="-106.35" y="155.12" as="geometry" />
         </mxCell>
         <mxCell id="-cG94O7dNTnSK4evAubz-4" parent="1" style="swimlane;horizontal=0;whiteSpace=wrap;html=1;rotation=90;shadow=1;labelBackgroundColor=none;fillColor=#9AFCAB;strokeColor=#000000;" value="Application Layer (Flask Backend)" vertex="1">
           <mxGeometry height="313.81" width="91.8" x="250.8" y="312.66" as="geometry" />

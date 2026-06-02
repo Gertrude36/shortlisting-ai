@@ -1,11 +1,12 @@
 /**
  * frontend/src/pages/Login.jsx
  *
- * FIX: Applicants were navigated to /jobs after login, but that route does
- * not exist in App.jsx (catch-all redirects to /). Fixed to use /applicant
- * which is the correct protected route for applicants.
+ * FIXED: Added admin role redirect to /admin.
+ * Each role now routes correctly after login:
+ *   admin     → /admin
+ *   hr        → /hr
+ *   applicant → /applicant
  */
-
 import { useState } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
@@ -44,9 +45,10 @@ export default function Login() {
       login(data)
       toast.success(`Welcome back, ${data.full_name || 'there'}!`)
 
-      // FIX: /jobs does not exist. Route applicants to /applicant.
-      if (data.role === 'hr') navigate('/hr', { replace: true })
-      else navigate('/applicant', { replace: true })
+      // FIXED: Route each role to the correct dashboard
+      if (data.role === 'admin')     navigate('/admin',     { replace: true })
+      else if (data.role === 'hr')   navigate('/hr',        { replace: true })
+      else                           navigate('/applicant', { replace: true })
 
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Invalid email or password.')

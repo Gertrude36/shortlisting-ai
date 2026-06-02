@@ -6,13 +6,13 @@
  *   POST /auth/reset-password  with { token, new_password }.
  *
  * FIXES APPLIED:
- *   ✅ FIX 1 — Token extraction now handles BOTH query string AND hash-based routing
+ *   FIX 1 — Token extraction now handles BOTH query string AND hash-based routing
  *              e.g. /#/reset-password?token=... (hash router) works too
- *   ✅ FIX 2 — Token is URL-decoded before sending to backend
+ *    FIX 2 — Token is URL-decoded before sending to backend
  *              (some email clients encode + as %2B, breaking JWT)
- *   ✅ FIX 3 — Clearer expired/invalid token error with direct link to request new one
- *   ✅ FIX 4 — Password strength rules match backend exactly
- *   ✅ FIX 5 — Auto-redirect to login after success (5s countdown)
+ *    FIX 3 — Clearer expired/invalid token error with direct link to request new one
+ *    FIX 4 — Password strength rules match backend exactly
+ *    FIX 5 — Auto-redirect to login after success (5s countdown)
  *
  * WIRE-UP in your router (App.jsx / main.jsx):
  *   import ResetPassword from "./pages/ResetPassword";
@@ -24,7 +24,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-/* ✅ FIX 1: Also try extracting token from window.location for hash routers */
+/* FIX 1: Also try extracting token from window.location for hash routers */
 function getTokenFromUrl() {
   // First try react-router's useSearchParams (works for BrowserRouter)
   // This is handled in the component — here we handle hash router fallback
@@ -52,7 +52,7 @@ export default function ResetPassword() {
   const [searchParams]            = useSearchParams();
   const navigate                  = useNavigate();
 
-  // ✅ FIX 1 & 2: Get token from react-router OR window.location, then URL-decode it
+  //  FIX 1 & 2: Get token from react-router OR window.location, then URL-decode it
   const rawToken = searchParams.get("token") || getTokenFromUrl() || "";
   const token    = decodeURIComponent(rawToken);  // fixes %2B → + etc.
 
@@ -114,7 +114,7 @@ export default function ResetPassword() {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        // ✅ FIX 3: Clear expired/invalid token error message
+        // FIX 3: Clear expired/invalid token error message
         if (res.status === 400) {
           setError(
             data.detail ||
@@ -141,7 +141,7 @@ export default function ResetPassword() {
     return (
       <div style={styles.page}>
         <div style={styles.card}>
-          <div style={styles.iconWrap}><span style={styles.iconBig}>✅</span></div>
+          <div style={styles.iconWrap}><span style={styles.iconBig}></span></div>
           <h2 style={styles.title}>Password Reset Successfully!</h2>
           <p style={styles.body}>
             Your password has been updated. You can now sign in with your new
@@ -166,11 +166,11 @@ export default function ResetPassword() {
         <h2 style={styles.title}>Set New Password</h2>
         <p style={styles.subtitle}>Choose a strong password for your account.</p>
 
-        {/* ✅ FIX 3: If token missing, show prominent error with action */}
+        {/* FIX 3: If token missing, show prominent error with action */}
         {tokenMissing ? (
           <div style={styles.tokenErrorBox}>
             <p style={{ margin: "0 0 12px", fontWeight: 600, color: "#d63031" }}>
-              ⚠ Reset link is missing or invalid
+              Reset link is missing or invalid
             </p>
             <p style={{ margin: "0 0 16px", fontSize: 13, color: "#5a6480", lineHeight: 1.6 }}>
               This usually happens when the link was broken by your email client.
@@ -204,7 +204,7 @@ export default function ResetPassword() {
                 tabIndex={-1}
                 aria-label="Toggle password visibility"
               >
-                {showPw ? "🙈" : "👁️"}
+                
               </button>
             </div>
 

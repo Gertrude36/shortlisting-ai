@@ -45,7 +45,6 @@ export default function HomePage() {
           position:      'relative',
           overflow:      'hidden',
         }}>
-          {/* Decorative background circles */}
           <div style={{
             position:     'absolute', top: -60, right: -60,
             width:        320, height: 320,
@@ -88,7 +87,7 @@ export default function HomePage() {
               lineHeight:  1.15,
               maxWidth:    600,
             }}>
-              Find and apply for jobs — fast and fairly
+              Find and apply for jobs fast and fairly
             </h1>
 
             <p style={{
@@ -101,14 +100,13 @@ export default function HomePage() {
               Browse available positions and apply through a transparent, AI-powered shortlisting system.
             </p>
 
-            {/* Search */}
             <div style={{ maxWidth: 480, position: 'relative', marginBottom: 36 }}>
               <Search size={16} style={{
                 position:  'absolute',
                 left:      14,
                 top:       '50%',
                 transform: 'translateY(-50%)',
-                color:     '#9ca3af',
+                color:     '#ecf0f7',
               }} />
               <input
                 type="text"
@@ -129,7 +127,6 @@ export default function HomePage() {
               />
             </div>
 
-            {/* Stats */}
             <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
               {[
                 { value: jobs.length || 0, label: 'Jobs Available' },
@@ -204,7 +201,7 @@ export default function HomePage() {
                 border:    '1px solid #e5e7eb',
                 borderRadius: 12,
               }}>
-                <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>🔍</div>
+                <div style={{ fontSize: '2.5rem', marginBottom: 12 }}></div>
                 <h3 style={{ color: '#111827', marginBottom: 8 }}>No positions found</h3>
                 <p style={{ color: '#6b7280', marginBottom: 20 }}>Try adjusting your search terms.</p>
                 <button
@@ -258,10 +255,10 @@ export default function HomePage() {
               gap:                 20,
             }}>
               {[
-                { step: '01', title: 'Browse Jobs',        desc: 'Find a position that matches your skills and experience.',      icon: '🔍' },
-                { step: '02', title: 'Submit Application',  desc: 'Fill in your details and upload the required documents.',       icon: '📄' },
-                { step: '03', title: 'System Evaluation',  desc: 'Our AI reviews your application fairly and transparently.',     icon: '🤖' },
-                { step: '04', title: 'Receive Results',    desc: 'Get notified of your shortlisting decision with full feedback.', icon: '✅' },
+                { step: '01', title: 'Browse Jobs',        desc: 'Find a position that matches your skills and experience.'},
+                { step: '02', title: 'Submit Application',  desc: 'Fill in your details and upload the required documents.'},
+                { step: '03', title: 'System Evaluation',  desc: 'Our AI reviews your application fairly and transparently.'},
+                { step: '04', title: 'Receive Results',    desc: 'Get notified of your shortlisting decision with full feedback.'},
               ].map(({ step, title, desc, icon }) => (
                 <div key={step} style={{
                   background:   '#f9fafb',
@@ -359,7 +356,6 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ── FOOTER ── */}
         <footer style={{
           background: '#1e293b',
           color:      '#94a3b8',
@@ -367,7 +363,7 @@ export default function HomePage() {
           textAlign:  'center',
           fontSize:   '.85rem',
         }}>
-          Recruitment System © {new Date().getFullYear()}
+          Recruitment System {new Date().getFullYear()}
         </footer>
       </div>
     </>

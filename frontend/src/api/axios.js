@@ -1,28 +1,11 @@
 /**
- * frontend/src/api/axios.js — v5.3.0
- *
- * FIXES IN v5.3.0 (over v5.2.0):
- *
- *   ✅ FIX NET-4 — /profile/documents now correctly matched by
- *            isDocumentUpload(). Previously only /applications/:id/documents
- *            was matched, so /profile/documents skipped the wake gate,
- *            the upload semaphore, and the 150s timeout — causing immediate
- *            network failures on cold starts and the "Re-arming wake gate"
- *            log spam seen in the console.
- *
- *   ✅ FIX NET-5 — Retry logic no longer uses Promise.race(wakeGate, sleep).
- *            Previously the short sleep (2s/4s/6s) always won the race,
- *            meaning retries fired while the server was still waking up.
- *            Now retries await the wake gate FIRST (up to 45s), then add
- *            a small extra delay before re-sending, so the request only
- *            goes out once the server is confirmed alive.
- *
- *   ✅ FIX NET-6 — Retry waits changed from (retryCount × 2s) to a fixed
- *            staggered schedule (3s / 5s / 8s) applied AFTER the wake gate
- *            resolves. This prevents thundering-retries while still giving
- *            the server a moment to stabilise after waking.
- *
- * All previous v5.2.0 fixes retained unchanged.
+ * frontend/src/api/axios.js — v5.4.1
+ * ─────────────────────────────────────────────────────────────────────────────
+ * FIX in v5.4.1:
+ *   - Replaced clearInterval() with clearTimeout() for wake pinging timers
+ *   - Renamed _wakeInterval → _wakeTimer to avoid confusion
+ *   - Added _slotPreacquired flag for upload semaphore (cleaner release logic)
+ *   - Reset _slotPreacquired on retry so each attempt acquires a fresh slot
  */
 
 import axios from 'axios'
@@ -57,12 +40,17 @@ export function onServerStatusChange(cb) {
   return () => _statusListeners.delete(cb)
 }
 
+// Immediately broadcast 'waking' on page load (non-local only)
+if (!_IS_LOCAL) {
+  setTimeout(() => _setServerStatus('waking'), 0)
+}
+
 // ── Re-armable wake gate ───────────────────────────────────────────────────
+const WAKE_SAFETY_TIMEOUT_MS = 30_000
+
 let _wakeGatePromise      = null
 let _wakeGateResolve      = null
 let _serverConfirmedAwake = _IS_LOCAL
-
-const WAKE_SAFETY_TIMEOUT_MS = 45_000
 
 function _armWakeGate() {
   _serverConfirmedAwake = false
@@ -78,7 +66,7 @@ function _armWakeGate() {
     setTimeout(() => {
       if (!_serverConfirmedAwake) {
         console.warn(
-          '[axios] Wake gate safety timeout (45s) — unblocking uploads without confirming server awake.'
+          '[axios] Wake gate safety timeout (30s) — unblocking requests without confirming server awake.'
         )
         resolve()
       }
@@ -99,9 +87,9 @@ export function getCurrentWakeGate() {
 export function rearmWakeGate() {
   if (_IS_LOCAL) return
   console.log('[axios] Re-arming wake gate — server may have gone back to sleep.')
-  if (_wakeInterval) {
-    clearInterval(_wakeInterval)
-    _wakeInterval = null
+  if (_wakeTimer) {
+    clearTimeout(_wakeTimer)
+    _wakeTimer = null
   }
   _backoffIndex = 0
   _armWakeGate()
@@ -135,7 +123,7 @@ export function releaseUploadSlot() {
 const BACKOFF_INTERVALS = [1500, 1500, 2000, 2000, 3000, 3000, 5000]
 
 let _wakePending  = false
-let _wakeInterval = null
+let _wakeTimer    = null   // ✅ renamed from _wakeInterval
 let _backoffIndex = 0
 
 function _knockServer() {
@@ -162,9 +150,7 @@ async function _checkHealth() {
       cache:  'no-store',
       signal: AbortSignal.timeout(8_000),
     })
-    if (res.ok) {
-      if (_wakeGateResolve) _wakeGateResolve()
-    }
+    if (res.ok && _wakeGateResolve) _wakeGateResolve()
   } catch {
     // Still booting — next interval will retry.
   }
@@ -172,7 +158,10 @@ async function _checkHealth() {
 
 function _startWakePinging() {
   if (_IS_LOCAL) return
-  if (_wakeInterval) { clearInterval(_wakeInterval); _wakeInterval = null }
+  if (_wakeTimer) {
+    clearTimeout(_wakeTimer)
+    _wakeTimer = null
+  }
 
   _backoffIndex = 0
 
@@ -185,7 +174,7 @@ function _startWakePinging() {
     const delay = BACKOFF_INTERVALS[Math.min(_backoffIndex, BACKOFF_INTERVALS.length - 1)]
     _backoffIndex++
 
-    _wakeInterval = setTimeout(() => {
+    _wakeTimer = setTimeout(() => {
       if (_serverConfirmedAwake) return
       _knockServer()
       _checkHealth()
@@ -247,10 +236,6 @@ const isPublic = (url = '', method = '') => {
   )
 }
 
-// ✅ FIX NET-4: Added /profile/documents to the document upload matcher.
-// Previously only /applications/:id/documents was matched, so /profile/documents
-// bypassed the wake gate, upload semaphore, and 150s timeout entirely —
-// causing the "Network error on POST /profile/documents" console errors.
 const isDocumentUpload = (url = '', method = '') => {
   if (method.toUpperCase() !== 'POST') return false
   const path = url.split('?')[0]
@@ -260,42 +245,38 @@ const isDocumentUpload = (url = '', method = '') => {
   )
 }
 
-// ✅ FIX NET-1 (v5.2.0): Detect shortlist-all requests for extended timeout.
 const isShortlistAll = (url = '', method = '') =>
   method.toUpperCase() === 'POST' &&
   /\/hr\/shortlist-all\/\d+$/.test(url.split('?')[0])
 
-// Routes where network errors should NOT trigger rearmWakeGate().
-// ✅ FIX NET-2 (v5.2.0): shortlist-all — server is alive, just slow.
 const isBackgroundRoute = (url = '') =>
   /\/(auth\/me|jobs)($|\?)/.test(url) ||
   /\/hr\/shortlist-all\/\d+$/.test(url)
 
-// ✅ FIX NET-6: Staggered post-wakeup delays applied AFTER the gate resolves.
-// Gives the server a moment to stabilise before the retry hits it.
-const RETRY_POST_WAKE_DELAYS = [3_000, 5_000, 8_000]
-
+const RETRY_POST_WAKE_DELAYS = [1_000, 2_000, 3_000]
 const _sleep = ms => new Promise(r => setTimeout(r, ms))
 
 // ── Request interceptor ────────────────────────────────────────────────────
 api.interceptors.request.use(
   async (config) => {
-    // ✅ FIX NET-1 (v5.2.0): Give shortlist-all a generous 180s timeout.
     if (isShortlistAll(config.url, config.method)) {
       config.timeout = 180_000
       config._isShortlistAll = true
     }
 
     if (isDocumentUpload(config.url, config.method)) {
-      // Always wait for the server to be awake before sending documents.
       await getCurrentWakeGate()
-
+      // ✅ Acquire upload slot and mark it on config
       if (!config._slotPreacquired) {
         await waitForUploadSlot()
+        config._slotPreacquired = true
       }
-
       config._serializedUpload = true
       config.timeout = 150_000
+    } else if (!isPublic(config.url, config.method)) {
+      if (!_serverConfirmedAwake) {
+        await getCurrentWakeGate()
+      }
     }
 
     if (!isPublic(config.url, config.method)) {
@@ -318,8 +299,10 @@ let _redirecting = false
 
 api.interceptors.response.use(
   response => {
-    if (response.config?._serializedUpload && !response.config?._slotPreacquired) {
+    // ✅ Release upload slot only if it was acquired
+    if (response.config?._serializedUpload && response.config?._slotPreacquired) {
       releaseUploadSlot()
+      response.config._slotPreacquired = false   // reset for potential retry
     }
     if (!_serverConfirmedAwake && _wakeGateResolve) {
       _wakeGateResolve()
@@ -328,8 +311,10 @@ api.interceptors.response.use(
   },
 
   async error => {
-    if (error.config?._serializedUpload && !error.config?._slotPreacquired) {
+    // ✅ Release upload slot if it was acquired
+    if (error.config?._serializedUpload && error.config?._slotPreacquired) {
       releaseUploadSlot()
+      error.config._slotPreacquired = false   // reset so retry can re-acquire
     }
 
     if (!error.response) {
@@ -339,20 +324,14 @@ api.interceptors.response.use(
         return Promise.reject(error)
       }
 
-      // ✅ FIX NET-2 (v5.2.0): Don't re-arm wake gate for shortlist-all.
       if (!isBackgroundRoute(config.url || '')) {
         rearmWakeGate()
       }
 
       if (isDocumentUpload(config.url, config.method)) {
-        // Document uploads already awaited the wake gate in the request
-        // interceptor. If we still got a network error the server went back
-        // to sleep mid-session. Release the slot and surface the error so
-        // the UI can prompt the user to retry manually.
         return Promise.reject(error)
       }
 
-      // ✅ FIX NET-3 (v5.2.0): Don't retry shortlist-all on network error.
       if (config._isShortlistAll) {
         console.warn('[axios] shortlist-all timed out or lost connection — not retrying.')
         return Promise.reject(error)
@@ -361,10 +340,6 @@ api.interceptors.response.use(
       config._retryCount = (config._retryCount || 0) + 1
       if (config._retryCount > 3) return Promise.reject(error)
 
-      // ✅ FIX NET-5 + NET-6: Wait for the wake gate to resolve FIRST (up
-      // to 45s), then add a small stagger delay before re-sending.
-      // Previously we raced the gate against a short sleep (2s/4s/6s) which
-      // always won, so retries fired while the server was still sleeping.
       const postWakeDelay = RETRY_POST_WAKE_DELAYS[config._retryCount - 1]
 
       console.warn(

@@ -5,11 +5,11 @@
  * Calls  POST /auth/forgot-password  with { email }.
  *
  * FIXES APPLIED:
- *   ✅ FIX 1 — Clearer success message with spam folder reminder
- *   ✅ FIX 2 — Network error shown properly (was silently failing)
- *   ✅ FIX 3 — Dev hint only in local dev, never in production build
- *   ✅ FIX 4 — Email input validation before hitting the server
- *   ✅ FIX 5 — "Resend email" button on success screen so user isn't stuck
+ *   FIX 1 — Clearer success message with spam folder reminder
+ *   FIX 2 — Network error shown properly (was silently failing)
+ *   FIX 3 — Dev hint only in local dev, never in production build
+ *   FIX 4 — Email input validation before hitting the server
+ *   FIX 5 — "Resend email" button on success screen so user isn't stuck
  *
  * WIRE-UP in your router (App.jsx / main.jsx):
  *   import ForgotPassword from "./pages/ForgotPassword";
@@ -87,7 +87,7 @@ export default function ForgotPassword() {
             Don't see it? Check your <strong>spam / junk folder</strong>.
           </p>
 
-          {/* ✅ FIX 5: Resend button so user isn't stuck */}
+          {/* FIX 5: Resend button so user isn't stuck */}
           <button
             onClick={() => { setSuccess(false); setError(""); }}
             style={styles.resendBtn}
@@ -95,7 +95,7 @@ export default function ForgotPassword() {
             Didn't receive it? Send again
           </button>
 
-          {/* ✅ FIX 3: Dev hint only in local dev (npm run dev), never in production */}
+          {/* FIX 3: Dev hint only in local dev (npm run dev), never in production */}
           {IS_DEV && (
             <div style={styles.devHint}>
               🛠 <strong>Dev mode:</strong> Email may not be delivered. Check
@@ -115,7 +115,7 @@ export default function ForgotPassword() {
     <div style={styles.page}>
       <div style={styles.card}>
         <div style={styles.iconWrap}>
-          <span style={styles.iconBig}>🔑</span>
+          <span style={styles.iconBig}></span>
         </div>
         <h2 style={styles.title}>Forgot your password?</h2>
         <p style={styles.subtitle}>

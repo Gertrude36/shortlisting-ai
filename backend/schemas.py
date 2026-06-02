@@ -1,34 +1,3 @@
-"""
-backend/schemas.py
-────────────────────────────────────────────────────────────────
-FIXES APPLIED:
-  ✅ FIX 1 (CRITICAL) — ApplicationResponse.submitted_at is now Optional[datetime].
-  ✅ FIX 2 — CandidateListItem.submitted_at also made Optional.
-  ✅ FIX 3 — deadline changed from Optional[date] to Optional[datetime].
-  ✅ FIX 4 — field_validator on JobResponse.deadline safely coerces legacy date values.
-  ✅ FIX 5 — DocumentOut accepts "experience" doc_type automatically (plain str).
-  ✅ FIX 6 — RegisterRequest now accepts optional hr_code field.
-             Backend validates it against HR_INVITE_CODE env var.
-             Applicant registration never needs hr_code.
-  ✅ FIX 7 — CandidateListItem now exposes ALL applicant fields so
-             HR can see complete candidate data: phone, address, date_of_birth,
-             gender, skills, certifications, graduation_year, documents,
-             and profile_complete flag.
-  ✅ FIX 8 (CRITICAL — 500 FIX) — ApplicationResponse.decision now has a
-             field_validator that coerces DecisionStatus enum instances to their
-             string .value. Without this, SQLAlchemy returns a DecisionStatus
-             enum object and Pydantic (depending on version) fails to serialize
-             it → 500 Internal Server Error on every POST /applications response.
-  ✅ FIX 9 (CRITICAL — 500 FIX) — ApplicationResponse.documents now defaults
-             to an empty list and uses a field_validator that safely handles
-             None, unloaded SQLAlchemy relationships (InstrumentedList), and
-             plain lists. This prevents DetachedInstanceError / MissingGreenlet
-             when the ORM session is closed before the response is serialized.
-  ✅ FIX 10 — DocumentOut.doc_type and DocumentOut.uploaded_at are now both
-             optional-safe: doc_type falls back to empty string, uploaded_at
-             is Optional[datetime] to handle rows where the column is NULL.
-  ✅ DEPLOY FIX — from __future__ import annotations at line 1.
-"""
 from __future__ import annotations
 
 from datetime import datetime, date
@@ -46,7 +15,7 @@ class RegisterRequest(BaseModel):
     email:     EmailStr
     password:  str
     role:      str        = "applicant"
-    hr_code:   Optional[str] = None   # ✅ FIX 6: Required only when role == "hr"
+    hr_code:   Optional[str] = None
 
     @field_validator("full_name")
     @classmethod
@@ -72,8 +41,8 @@ class RegisterRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def valid_role(cls, v: str) -> str:
-        if v not in ("applicant", "hr"):
-            raise ValueError("role must be 'applicant' or 'hr'")
+        if v not in ("applicant", "hr", "admin"):
+            raise ValueError("role must be 'applicant', 'hr', or 'admin'")
         return v
 
 
@@ -88,6 +57,25 @@ class TokenResponse(BaseModel):
     role:         str
     user_id:      int
     full_name:    str
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN
+# ═══════════════════════════════════════════════════════════════
+
+class AdminInviteHRRequest(BaseModel):
+    email:     EmailStr
+    full_name: str = "HR Applicant"
+
+
+class UserListItem(BaseModel):
+    id:         int
+    full_name:  str
+    email:      str
+    role:       str
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -182,16 +170,13 @@ class ApplicationCreate(BaseModel):
 
 class DocumentOut(BaseModel):
     id:            int
-    # ✅ FIX 10: str fallback so enum values serialize cleanly
     doc_type:      str
     original_name: Optional[str] = None
-    # ✅ FIX 10: Optional — some rows may have NULL uploaded_at
     uploaded_at:   Optional[datetime] = None
 
     @field_validator("doc_type", mode="before")
     @classmethod
     def coerce_doc_type(cls, v: Any) -> str:
-        """Coerce DocumentType enum → plain string."""
         if v is None:
             return ""
         try:
@@ -215,60 +200,30 @@ class ApplicationResponse(BaseModel):
     experience_years: int
     skills:           str
     certifications:   Optional[str]
-    # ✅ FIX 8 (CRITICAL): typed as str; validator below coerces enum → value
     decision:         str           = "pending"
     ai_score:         Optional[float]
     ai_reason:        Optional[str]
     doc_verified:     bool          = False
     submitted_at:     Optional[datetime] = None
     shortlisted_at:   Optional[datetime] = None
-    # ✅ FIX 9 (CRITICAL): always a list, never triggers lazy-load
     documents:        List[DocumentOut]  = []
 
     @field_validator("decision", mode="before")
     @classmethod
     def coerce_decision(cls, v: Any) -> str:
-        """
-        ✅ FIX 8: Coerce DecisionStatus enum → plain string.
-
-        SQLAlchemy returns a DecisionStatus enum instance from the ORM.
-        Pydantic's from_attributes mode does NOT automatically call .value
-        on enum columns, so without this validator the serializer receives
-        e.g. DecisionStatus.pending and — depending on the Pydantic/SQLAlchemy
-        version combination — either raises a ValidationError or produces the
-        repr string 'DecisionStatus.pending' instead of 'pending'.
-        Both cases result in a 500 on the frontend.
-        """
         if v is None:
             return "pending"
         try:
-            return v.value          # DecisionStatus enum → "pending" / "shortlisted" / "not_shortlisted"
+            return v.value
         except AttributeError:
             return str(v)
 
     @field_validator("documents", mode="before")
     @classmethod
     def coerce_documents(cls, v: Any) -> list:
-        """
-        ✅ FIX 9: Safely handle SQLAlchemy lazy-loaded relationships.
-
-        When submit_application() returns the newly created Application ORM
-        object the session may already be closed (FastAPI closes it after the
-        route returns).  Accessing app_obj.documents at that point raises
-        DetachedInstanceError / MissingGreenlet → 500.
-
-        This validator catches every failure mode:
-          - None              → []
-          - DetachedInstanceError being triggered during iteration → []
-          - An already-loaded list of Document ORM objects → pass through
-          - A plain Python list (e.g. from a dict) → pass through
-        """
         if v is None:
             return []
         try:
-            # Force evaluation NOW, while the session may still be open.
-            # list() on an InstrumentedList is safe; on a detached one it
-            # raises DetachedInstanceError which we catch below.
             return list(v)
         except Exception:
             return []
@@ -278,7 +233,6 @@ class ApplicationResponse(BaseModel):
 
 # ═══════════════════════════════════════════════════════════════
 # HR — candidate list item
-# ✅ FIX 7: Now includes ALL applicant fields so HR sees complete data
 # ═══════════════════════════════════════════════════════════════
 
 class CandidateListItem(BaseModel):
@@ -288,7 +242,6 @@ class CandidateListItem(BaseModel):
     email:            str
     job_title:        str
 
-    # ── Application form fields ──────────────────────────────
     education_level:  str
     field_of_study:   str
     graduation_year:  int
@@ -296,20 +249,23 @@ class CandidateListItem(BaseModel):
     skills:           str
     certifications:   Optional[str]  = None
 
-    # ── Profile / personal fields ────────────────────────────
     gender:           Optional[str]  = None
     phone:            Optional[str]  = None
     address:          Optional[str]  = None
     date_of_birth:    Optional[str]  = None
 
-    # ── AI / decision fields ─────────────────────────────────
     decision:         str
     ai_score:         Optional[float]
     ai_reason:        Optional[str]
     doc_verified:     bool
     submitted_at:     Optional[datetime] = None
 
-    # ── Documents list ───────────────────────────────────────
+    # OCR / manual review fields
+    ocr_confidence_flag: bool           = False
+    ocr_quality_score:   Optional[float] = None
+    hr_review_note:      Optional[str]  = None
+    hr_reviewed_at:      Optional[str]  = None
+
     documents:        List[DocumentOut] = []
 
     @field_validator("decision", mode="before")
@@ -338,3 +294,147 @@ class ShortlistResult(BaseModel):
     doc_verified:   bool
     identity_match: bool = False
     reason:         str
+
+
+# ═══════════════════════════════════════════════════════════════
+# ✅ FIX 14-16: MANUAL REVIEW QUEUE SCHEMAS
+# ═══════════════════════════════════════════════════════════════
+
+class ManualReviewDocumentItem(BaseModel):
+    """Document preview shown in the HR Manual Review Queue."""
+    id:            int
+    doc_type:      str
+    original_name: Optional[str] = None
+    uploaded_at:   Optional[str] = None
+    download_url:  Optional[str] = None
+
+
+class ManualReviewApplicationItem(BaseModel):
+    """
+    ✅ FIX 14: Single application row in the HR Manual Review Queue.
+    Includes OCR quality metrics, extracted info preview, and
+    the reason this application was flagged for manual review.
+    """
+    application_id:      int
+    applicant_id:        int
+    full_name:           str
+    email:               str
+    job_title:           str
+    job_id:              int
+
+    # Application fields
+    education_level:     str
+    field_of_study:      str
+    graduation_year:     int
+    experience_years:    int
+    skills:              str
+    certifications:      Optional[str]  = None
+    gender:              Optional[str]  = None
+    phone:               Optional[str]  = None
+    address:             Optional[str]  = None
+
+    # Decision & AI
+    decision:            str
+    ai_score:            Optional[float] = None
+    doc_verified:        bool = False
+
+    # OCR metrics
+    ocr_confidence_flag: bool            = False
+    ocr_quality_score:   Optional[float] = None
+    ocr_matches:         List[str]       = []
+    ocr_mismatches:      List[str]       = []
+    ocr_warnings:        List[str]       = []
+    ocr_done:            bool            = False
+
+    # Review classification
+    review_reason:       str  = "low_ocr"
+    review_reason_label: str  = "Low OCR Quality"
+
+    # HR review fields
+    hr_review_note:      Optional[str]  = None
+    hr_reviewed_by:      Optional[int]  = None
+    hr_reviewed_at:      Optional[str]  = None
+
+    submitted_at:        Optional[datetime] = None
+    documents:           List[ManualReviewDocumentItem] = []
+
+
+class ManualReviewQueueResponse(BaseModel):
+    """
+    ✅ FIX 15: Top-level response for GET /hr/manual-review.
+    """
+    total:          int
+    low_ocr:        int
+    low_confidence: int
+    missing_info:   int
+    applications:   List[ManualReviewApplicationItem] = []
+
+
+class ManualReviewActionRequest(BaseModel):
+    """✅ FIX 16: Payload for approve / reject / request-reupload."""
+    note: Optional[str] = None
+
+
+# ═══════════════════════════════════════════════════════════════
+# ✅ FIX 17-18: REPORTING SCHEMAS
+# ═══════════════════════════════════════════════════════════════
+
+class JobReportSummary(BaseModel):
+    """
+    ✅ FIX 17: Summary stats for a single job position.
+    Used inside /hr/report/{job_id} and /admin/reports.
+    """
+    total_applicants: int
+    shortlisted:      int
+    not_shortlisted:  int
+    pending:          int
+    manual_review:    int
+    average_score:    Optional[float] = None
+    top_score:        Optional[float] = None
+    shortlist_rate:   float           = 0.0
+
+
+class TopCandidateItem(BaseModel):
+    """Minimal candidate preview shown in admin report top-5 list."""
+    full_name:      str
+    email:          str
+    ai_score:       float
+    application_id: int
+
+
+class AdminJobReportItem(BaseModel):
+    """
+    ✅ FIX 17: Per-job report row returned by GET /admin/reports.
+    """
+    job_id:          int
+    job_title:       str
+    location:        Optional[str]  = None
+    employment_type: Optional[str]  = None
+    deadline:        Optional[str]  = None
+    created_at:      Optional[str]  = None
+    summary:         JobReportSummary
+    top_candidates:  List[TopCandidateItem] = []
+
+
+class AdminSystemTotals(BaseModel):
+    """System-wide aggregated counts for the Admin dashboard."""
+    total_jobs:              int
+    total_applicants:        int
+    total_shortlisted:       int
+    total_not_shortlisted:   int
+    total_pending:           int
+    total_manual_review:     int
+    overall_shortlist_rate:  float           = 0.0
+    average_score:           Optional[float] = None
+
+
+class AdminSystemReport(BaseModel):
+    """
+    ✅ FIX 18: Full response for GET /admin/reports.
+    """
+    system_totals: AdminSystemTotals
+    job_reports:   List[AdminJobReportItem]
+    generated_at:  str
+
+
+

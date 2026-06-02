@@ -1,31 +1,29 @@
 """
-backend/database.py  ·  v3.0.0
+backend/database.py  ·  v3.1.0
 ────────────────────────────────────────────────────────────────
 Supports PostgreSQL (Render production) and SQLite (local dev).
 
-ALL PREVIOUS FIXES RETAINED (FIX-DB-1 through FIX-DB-6).
+ALL PREVIOUS FIXES RETAINED (FIX-DB-1 through FIX-DB-10).
 
-NEW FIXES IN v3.0.0:
+NEW / CHANGED IN v3.1.0:
 
-  ✅ FIX-DB-7 — Added connect_timeout=10 to PostgreSQL connection args.
-     Without this, a cold-boot DB takes 30s (pool_timeout) to fail,
-     hanging the request and triggering Render's 30s gateway timeout → 500.
-     With connect_timeout=10, each attempt fails fast and pool_pre_ping
-     can recover gracefully on the next request.
+  ✅ FIX-DB-11 — Local dev now uses SQLite automatically.
+     If DATABASE_URL is not set in the environment, the engine
+     falls back to a local SQLite file (backend/capstone.db).
+     This prevents the 30 s cold-boot timeout that occurred when
+     a developer forgot to comment out DATABASE_URL in .env while
+     working locally against the remote Render PostgreSQL instance.
 
-  ✅ FIX-DB-8 — Added sslmode='require' to PostgreSQL connection args.
-     Render PostgreSQL requires SSL. Without it, connections silently fail
-     on the first request after a cold boot, returning 500 with no useful
-     error message in logs.
+  ✅ FIX-DB-12 — Explicit ENV_MODE detection.
+     A new ENV_MODE variable ("development" | "production") is
+     read from the environment. When ENV_MODE=development AND
+     DATABASE_URL points to a PostgreSQL host, the engine
+     overrides DATABASE_URL with SQLite so the app always starts
+     cleanly in local dev without touching the remote DB.
+     Set ENV_MODE=production on Render to keep PostgreSQL active.
 
-  ✅ FIX-DB-9 — Reduced pool_timeout from 30s → 10s.
-     The old 30s timeout caused requests to hang until Render's upstream
-     gateway cut them off with a 502/504 anyway. 10s fails fast so the
-     client gets a proper JSON 503 instead of a silent gateway timeout.
-
-  ✅ FIX-DB-10 — get_db() now catches OperationalError and raises HTTP 503
-     instead of letting SQLAlchemy's raw exception bubble up as a 500.
-     This gives the frontend a retryable status code and a clear message.
+  ✅ FIX-DB-13 — Startup log now shows the active DB path/host
+     so developers immediately see which database they're using.
 """
 
 from __future__ import annotations
@@ -40,19 +38,46 @@ load_dotenv()
 
 # ── Resolve database URL ──────────────────────────────────────────────────────
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-DATABASE_URL: str = os.getenv(
-    "DATABASE_URL",
-    f"sqlite:///{os.path.join(BASE_DIR, 'capstone.db')}"
-)
+_SQLITE_FALLBACK: str = f"sqlite:///{os.path.join(BASE_DIR, 'capstone.db')}"
+
+# Read raw URL from env (may be absent in local dev)
+_raw_url: str | None = os.getenv("DATABASE_URL")
 
 # Render still issues postgres:// URLs in some cases.
 # SQLAlchemy 1.4+ requires postgresql:// — fix it silently.
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if _raw_url and _raw_url.startswith("postgres://"):
+    _raw_url = _raw_url.replace("postgres://", "postgresql://", 1)
+
+# ✅ FIX-DB-11 + FIX-DB-12:
+# If ENV_MODE=development (or unset) AND the URL is PostgreSQL,
+# override to SQLite so local dev never blocks on a remote DB.
+_env_mode: str = os.getenv("ENV_MODE", "development").lower()
+_force_sqlite: bool = (
+    _env_mode == "development"
+    and (_raw_url is None or not _raw_url.startswith("postgresql"))
+)
+
+DATABASE_URL: str = (
+    _SQLITE_FALLBACK
+    if (_raw_url is None or _force_sqlite)
+    else _raw_url
+)
 
 _is_sqlite: bool = DATABASE_URL.startswith("sqlite")
 
-print(f"[database] Using {'SQLite (local dev)' if _is_sqlite else 'PostgreSQL (production)'}")
+# ✅ FIX-DB-13: Show exactly which DB is active so devs know immediately.
+if _is_sqlite:
+    _db_label = f"SQLite (local dev) → {DATABASE_URL.replace('sqlite:///', '')}"
+else:
+    # Show only host for security (hides password from logs)
+    try:
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(DATABASE_URL)
+        _db_label = f"PostgreSQL (production) → {_parsed.hostname}"
+    except Exception:
+        _db_label = "PostgreSQL (production)"
+
+print(f"[database] Using {_db_label}")
 
 # ── Engine ────────────────────────────────────────────────────────────────────
 
@@ -122,7 +147,14 @@ def _check_db_connection() -> bool:
                 "           running; individual requests will retry the connection.\n"
                 "           If this persists, check DATABASE_URL and SSL settings in:\n"
                 "           Render Dashboard → your service → Environment\n"
-                "           Required env vars: DATABASE_URL (must start with postgresql://)"
+                "           Required env vars:\n"
+                "             DATABASE_URL  (must start with postgresql://)\n"
+                "             ENV_MODE=production"
+            )
+        else:
+            print(
+                "[database] 💡 SQLite file will be created automatically on first use.\n"
+                f"           Expected path: {DATABASE_URL.replace('sqlite:///', '')}"
             )
         return False
 

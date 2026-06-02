@@ -1,30 +1,15 @@
 /**
- * frontend/src/components/Navbar.jsx  ·  v6.1.0
+ * frontend/src/components/Navbar.jsx  ·  v6.4.0
  *
- * FIXES in v6.1.0:
+ * FIXES in v6.4.0:
  *
- *  ✅ FIX-NAV-6 — DocSlot file input accept changed from
- *     ".pdf,.doc,.docx,.jpg,.jpeg,.png" to ".pdf,.jpg,.jpeg,.png" only.
- *     .doc and .docx are rejected by the backend but the old accept string
- *     allowed them through the OS picker, giving users false confidence.
+ *  FIX-NAV-14 — FeedbackWidget is now imported and rendered inside Navbar
+ *     so it appears as a floating button for ALL authenticated users
+ *     (applicants, HR officers, and admins). Previously the widget was never
+ *     mounted in the HR/Admin flow, so HR users never saw the feedback button
+ *     even after the role-allowlist fix in FeedbackWidget.jsx.
  *
- *  ✅ FIX-NAV-7 — Client-side file type + size validation added to DocSlot
- *     BEFORE the file is handed to onChange/handleSave. Wrong type or
- *     oversized files now show an immediate red error banner INSIDE the
- *     modal slot — previously the error was invisible (shown in the page
- *     background behind the modal overlay) or silently swallowed.
- *
- *  ✅ FIX-NAV-8 — DocSlot now has its own `error` state. When validation
- *     fails or the server rejects a file during handleSave, the specific
- *     slot turns red with a clear message: file name, what went wrong,
- *     and the accepted formats reminder. The error clears when the user
- *     picks a new file.
- *
- *  ✅ FIX-NAV-9 — handleSave now catches per-slot upload errors and writes
- *     them back to each DocSlot's error state instead of only toasting,
- *     so the user can see which document failed without closing the modal.
- *
- * All v6.0.0 fixes retained unchanged.
+ * All v6.3.0 fixes retained (FIX-NAV-12, FIX-NAV-13).
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
@@ -35,13 +20,14 @@ import {
   Phone, FileText, CheckCircle, AlertCircle,
   GraduationCap, ScrollText, Award, Eye,
   Trash2, RefreshCw, Pencil, Save, Briefcase as BriefcaseIcon,
-  XCircle,
+  XCircle, ShieldCheck, UserCog,
 } from 'lucide-react'
-import toast       from 'react-hot-toast'
-import { useAuth } from '../context/AuthContext'
-import api         from '../api/axios'
+import toast            from 'react-hot-toast'
+import { useAuth }      from '../context/AuthContext'
+import api              from '../api/axios'
+import FeedbackWidget from '../pages/FeedbackWidget' 
 
-// ✅ FIX-NAV-6/7: accepted types and size limit — mirrors backend exactly
+// FIX-NAV-6/7: accepted types and size limit — mirrors backend exactly
 const ALLOWED_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png']
 const MAX_FILE_SIZE_MB   = 5
 const MAX_FILE_SIZE_B    = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -53,8 +39,6 @@ const DOC_SLOTS = [
   { key: 'certificate', label: 'Other Certificates',    hint: 'Professional certifications',    icon: Award,         color: '#b86400', bg: '#fdf0d0', border: '#fbc86a', required: false },
   { key: 'experience',  label: 'Experience Document',   hint: 'Employment or reference letter', icon: BriefcaseIcon, color: '#0e7490', bg: '#ecfeff', border: '#67e8f9', required: false },
 ]
-
-const REQUIRED_DOC_KEYS = DOC_SLOTS.filter(s => s.required).map(s => s.key)
 
 function getDisplayName(user) {
   return user?.fullName || user?.full_name || ''
@@ -124,7 +108,7 @@ function InfoRow({ icon: Icon, label, value }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DocSlot — with client-side validation + visible error state
+// DocSlot — with client-side validation + visible error state  (v6.1.0)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, onClearError }) {
@@ -133,37 +117,29 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
   const hasFile  = !!file || !!serverDoc
   const displayName = file?.name || serverDoc?.original_name || serverDoc?.file_name || slot.key
 
-  // ✅ FIX-NAV-8: local error state — shown inside the slot card, not as a toast
   const [localError, setLocalError] = useState('')
   const error = externalError || localError
 
-  // ✅ FIX-NAV-7: validate file BEFORE passing upstream
   const handleFileInput = (e) => {
     const picked = e.target.files?.[0]
-    e.target.value = '' // reset so same file can be re-selected
+    e.target.value = ''
     if (!picked) return
 
-    // Clear any previous error
     setLocalError('')
     if (onClearError) onClearError(slot.key)
 
-    // File type check
     const ext = '.' + (picked.name.split('.').pop() || '').toLowerCase()
     if (!ALLOWED_EXTENSIONS.includes(ext)) {
-      const msg = `"${picked.name}" is not supported. Please use PDF, JPG, or PNG.`
-      setLocalError(msg)
+      setLocalError(`"${picked.name}" is not supported. Please use PDF, JPG, or PNG.`)
       return
     }
 
-    // File size check
     if (picked.size > MAX_FILE_SIZE_B) {
       const sizeMB = (picked.size / 1024 / 1024).toFixed(1)
-      const msg = `"${picked.name}" is ${sizeMB} MB — maximum is ${MAX_FILE_SIZE_MB} MB.`
-      setLocalError(msg)
+      setLocalError(`"${picked.name}" is ${sizeMB} MB — maximum is ${MAX_FILE_SIZE_MB} MB.`)
       return
     }
 
-    // All good
     onChange(slot.key, picked)
   }
 
@@ -179,22 +155,12 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
     fileRef.current?.click()
   }
 
-  const showError  = !!error
-  const borderColor = showError  ? '#dc2626'
-    : hasFile      ? slot.border
-    : '#e5e7eb'
-  const bgColor     = showError  ? '#fff1f2'
-    : hasFile      ? slot.bg
-    : '#f9fafb'
+  const showError   = !!error
+  const borderColor = showError  ? '#dc2626' : hasFile ? slot.border : '#e5e7eb'
+  const bgColor     = showError  ? '#fff1f2' : hasFile ? slot.bg     : '#f9fafb'
 
   return (
-    <div style={{
-      border: `2px solid ${borderColor}`,
-      borderRadius: 8,
-      background: bgColor,
-      padding: '12px 14px',
-      transition: 'all .2s',
-    }}>
+    <div style={{ border: `2px solid ${borderColor}`, borderRadius: 8, background: bgColor, padding: '12px 14px', transition: 'all .2s' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
         <div style={{
           width: 38, height: 38, borderRadius: 6, flexShrink: 0,
@@ -226,7 +192,6 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
           }
         </div>
 
-        {/* Action buttons */}
         {hasFile && !showError ? (
           <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
             {serverDoc && !file && (
@@ -258,18 +223,8 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
         )}
       </div>
 
-      {/* ✅ FIX-NAV-8: error banner shown INSIDE the slot, visible above the modal overlay */}
       {showError && (
-        <div style={{
-          marginTop: 10,
-          padding: '9px 12px',
-          background: '#fee2e2',
-          border: '1px solid #fca5a5',
-          borderRadius: 6,
-          fontSize: '.78rem',
-          color: '#7f1d1d',
-          lineHeight: 1.55,
-        }}>
+        <div style={{ marginTop: 10, padding: '9px 12px', background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: '.78rem', color: '#7f1d1d', lineHeight: 1.55 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
             <XCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} color="#dc2626" />
             <div>
@@ -282,19 +237,13 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
         </div>
       )}
 
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".pdf,.jpg,.jpeg,.png"
-        onChange={handleFileInput}
-        style={{ display: 'none' }}
-      />
+      <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFileInput} style={{ display: 'none' }} />
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ProfileModal
+// ProfileModal — APPLICANTS ONLY
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
@@ -312,7 +261,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
   const [loadingDocs, setLoadingDocs] = useState(true)
   const [saving,      setSaving]      = useState(false)
   const [done,        setDone]        = useState(false)
-  // ✅ FIX-NAV-9: per-slot server error state
   const [slotErrors,  setSlotErrors]  = useState({})
 
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
@@ -330,7 +278,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
   }, [])
 
   const handleDocChange = (slotKey, file) => {
-    // Clear slot error when user picks a new file
     setSlotErrors(prev => { const next = { ...prev }; delete next[slotKey]; return next })
     setNewFiles(prev => ({ ...prev, [slotKey]: file || undefined }))
     if (!file) setServerDocs(prev => { const next = { ...prev }; delete next[slotKey]; return next })
@@ -362,7 +309,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
     const uploadErrors = {}
 
     try {
-      // Step 1 — upload new local files, collect per-slot errors
       const uploadEntries = Object.entries(newFiles).filter(([, f]) => !!f)
       await Promise.all(
         uploadEntries.map(async ([docType, file]) => {
@@ -372,14 +318,11 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
           try {
             await api.post('/profile/documents', formData)
           } catch (err) {
-            // ✅ FIX-NAV-9: record error per slot so it shows inside the card
-            const msg = extractApiError(err, `Upload failed for ${docType}`)
-            uploadErrors[docType] = msg
+            uploadErrors[docType] = extractApiError(err, `Upload failed for ${docType}`)
           }
         })
       )
 
-      // If any slot had a server error, surface them all and stop
       if (Object.keys(uploadErrors).length > 0) {
         setSlotErrors(uploadErrors)
         toast.error('Some documents were rejected — see the highlighted slots above.')
@@ -390,7 +333,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
         await refreshDocuments()
       }
 
-      // Step 2 — persist text fields
       await updateProfile({
         phone:       form.phone,
         address:     form.address,
@@ -404,7 +346,6 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
       setTimeout(onClose, 700)
 
     } catch {
-      // Caught above per-slot; generic fallback
       toast.error('Something went wrong. Please try again.')
     } finally {
       setSaving(false)
@@ -437,11 +378,7 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
-              <div style={{
-                width: 44, height: 44, borderRadius: 8,
-                background: 'rgba(255,255,255,0.2)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
+              <div style={{ width: 44, height: 44, borderRadius: 8, background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <User size={19} color="#fff" />
               </div>
               <div>
@@ -451,12 +388,7 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
             </div>
             <button
               onClick={onClose}
-              style={{
-                width: 34, height: 34, borderRadius: '50%',
-                border: '1.5px solid rgba(255,255,255,.3)',
-                background: 'rgba(255,255,255,.1)',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
+              style={{ width: 34, height: 34, borderRadius: '50%', border: '1.5px solid rgba(255,255,255,.3)', background: 'rgba(255,255,255,.1)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <X size={15} color="rgba(255,255,255,.9)" />
             </button>
@@ -467,37 +399,21 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
         <div style={{ overflowY: 'auto', flex: 1, padding: '22px 24px 28px', display: 'flex', flexDirection: 'column', gap: 24 }}>
 
           {/* Progress */}
-          <div style={{
-            padding: '14px 16px', borderRadius: 8,
-            background: isComplete ? '#d1f5e0' : '#deeaff',
-            border: `2px solid ${isComplete ? 'rgba(10,124,62,.25)' : 'rgba(26,86,219,.20)'}`,
-          }}>
+          <div style={{ padding: '14px 16px', borderRadius: 8, background: isComplete ? '#d1f5e0' : '#deeaff', border: `2px solid ${isComplete ? 'rgba(10,124,62,.25)' : 'rgba(26,86,219,.20)'}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-              <span style={{
-                fontSize: '.82rem', fontWeight: 700,
-                color: isComplete ? '#0a7c3e' : '#1a56db',
-                display: 'flex', alignItems: 'center', gap: 6,
-              }}>
+              <span style={{ fontSize: '.82rem', fontWeight: 700, color: isComplete ? '#0a7c3e' : '#1a56db', display: 'flex', alignItems: 'center', gap: 6 }}>
                 {isComplete ? <><CheckCircle size={14} /> Profile complete</> : 'Profile completion'}
               </span>
               <span style={{ fontSize: '.82rem', fontWeight: 700, color: isComplete ? '#0a7c3e' : '#1a56db' }}>{progress}%</span>
             </div>
             <div style={{ height: 6, background: 'rgba(0,0,0,.08)', borderRadius: 99, overflow: 'hidden' }}>
-              <div style={{
-                height: '100%', borderRadius: 99,
-                background: isComplete ? '#0a7c3e' : '#2563eb',
-                width: `${progress}%`, transition: 'width .35s ease',
-              }} />
+              <div style={{ height: '100%', borderRadius: 99, background: isComplete ? '#0a7c3e' : '#2563eb', width: `${progress}%`, transition: 'width .35s ease' }} />
             </div>
           </div>
 
           {/* Personal info */}
           <div>
-            <div style={{
-              fontSize: '.72rem', fontWeight: 700, color: '#2563eb',
-              letterSpacing: '.12em', textTransform: 'uppercase',
-              marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8,
-            }}>
+            <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', letterSpacing: '.12em', textTransform: 'uppercase', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
               Personal Information
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
@@ -508,33 +424,17 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
               <div>
                 <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>Full Name</label>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    className="form-input"
-                    value={fullName}
-                    disabled={!editingName}
-                    onChange={e => setFullName(e.target.value)}
-                    style={{ flex: 1, background: editingName ? '#ffffff' : '#f9fafb', color: '#111827' }}
-                  />
+                  <input className="form-input" value={fullName} disabled={!editingName} onChange={e => setFullName(e.target.value)} style={{ flex: 1, background: editingName ? '#ffffff' : '#f9fafb', color: '#111827' }} />
                   <button
                     onClick={() => setEditingName(v => !v)}
-                    style={{
-                      padding: '0 14px', borderRadius: 4, flexShrink: 0,
-                      border: editingName ? 'none' : '2px solid #e5e7eb',
-                      background: editingName ? '#2563eb' : '#f9fafb',
-                      color: editingName ? '#fff' : '#374151',
-                      fontWeight: 700, fontSize: '.82rem', cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', gap: 5,
-                    }}
+                    style={{ padding: '0 14px', borderRadius: 4, flexShrink: 0, border: editingName ? 'none' : '2px solid #e5e7eb', background: editingName ? '#2563eb' : '#f9fafb', color: editingName ? '#fff' : '#374151', fontWeight: 700, fontSize: '.82rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}
                   >
                     {editingName ? <><Save size={12} /> Done</> : <><Pencil size={12} /> Edit</>}
                   </button>
                 </div>
-                <div style={{ fontSize: '.72rem', color: '#9ca3af', marginTop: 3 }}>
-                  Name changes require contacting support.
-                </div>
+                <div style={{ fontSize: '.72rem', color: '#9ca3af', marginTop: 3 }}>Name changes require contacting support.</div>
               </div>
 
-              {/* national_id, address, phone */}
               {[
                 { key: 'national_id', label: 'National ID *',           placeholder: 'e.g. 1 1998 8 0123456 7 89' },
                 { key: 'address',     label: 'Location / Address *',    placeholder: 'e.g. Kigali, Rwanda'         },
@@ -542,13 +442,7 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
               ].map(({ key, label, placeholder }) => (
                 <div key={key}>
                   <label style={{ display: 'block', fontSize: '.85rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>{label}</label>
-                  <input
-                    className="form-input"
-                    value={form[key]}
-                    onChange={e => set(key, e.target.value)}
-                    placeholder={placeholder}
-                    style={{ color: '#111827' }}
-                  />
+                  <input className="form-input" value={form[key]} onChange={e => set(key, e.target.value)} placeholder={placeholder} style={{ color: '#111827' }} />
                 </div>
               ))}
             </div>
@@ -556,23 +450,14 @@ function ProfileModal({ user, updateProfile, refreshDocuments, onClose }) {
 
           {/* Documents */}
           <div>
-            <div style={{
-              fontSize: '.72rem', fontWeight: 700, color: '#2563eb',
-              letterSpacing: '.12em', textTransform: 'uppercase',
-              marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8,
-            }}>
+            <div style={{ fontSize: '.72rem', fontWeight: 700, color: '#2563eb', letterSpacing: '.12em', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
               Documents ({totalUploaded}/{DOC_SLOTS.length})
               <div style={{ flex: 1, height: 1.5, background: '#e5e7eb' }} />
             </div>
 
-            {/* ✅ FIX-NAV-6: accepted formats hint shown above the slots */}
-            <div style={{
-              marginBottom: 12, padding: '7px 12px',
-              background: '#fffbeb', border: '1px solid #fcd34d',
-              borderRadius: 6, fontSize: '.75rem', color: '#78350f', fontWeight: 600,
-            }}>
-              📎 Accepted formats: <strong>PDF, JPG, PNG</strong> — max {MAX_FILE_SIZE_MB} MB each.
+            <div style={{ marginBottom: 12, padding: '7px 12px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 6, fontSize: '.75rem', color: '#78350f', fontWeight: 600 }}>
+              Accepted formats: <strong>PDF, JPG, PNG</strong> — max {MAX_FILE_SIZE_MB} MB each.
               Word documents (.doc, .docx) are not supported.
             </div>
 
@@ -635,10 +520,17 @@ export default function Navbar() {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [modalOpen,    setModalOpen]    = useState(false)
 
+  // FIX-NAV-13 — explicit role flags; never use !isHR to mean "applicant"
+  const isApplicant = user?.role === 'applicant'
+  const isHR        = user?.role === 'hr'
+  const isAdmin     = user?.role === 'admin'
+
   const openModal = useCallback(() => {
+    // FIX-NAV-12 — modal is applicant-only; ignore the event for other roles
+    if (!isApplicant) return
     setDropdownOpen(false)
     setModalOpen(true)
-  }, [])
+  }, [isApplicant])
 
   useEffect(() => {
     window.addEventListener('open-profile-modal', openModal)
@@ -656,28 +548,26 @@ export default function Navbar() {
 
   const handleLogout = () => { logout(); toast.success('Logged out successfully'); navigate('/') }
 
-  const isHR        = user?.role === 'hr'
   const displayName = getDisplayName(user)
 
-  const uploadedDocTypes    = new Set((profileDocuments || []).map(d => d.doc_type))
-  const missingRequiredDocs = REQUIRED_DOC_KEYS.filter(k => !uploadedDocTypes.has(k))
-  const docCount            = (profileDocuments || []).length
-
-  const profileComplete = isHR
-    ? true
-    : !!(user?.national_id && user?.address && missingRequiredDocs.length === 0)
-
-  const missing = isHR
-    ? []
-    : [
-        !user?.national_id              && 'National ID',
-        !user?.address                  && 'Location',
-        missingRequiredDocs.length > 0  && 'Documents',
-      ].filter(Boolean)
-
+  // Documents info — applicants only
+  const docCount = (profileDocuments || []).length
   const docDisplayValue = docCount > 0
     ? `${docCount} file${docCount > 1 ? 's' : ''} uploaded`
     : null
+
+  // FIX-NAV-10/13 — profile completeness is applicant-only
+  const profileComplete = isApplicant
+    ? !!(user?.phone && user?.address && user?.national_id)
+    : true   // HR and admin never show the incomplete dot
+
+  const missing = isApplicant
+    ? [
+        !user?.phone       && 'Phone',
+        !user?.address     && 'Location',
+        !user?.national_id && 'National ID',
+      ].filter(Boolean)
+    : []
 
   return (
     <>
@@ -692,7 +582,7 @@ export default function Navbar() {
             }}>
               <Briefcase size={16} color="#fff" />
             </div>
-            GI Recruitment<span> Network</span>
+            AI-powered <span>shortlisting platform</span>
           </Link>
 
           <div className="navbar-actions">
@@ -703,12 +593,12 @@ export default function Navbar() {
               </>
             ) : (
               <>
-                {user.role === 'applicant' && (
+                {isApplicant && (
                   <Link to="/dashboard">
                     <button className="btn btn-outline btn-sm"><LayoutDashboard size={14} /> My Applications</button>
                   </Link>
                 )}
-                {user.role === 'hr' && (
+                {isHR && (
                   <Link to="/hr">
                     <button className="btn btn-outline btn-sm"><Briefcase size={14} /> HR Dashboard</button>
                   </Link>
@@ -717,7 +607,8 @@ export default function Navbar() {
                 <div ref={dropdownRef} style={{ position: 'relative' }}>
                   <div style={{ position: 'relative', display: 'inline-flex' }}>
                     <Avatar name={displayName} size={40} onClick={() => setDropdownOpen(v => !v)} />
-                    {!profileComplete && (
+                    {/* FIX-NAV-12 — incomplete dot only for applicants */}
+                    {isApplicant && !profileComplete && (
                       <span style={{
                         position: 'absolute', top: -2, right: -2,
                         width: 12, height: 12, borderRadius: '50%',
@@ -734,25 +625,27 @@ export default function Navbar() {
                       boxShadow: '0 28px 72px rgba(10,15,40,.20)',
                       zIndex: 500, overflow: 'hidden',
                     }}>
+
+                      {/* ── Shared header (all roles) ── */}
                       <div style={{
                         padding: '16px 20px 14px',
-                        borderBottom: '2px solid #2563eb',
-                        background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
+                        borderBottom: `2px solid ${isAdmin ? '#7c3aed' : '#2563eb'}`,
+                        background: isAdmin
+                          ? 'linear-gradient(135deg, #1e3a5f 0%, #7c3aed 100%)'
+                          : 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
                       }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                           <Avatar name={displayName} size={44} />
                           <div style={{ overflow: 'hidden' }}>
-                            <p style={{
-                              margin: 0, fontWeight: 700, fontSize: '.95rem', color: '#ffffff',
-                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            }}>
+                            <p style={{ margin: 0, fontWeight: 700, fontSize: '.95rem', color: '#ffffff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {displayName || 'My Account'}
                             </p>
                             <p style={{ margin: '2px 0 0', fontSize: '.78rem', color: 'rgba(255,255,255,.7)', textTransform: 'capitalize' }}>{user.role}</p>
                           </div>
                         </div>
 
-                        {!isHR && (
+                        {/* FIX-NAV-12 — profile status banner only for applicants */}
+                        {isApplicant && (
                           <div style={{
                             marginTop: 12, padding: '8px 12px', borderRadius: 6,
                             background: profileComplete ? 'rgba(10,124,62,.25)' : 'rgba(248,163,0,.2)',
@@ -767,9 +660,23 @@ export default function Navbar() {
                             }
                           </div>
                         )}
+
+                        {/* FIX-NAV-12 — admin gets a clean "System Administrator" badge */}
+                        {isAdmin && (
+                          <div style={{
+                            marginTop: 12, padding: '8px 12px', borderRadius: 6,
+                            background: 'rgba(255,255,255,.15)',
+                            border: '1.5px solid rgba(255,255,255,.25)',
+                            fontSize: '.78rem', fontWeight: 700, color: '#e9d5ff',
+                            display: 'flex', alignItems: 'center', gap: 6,
+                          }}>
+                            <ShieldCheck size={12} /> System Administrator
+                          </div>
+                        )}
                       </div>
 
-                      {!isHR && (
+                      {/* ── Applicant-only info rows ── */}
+                      {isApplicant && (
                         <div style={{ padding: '6px 20px 2px' }}>
                           <InfoRow icon={CreditCard} label="National ID" value={user.national_id}  />
                           <InfoRow icon={MapPin}      label="Location"   value={user.address}       />
@@ -778,8 +685,11 @@ export default function Navbar() {
                         </div>
                       )}
 
+                      {/* ── Action buttons ── */}
                       <div style={{ padding: '12px 20px 16px', display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1.5px solid #e5e7eb' }}>
-                        {!isHR && (
+
+                        {/* Applicant: open profile modal */}
+                        {isApplicant && (
                           <button
                             onClick={openModal}
                             style={{
@@ -790,9 +700,26 @@ export default function Navbar() {
                               boxShadow: '0 3px 10px rgba(26,86,219,.3)',
                             }}
                           >
-                            <User size={13} /> View & Edit Profile
+                            <User size={13} /> View &amp; Edit Profile
                           </button>
                         )}
+
+                        {/* FIX-NAV-12 — Admin: navigate to dedicated admin profile page */}
+                        {isAdmin && (
+                          <button
+                            onClick={() => { setDropdownOpen(false); navigate('/admin/profile') }}
+                            style={{
+                              width: '100%', padding: '10px 0', borderRadius: 4,
+                              border: 'none', background: '#7c3aed', color: '#fff',
+                              fontSize: '.88rem', fontWeight: 700, cursor: 'pointer',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                              boxShadow: '0 3px 10px rgba(124,58,237,.3)',
+                            }}
+                          >
+                            <UserCog size={13} /> My Profile
+                          </button>
+                        )}
+
                         <button
                           onClick={handleLogout}
                           style={{
@@ -814,7 +741,8 @@ export default function Navbar() {
         </div>
       </nav>
 
-      {modalOpen && user && !isHR && (
+      {/* FIX-NAV-12 — ProfileModal is strictly applicant-only */}
+      {modalOpen && user && isApplicant && (
         <ProfileModal
           user={user}
           updateProfile={updateProfile}
@@ -822,6 +750,11 @@ export default function Navbar() {
           onClose={() => setModalOpen(false)}
         />
       )}
+
+      {/* FIX-NAV-14 — FeedbackWidget floats on every authenticated page.
+          The widget itself guards by role (see FEEDBACK_ALLOWED_ROLES in
+          FeedbackWidget.jsx) so unauthenticated visitors never see the button. */}
+      <FeedbackWidget />
     </>
   )
 }

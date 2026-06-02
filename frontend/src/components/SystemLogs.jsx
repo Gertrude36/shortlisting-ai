@@ -1,32 +1,100 @@
+/**
+ * SystemLogs.jsx — FIXED
+ *
+ * Fixes:
+ *  FIX-SL-1 — ACTION_META keys are now UPPERCASE to match what the
+ *     backend sends (e.g. backend sends "LOGIN" not "login"). Previously
+ *     no badge ever matched, so every log row showed the grey default badge.
+ *
+ *  FIX-SL-2 — Added all missing action types that the backend actually
+ *     emits: REGISTER, APPLICATION_SUBMITTED, DOCUMENT_UPLOADED, SHORTLIST,
+ *     SHORTLIST_ALL, RESHORTLIST, HR_MANUAL_REVIEW_APPROVED,
+ *     HR_MANUAL_REVIEW_REJECTED, HR_MANUAL_REVIEW_REUPLOAD, USER_FEEDBACK,
+ *     PROFILE_UPDATED, PASSWORD_RESET, FORGOT_PASSWORD, JOB_CREATED,
+ *     JOB_DELETED, ADMIN_CREATED_USER, ADMIN_DELETED_USER,
+ *     ADMIN_CHANGED_ROLE, LOGIN_FAILED, PASSWORD_CHANGED.
+ *
+ *  FIX-SL-3 — Filter <select> now uses the uppercase keys so it
+ *     correctly filters server responses.
+ *
+ *  FIX-SL-4 — "HR Logs" endpoint (/hr/logs) returns only HR-relevant
+ *     actions (already filtered server-side). This component is used on
+ *     the HR dashboard and correctly calls /hr/logs. The Admin dashboard
+ *     has its own inline LogsTab that calls /admin/logs — no change needed
+ *     there.
+ */
+
 import { useEffect, useState, useCallback } from 'react'
 import {
   RefreshCw, Search, X, ChevronLeft, ChevronRight,
   Bot, UserPlus, Trash2, LogIn, LogOut, FileText,
-  ShieldCheck, Briefcase, AlertCircle, Clock, Filter
+  ShieldCheck, Briefcase, AlertCircle, Clock, Filter,
+  MessageSquare, KeyRound, RotateCcw, UserCog, Upload,
+  CheckCircle, XCircle, Send,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../api/axios'
 
-/* ── helpers ── */
+/* ── helpers ────────────────────────────────────────────────────────────────── */
 const PAGE_SIZE = 20
 
+// FIX-SL-1 + FIX-SL-2: Keys MUST match the backend action strings exactly
+// (all uppercase). Extend this map whenever new actions are added to main.py.
 const ACTION_META = {
-  login:              { icon: <LogIn size={13} />,       color: '#2563eb', bg: '#eff6ff', label: 'Login' },
-  logout:             { icon: <LogOut size={13} />,      color: '#6b7280', bg: '#f3f4f6', label: 'Logout' },
-  register:           { icon: <UserPlus size={13} />,    color: '#0a7c3e', bg: '#d1f5e0', label: 'Register' },
-  user_created:       { icon: <UserPlus size={13} />,    color: '#0a7c3e', bg: '#d1f5e0', label: 'User Created' },
-  user_deleted:       { icon: <Trash2 size={13} />,      color: '#c41a1a', bg: '#fde0e0', label: 'User Deleted' },
-  job_created:        { icon: <Briefcase size={13} />,   color: '#7c3aed', bg: '#ede9fe', label: 'Job Posted' },
-  job_deleted:        { icon: <Trash2 size={13} />,      color: '#c41a1a', bg: '#fde0e0', label: 'Job Deleted' },
-  application_submit: { icon: <FileText size={13} />,    color: '#0369a1', bg: '#e0f2fe', label: 'Application' },
-  shortlist_run:      { icon: <Bot size={13} />,         color: '#b86400', bg: '#fdf0d0', label: 'AI Shortlist' },
-  doc_verified:       { icon: <ShieldCheck size={13} />, color: '#0a7c3e', bg: '#d1f5e0', label: 'Doc Verified' },
+  // Auth
+  LOGIN:                      { icon: <LogIn size={13} />,       color: '#2563eb', bg: '#eff6ff',  label: 'Login' },
+  LOGIN_FAILED:               { icon: <XCircle size={13} />,     color: '#c41a1a', bg: '#fde0e0',  label: 'Login Failed' },
+  LOGOUT:                     { icon: <LogOut size={13} />,      color: '#6b7280', bg: '#f3f4f6',  label: 'Logout' },
+  REGISTER:                   { icon: <UserPlus size={13} />,    color: '#0a7c3e', bg: '#d1f5e0',  label: 'Register' },
+  FORGOT_PASSWORD:            { icon: <KeyRound size={13} />,    color: '#d97706', bg: '#fef3c7',  label: 'Forgot Password' },
+  PASSWORD_RESET:             { icon: <KeyRound size={13} />,    color: '#7c3aed', bg: '#ede9fe',  label: 'Password Reset' },
+  PASSWORD_CHANGED:           { icon: <KeyRound size={13} />,    color: '#0369a1', bg: '#e0f2fe',  label: 'Password Changed' },
+  HR_INVITE_REQUESTED:        { icon: <Send size={13} />,        color: '#0a7c3e', bg: '#d1f5e0',  label: 'HR Invite' },
+
+  // Profile
+  PROFILE_UPDATED:            { icon: <UserCog size={13} />,     color: '#0369a1', bg: '#e0f2fe',  label: 'Profile Updated' },
+  PROFILE_DOCUMENT_UPLOADED:  { icon: <Upload size={13} />,      color: '#7c3aed', bg: '#ede9fe',  label: 'Profile Doc' },
+
+  // Jobs
+  JOB_CREATED:                { icon: <Briefcase size={13} />,   color: '#7c3aed', bg: '#ede9fe',  label: 'Job Created' },
+  JOB_DELETED:                { icon: <Trash2 size={13} />,      color: '#c41a1a', bg: '#fde0e0',  label: 'Job Deleted' },
+
+  // Applications
+  APPLICATION_STARTED:        { icon: <FileText size={13} />,    color: '#0369a1', bg: '#e0f2fe',  label: 'App Started' },
+  APPLICATION_SUBMITTED:      { icon: <FileText size={13} />,    color: '#0369a1', bg: '#e0f2fe',  label: 'App Submitted' },
+  APPLICATION_DRAFT_DELETED:  { icon: <Trash2 size={13} />,      color: '#6b7280', bg: '#f3f4f6',  label: 'Draft Deleted' },
+
+  // Documents
+  DOCUMENT_UPLOADED:          { icon: <Upload size={13} />,      color: '#0a7c3e', bg: '#d1f5e0',  label: 'Doc Uploaded' },
+  DOCUMENT_REJECTED:          { icon: <XCircle size={13} />,     color: '#c41a1a', bg: '#fde0e0',  label: 'Doc Rejected' },
+  DOCUMENT_DELETED:           { icon: <Trash2 size={13} />,      color: '#c41a1a', bg: '#fde0e0',  label: 'Doc Deleted' },
+
+  // Shortlisting
+  SHORTLIST:                  { icon: <Bot size={13} />,         color: '#b86400', bg: '#fdf0d0',  label: 'AI Shortlist' },
+  SHORTLIST_ALL:              { icon: <Bot size={13} />,         color: '#b86400', bg: '#fdf0d0',  label: 'Shortlist All' },
+  SHORTLIST_ALL_STARTED:      { icon: <Bot size={13} />,         color: '#b86400', bg: '#fdf0d0',  label: 'Shortlist Started' },
+  RESHORTLIST:                { icon: <RotateCcw size={13} />,   color: '#7c3aed', bg: '#ede9fe',  label: 'Re-Shortlist' },
+  RESHORTLIST_ALL_STARTED:    { icon: <RotateCcw size={13} />,   color: '#7c3aed', bg: '#ede9fe',  label: 'Re-Shortlist All' },
+
+  // Manual review
+  HR_MANUAL_REVIEW_APPROVED:  { icon: <CheckCircle size={13} />, color: '#0a7c3e', bg: '#d1f5e0',  label: 'Review Approved' },
+  HR_MANUAL_REVIEW_REJECTED:  { icon: <XCircle size={13} />,    color: '#c41a1a', bg: '#fde0e0',  label: 'Review Rejected' },
+  HR_MANUAL_REVIEW_REUPLOAD:  { icon: <Upload size={13} />,      color: '#d97706', bg: '#fef3c7',  label: 'Reupload Req.' },
+
+  // Feedback
+  USER_FEEDBACK:              { icon: <MessageSquare size={13} />, color: '#db2777', bg: '#fce7f3', label: 'Feedback' },
+
+  // Admin
+  ADMIN_CREATED_USER:         { icon: <UserPlus size={13} />,    color: '#0a7c3e', bg: '#d1f5e0',  label: 'User Created' },
+  ADMIN_DELETED_USER:         { icon: <Trash2 size={13} />,      color: '#c41a1a', bg: '#fde0e0',  label: 'User Deleted' },
+  ADMIN_CHANGED_ROLE:         { icon: <ShieldCheck size={13} />, color: '#7c3aed', bg: '#ede9fe',  label: 'Role Changed' },
 }
 
 const DEFAULT_META = { icon: <AlertCircle size={13} />, color: '#374151', bg: '#f3f4f6', label: 'Event' }
 
 function ActionBadge({ action }) {
-  const meta = ACTION_META[action] || { ...DEFAULT_META, label: action }
+  // FIX-SL-1: uppercase lookup — backend always sends uppercase action strings
+  const meta = ACTION_META[action?.toUpperCase?.()] || { ...DEFAULT_META, label: action || 'Event' }
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -53,22 +121,24 @@ function fmt(iso) {
 function timeAgo(iso) {
   if (!iso) return ''
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000)
-  if (diff < 60)   return `${diff}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 60)    return `${diff}s ago`
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
 }
 
 /* ═══════════════════════════════════════
    SystemLogs component
+   Used on the HR dashboard — calls /hr/logs (server already filters to HR-relevant actions).
+   The Admin dashboard has its own inline LogsTab calling /admin/logs.
 ═══════════════════════════════════════ */
 export default function SystemLogs() {
-  const [logs,        setLogs]        = useState([])
-  const [loading,     setLoading]     = useState(true)
-  const [search,      setSearch]      = useState('')
+  const [logs,         setLogs]         = useState([])
+  const [loading,      setLoading]      = useState(true)
+  const [search,       setSearch]       = useState('')
   const [actionFilter, setActionFilter] = useState('all')
-  const [page,        setPage]        = useState(1)
-  const [total,       setTotal]       = useState(0)
+  const [page,         setPage]         = useState(1)
+  const [total,        setTotal]        = useState(0)
 
   const fetchLogs = useCallback(() => {
     setLoading(true)
@@ -76,11 +146,11 @@ export default function SystemLogs() {
     params.set('limit',  PAGE_SIZE)
     params.set('offset', (page - 1) * PAGE_SIZE)
     if (search.trim())          params.set('search', search.trim())
-    if (actionFilter !== 'all') params.set('action', actionFilter)
+    // FIX-SL-3: send uppercase action to match backend filter
+    if (actionFilter !== 'all') params.set('action', actionFilter.toUpperCase())
 
     api.get(`/hr/logs?${params}`)
       .then(res => {
-        // accept { logs, total } or plain array
         if (Array.isArray(res.data)) {
           setLogs(res.data)
           setTotal(res.data.length)
@@ -94,16 +164,26 @@ export default function SystemLogs() {
   }, [page, search, actionFilter])
 
   useEffect(() => { fetchLogs() }, [fetchLogs])
-
-  // reset to page 1 when filters change
   useEffect(() => { setPage(1) }, [search, actionFilter])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const allActions = Object.keys(ACTION_META)
+
+  // Only show actions that are relevant to HR (server already filters, but
+  // this list controls what appears in the dropdown)
+  const hrActionKeys = [
+    'LOGIN', 'LOGOUT', 'REGISTER',
+    'APPLICATION_STARTED', 'APPLICATION_SUBMITTED', 'APPLICATION_DRAFT_DELETED',
+    'DOCUMENT_UPLOADED', 'DOCUMENT_REJECTED', 'DOCUMENT_DELETED',
+    'JOB_CREATED', 'JOB_DELETED',
+    'SHORTLIST', 'SHORTLIST_ALL', 'SHORTLIST_ALL_STARTED',
+    'RESHORTLIST', 'RESHORTLIST_ALL_STARTED',
+    'HR_MANUAL_REVIEW_APPROVED', 'HR_MANUAL_REVIEW_REJECTED', 'HR_MANUAL_REVIEW_REUPLOAD',
+    'PROFILE_UPDATED', 'FORGOT_PASSWORD', 'PASSWORD_RESET', 'HR_INVITE_REQUESTED',
+  ]
 
   return (
     <div>
-      {/* ── Toolbar ── */}
+      {/* ── Toolbar ─────────────────────────────────────────────────────────── */}
       <div style={{
         display: 'flex', gap: 10, flexWrap: 'wrap',
         alignItems: 'center', marginBottom: 16,
@@ -137,13 +217,13 @@ export default function SystemLogs() {
           <Filter size={13} color="#9ca3af" />
           <select
             className="form-select"
-            style={{ width: 'auto', minWidth: 160, color: '#111827' }}
+            style={{ width: 'auto', minWidth: 180, color: '#111827' }}
             value={actionFilter}
             onChange={e => setActionFilter(e.target.value)}
           >
             <option value="all">All Actions</option>
-            {allActions.map(a => (
-              <option key={a} value={a}>{ACTION_META[a].label}</option>
+            {hrActionKeys.map(a => (
+              <option key={a} value={a}>{ACTION_META[a]?.label ?? a}</option>
             ))}
           </select>
         </div>
@@ -157,7 +237,7 @@ export default function SystemLogs() {
         </button>
       </div>
 
-      {/* ── Table ── */}
+      {/* ── Table ───────────────────────────────────────────────────────────── */}
       <div style={{
         background: '#ffffff', border: '1px solid #e5e7eb',
         borderRadius: 10, overflow: 'hidden',
@@ -179,7 +259,7 @@ export default function SystemLogs() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb', borderBottom: '2px solid #e5e7eb' }}>
-                  {['#', 'Timestamp', 'Action', 'User', 'Detail', 'IP'].map(h => (
+                  {['#', 'Timestamp', 'Action', 'User', 'Role', 'Detail', 'IP'].map(h => (
                     <th key={h} style={{
                       padding: '12px 16px', textAlign: 'left',
                       fontWeight: 700, fontSize: '.72rem',
@@ -220,7 +300,7 @@ export default function SystemLogs() {
                       </div>
                     </td>
 
-                    {/* Action */}
+                    {/* Action — uppercase lookup now works */}
                     <td style={{ padding: '12px 16px' }}>
                       <ActionBadge action={log.action} />
                     </td>
@@ -241,8 +321,25 @@ export default function SystemLogs() {
                       )}
                     </td>
 
+                    {/* Role */}
+                    <td style={{ padding: '12px 16px' }}>
+                      {log.user_role ? (
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center',
+                          padding: '2px 8px', borderRadius: 99, fontSize: '.72rem', fontWeight: 700,
+                          background: log.user_role === 'admin' ? '#ede9fe'
+                            : log.user_role === 'hr' ? '#e0f2fe' : '#d1fae5',
+                          color: log.user_role === 'admin' ? '#7c3aed'
+                            : log.user_role === 'hr' ? '#0284c7' : '#059669',
+                        }}>
+                          {log.user_role === 'admin' ? 'Admin'
+                            : log.user_role === 'hr' ? ' HR' : 'Applicant'}
+                        </span>
+                      ) : <span style={{ color: '#9ca3af', fontSize: '.78rem' }}>—</span>}
+                    </td>
+
                     {/* Detail */}
-                    <td style={{ padding: '12px 16px', maxWidth: 300 }}>
+                    <td style={{ padding: '12px 16px', maxWidth: 280 }}>
                       <div style={{
                         fontSize: '.83rem', color: '#374151',
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -265,7 +362,7 @@ export default function SystemLogs() {
         )}
       </div>
 
-      {/* ── Pagination ── */}
+      {/* ── Pagination ──────────────────────────────────────────────────────── */}
       {totalPages > 1 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -283,7 +380,6 @@ export default function SystemLogs() {
             >
               <ChevronLeft size={13} /> Prev
             </button>
-            {/* page number pills */}
             {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
               const start = Math.max(1, Math.min(page - 2, totalPages - 4))
               const p = start + i

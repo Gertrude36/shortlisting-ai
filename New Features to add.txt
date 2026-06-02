@@ -1,0 +1,4 @@
+1. Adding Feedback section in my system
+2. Adding Methodology (Agile , Spiral)
+
+it seems like some pdfs are still not readable , because for example on ID , no some are failing to be uploaded , and the uploaded ones are still blurry may be so that the contents are not readable because like there that document I uploaded is mine , and the system is telling me that it is not mine . so may be you can adjust the pixels needed to read the documents ,,, and also another issue I have seen Is that the black pdf documents are rejected also ,, so is this problem can be resolved please give me an advice

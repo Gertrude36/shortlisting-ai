@@ -1,26 +1,21 @@
 /**
- * ApplicantDashboard.jsx — v3.0.0
+ * ApplicantDashboard.jsx — v3.3.0
  *
- * FIXES:
- *  ✅ FIX-DASH-1 — Profile completeness now includes documents check.
- *     Previously only phone + address were checked. If a user saved phone
- *     and address but never uploaded documents, the dashboard still showed
- *     "profile complete" and let them browse — then the apply page blocked
- *     them. Now all three gates (phone, address, required docs) are checked
- *     consistently using profileDocuments from AuthContext.
+ * CHANGES in v3.3.0:
+ *  ✅ FIX-DASH-8 — Removed the old inline FeedbackModal component and the
+ *     "Give Feedback" hero button. Feedback for all roles (applicants, HR,
+ *     admin) is now handled by the shared FeedbackWidget floating button
+ *     rendered inside Navbar. This removes the duplicate/broken modal that
+ *     was showing for applicants.
  *
- *  ✅ FIX-DASH-2 — profileDocuments comes from AuthContext (already fetched
- *     by verifyToken). No extra /profile/documents fetch in the dashboard.
- *
- *  ✅ FIX-DASH-3 — After profile-updated event, calls verifyToken() to
- *     re-fetch /auth/me AND /profile/documents so all gates update together.
+ * All v3.2.0 / v3.1.0 fixes retained.
  */
 import React, { useEffect, useState, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { Helmet } from 'react-helmet-async'
 import {
   Users, CheckCircle, XCircle, Bot, ShieldCheck,
-  ChevronDown, ChevronUp, RefreshCw, AlertCircle, Lock,
+  ChevronDown, ChevronUp, RefreshCw, AlertCircle, Info,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
@@ -30,21 +25,14 @@ import { useAuth } from '../context/AuthContext'
 import api from '../api/axios'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Profile completeness — phone + address + required documents
+// Profile completeness
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQUIRED_DOC_KEYS = ['id_card', 'cv', 'diploma']
-
-function getProfileIssues(user = {}, profileDocuments = []) {
+function getProfileIssues(user = {}) {
   const issues = []
-  if (!user.phone)   issues.push('Phone number')
-  if (!user.address) issues.push('Location / Address')
-
-  const uploadedTypes = new Set((profileDocuments || []).map(d => d.doc_type))
-  const missingDocs   = REQUIRED_DOC_KEYS.filter(k => !uploadedTypes.has(k))
-  if (missingDocs.length > 0) {
-    issues.push('Documents')
-  }
+  if (!user?.phone)       issues.push('Phone number')
+  if (!user?.address)     issues.push('Location / Address')
+  if (!user?.national_id) issues.push('National ID')
   return issues
 }
 
@@ -75,12 +63,33 @@ function ProfileWarningBanner({ issues, onOpenProfile }) {
 
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 800, fontSize: '1rem', color: '#78350f', marginBottom: 6 }}>
-            ⚠️ Your profile is incomplete — this affects your applications!
+            ⚠️ Your profile is incomplete
           </div>
+
           <div style={{ fontSize: '.88rem', color: '#92400e', lineHeight: 1.7, marginBottom: 14 }}>
-            The AI shortlisting system uses your profile data when evaluating your applications.
-            A complete profile increases your chances of being shortlisted.{' '}
-            <strong>You cannot start a new application until your profile is complete.</strong>
+            The AI shortlisting system uses your profile data when evaluating applications.
+            A complete profile increases your chances of being shortlisted.
+          </div>
+
+          <div style={{
+            padding: '10px 14px',
+            background: '#fef9c3',
+            border: '1px solid #fde047',
+            borderRadius: 8,
+            fontSize: '.84rem',
+            color: '#713f12',
+            marginBottom: 14,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 7,
+            lineHeight: 1.65,
+          }}>
+            <Info size={13} style={{ flexShrink: 0, marginTop: 2 }} color="#b45309" />
+            <span>
+              <strong>These fields will be filled automatically</strong> when you submit an
+              application — our AI extracts your phone, address and National ID directly
+              from your uploaded documents. You can also fill them manually below.
+            </span>
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
@@ -177,16 +186,14 @@ function BlockedBrowseButton({ onOpenProfile }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function ApplicantDashboard() {
-  // ✅ FIX-DASH-2: get profileDocuments from context — already fetched
-  const { user, profileDocuments, verifyToken } = useAuth()
+  const { user, verifyToken } = useAuth()
 
   const [applications, setApplications] = useState([])
   const [loading,      setLoading]      = useState(true)
   const [expandedRow,  setExpandedRow]  = useState(null)
   const [jobsMap,      setJobsMap]      = useState({})
 
-  // ✅ FIX-DASH-1: include documents in completeness check
-  const profileIssues   = getProfileIssues(user, profileDocuments)
+  const profileIssues   = getProfileIssues(user)
   const profileComplete = profileIssues.length === 0
 
   const fetchApplications = useCallback(() => {
@@ -197,14 +204,18 @@ export default function ApplicantDashboard() {
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { fetchApplications() }, [fetchApplications])
+  useEffect(() => {
+    fetchApplications()
+  }, [fetchApplications])
 
   useEffect(() => {
-    api.get('/jobs').then(res => {
-      const map = {}
-      res.data.forEach(job => { map[job.id] = job.title })
-      setJobsMap(map)
-    }).catch(() => {})
+    api.get('/jobs')
+      .then(res => {
+        const map = {}
+        res.data.forEach(job => { map[job.id] = job.title })
+        setJobsMap(map)
+      })
+      .catch(() => {})
   }, [])
 
   // Open the profile modal (Navbar listens for this event)
@@ -212,7 +223,7 @@ export default function ApplicantDashboard() {
     window.dispatchEvent(new Event('open-profile-modal'))
   }
 
-  // ✅ FIX-DASH-3: after profile-updated, re-run verifyToken to refresh
+  // FIX-DASH-3: after profile-updated, re-run verifyToken to refresh
   // both /auth/me (phone/address) and /profile/documents in one shot
   useEffect(() => {
     const handler = () => verifyToken()
@@ -238,6 +249,7 @@ export default function ApplicantDashboard() {
   return (
     <>
       <Helmet><title>My Applications — Shortlisting AI</title></Helmet>
+
       <div className="page-wrapper">
         <Navbar />
 
@@ -263,7 +275,7 @@ export default function ApplicantDashboard() {
             <p style={{ color: '#bfdbfe', fontSize: '.95rem', marginBottom: 16 }}>
               Welcome back,{' '}
               <strong style={{ color: '#ffffff' }}>
-                {user?.fullName || user?.full_name}
+                {user?.fullName || user?.full_name || 'User'}
               </strong>. Track your applications and AI decisions below.
             </p>
 
@@ -308,21 +320,17 @@ export default function ApplicantDashboard() {
                 <RefreshCw size={13} /> Refresh
               </button>
 
-              {profileComplete ? (
-                <Link
-                  to="/"
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 6,
-                    padding: '8px 18px', borderRadius: 6, border: 'none',
-                    background: '#ffffff', color: '#1d4ed8', fontWeight: 700,
-                    fontSize: '.85rem', textDecoration: 'none',
-                  }}
-                >
-                  Browse Positions
-                </Link>
-              ) : (
-                <BlockedBrowseButton onOpenProfile={openProfileModal} />
-              )}
+              <Link
+                to="/"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '8px 18px', borderRadius: 6, border: 'none',
+                  background: '#ffffff', color: '#1d4ed8', fontWeight: 700,
+                  fontSize: '.85rem', textDecoration: 'none',
+                }}
+              >
+                Browse Positions
+              </Link>
             </div>
           </div>
         </section>
@@ -356,43 +364,35 @@ export default function ApplicantDashboard() {
                     Browse available positions and submit your first application.
                   </p>
 
-                  {!profileComplete ? (
+                  {!profileComplete && (
                     <div style={{
-                      maxWidth: 460, margin: '0 auto 24px',
-                      padding: '18px 22px', background: '#fffbeb',
-                      border: '2px solid #f59e0b', borderRadius: 12,
-                      fontSize: '.88rem', color: '#78350f', lineHeight: 1.7,
+                      maxWidth: 480, margin: '0 auto 24px',
+                      padding: '16px 20px', background: '#fffbeb',
+                      border: '1.5px solid #f59e0b', borderRadius: 12,
+                      fontSize: '.87rem', color: '#78350f', lineHeight: 1.7,
+                      textAlign: 'left',
                     }}>
-                      <div style={{ fontWeight: 800, marginBottom: 8, fontSize: '.95rem' }}>
-                        🔒 Complete your profile before applying
+                      <div style={{ fontWeight: 800, marginBottom: 6, fontSize: '.93rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Info size={14} color="#b45309" /> Profile tip
                       </div>
-                      You cannot start an application until these fields are filled in:{' '}
-                      <strong>{profileIssues.join(', ')}</strong>.
-                      <button
-                        onClick={openProfileModal}
-                        style={{
-                          display: 'block', marginTop: 14, padding: '9px 20px',
-                          borderRadius: 8, background: '#b45309', border: 'none',
-                          color: '#fff', fontWeight: 700, fontSize: '.88rem',
-                          cursor: 'pointer', width: '100%',
-                        }}
-                      >
-                        Complete Profile First
-                      </button>
+                      Your profile is missing: <strong>{profileIssues.join(', ')}</strong>.
+                      {' '}These fields are <strong>auto-filled from your documents</strong> after
+                      you submit your first application — no manual entry needed.
+                      You can also update them manually any time.
                     </div>
-                  ) : (
-                    <Link
-                      to="/"
-                      style={{
-                        display: 'inline-flex', alignItems: 'center',
-                        padding: '10px 22px', borderRadius: 6,
-                        background: '#2563eb', color: '#ffffff',
-                        fontWeight: 700, textDecoration: 'none', fontSize: '.9rem',
-                      }}
-                    >
-                      Browse Positions
-                    </Link>
                   )}
+
+                  <Link
+                    to="/"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center',
+                      padding: '10px 22px', borderRadius: 6,
+                      background: '#2563eb', color: '#ffffff',
+                      fontWeight: 700, textDecoration: 'none', fontSize: '.9rem',
+                    }}
+                  >
+                    Browse Positions
+                  </Link>
                 </div>
 
               ) : (
@@ -426,14 +426,14 @@ export default function ApplicantDashboard() {
                             </td>
                             <td style={{ padding: '14px 16px' }}>
                               <div style={{ fontWeight: 600, color: '#111827', fontSize: '.88rem' }}>
-                                {app.education_level}
+                                {app.education_level || '—'}
                               </div>
                               <div style={{ fontSize: '.78rem', color: '#6b7280' }}>
-                                {app.field_of_study}
+                                {app.field_of_study || '—'}
                               </div>
                             </td>
                             <td style={{ padding: '14px 16px', color: '#374151', fontSize: '.88rem', fontWeight: 600 }}>
-                              {app.experience_years} yrs
+                              {app.experience_years != null ? `${app.experience_years} yrs` : '—'}
                             </td>
                             <td style={{ padding: '14px 16px' }}>
                               <DecisionBadge decision={app.decision} />

@@ -1,31 +1,22 @@
 """
-backend/auth.py  ·  v2.0.0
+backend/auth.py  ·  v2.1.0
 ────────────────────────────────────────────────────────────────
-Password hashing, JWT creation/verification, and the
-`get_current_user` / `require_hr` FastAPI dependencies.
+ALL v2.0.0 FIXES RETAINED.
 
-FIXES IN v2.0.0:
+NEW IN v2.1.0:
 
-  ✅ FIX-AUTH-1 — jose version compatibility for ExpiredSignatureError.
-     On some versions of python-jose (< 3.3.0), ExpiredSignatureError
-     is not exported from the top-level `jose` package — only from
-     `jose.exceptions`. The old import crashed with ImportError at
-     startup, causing ALL endpoints to return 500.
-     Fix: try both import paths with a safe fallback.
+  ✅ FIX-AUTH-8 — Added `require_admin` dependency.
+     System Administrator role now has its own guard.
+     Admin is the only role that can:
+       - Manage all users (add/delete HR, applicants)
+       - View and clear system logs
+       - Send HR invite codes
 
-  ✅ FIX-AUTH-2 — datetime.utcnow() replaced with datetime.now(timezone.utc)
-     (retained from previous version).
-
-  ✅ FIX-AUTH-3 — bcrypt >= 4.1 incompatibility with passlib suppressed
-     (retained from previous version).
-
-  ✅ FIX-AUTH-4 — Password Reset Token Support (retained).
-
-  ✅ FIX-AUTH-5 — require_hr / require_applicant raise clean 403 (retained).
-
-  ✅ FIX-AUTH-6 — get_current_user handles missing/None token (retained).
-
-  ✅ FIX-AUTH-7 — _safe_encode handles non-string input (retained).
+  ✅ FIX-AUTH-9 — Added `require_hr_or_admin` dependency.
+     Allows both HR and Admin to access shared routes like
+     candidate management, job management, shortlisting, and reports.
+     This means existing HR routes continue to work for HR users,
+     and Admin can also access them if needed.
 """
 
 import os
@@ -33,17 +24,8 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-# ── Suppress the harmless passlib/bcrypt __about__ warning ───────────────────
-warnings.filterwarnings(
-    "ignore",
-    message=".*error reading bcrypt version.*",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message=".*bcrypt.*",
-    category=UserWarning,
-)
+warnings.filterwarnings("ignore", message=".*error reading bcrypt version.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*bcrypt.*", category=UserWarning)
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -51,19 +33,13 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
-# ✅ FIX-AUTH-1 — Safe import for ExpiredSignatureError across jose versions.
-# python-jose < 3.3.0 does not export ExpiredSignatureError from the top-level
-# `jose` package. This caused an ImportError that silently broke ALL auth and
-# made every protected endpoint return 500. We try both import paths.
 try:
     from jose import ExpiredSignatureError, JWTError, jwt
 except ImportError:
-    # Older jose versions: ExpiredSignatureError lives in jose.exceptions
     from jose import JWTError, jwt
     try:
         from jose.exceptions import ExpiredSignatureError
     except ImportError:
-        # Ultimate fallback: treat expired as a generic JWTError subclass
         ExpiredSignatureError = JWTError
 
 from database import get_db
@@ -83,10 +59,6 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 def _safe_encode(plain) -> str:
-    """
-    ✅ FIX-AUTH-7: Coerce to str before encoding, then truncate to 72 UTF-8
-    bytes — bcrypt's hard limit. Consistent across all bcrypt/passlib versions.
-    """
     if not isinstance(plain, str):
         plain = str(plain)
     return plain.encode("utf-8")[:72].decode("utf-8", errors="ignore")
@@ -107,21 +79,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# ── ✅ FIX-AUTH-3: Token verification with expiry distinction ─────────────────
-
 def verify_access_token(token: str) -> "dict | str":
-    """
-    Decode and validate an access token.
-
-    Returns:
-      - dict payload   if valid
-      - "expired"      if the token is valid but expired
-      - "invalid"      if the token is malformed or tampered
-    """
-    # ✅ FIX-AUTH-6: guard against empty/None token
     if not token or not token.strip():
         return "invalid"
-
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
@@ -131,16 +91,9 @@ def verify_access_token(token: str) -> "dict | str":
         return "invalid"
 
 
-# ── ✅ Password Reset Tokens ──────────────────────────────────────────────────
+# ── Password Reset Tokens ─────────────────────────────────────────────────────
 
 def create_reset_token(email: str) -> str:
-    """
-    Create a short-lived JWT (15 min) for password reset.
-    Encodes:
-      - sub: user's email address
-      - purpose: "password_reset"  ← prevents reuse of access tokens
-      - exp: 15 minutes from now
-    """
     expire = datetime.now(timezone.utc) + timedelta(minutes=RESET_TOKEN_EXPIRE)
     payload = {
         "sub":     email,
@@ -151,10 +104,6 @@ def create_reset_token(email: str) -> str:
 
 
 def verify_reset_token(token: str) -> Optional[str]:
-    """
-    Decode and validate a password reset token.
-    Returns the email string if valid and not expired, else None.
-    """
     if not token or not token.strip():
         return None
     try:
@@ -173,37 +122,22 @@ def get_current_user(
     token: str     = Depends(oauth2_scheme),
     db:    Session = Depends(get_db),
 ) -> User:
-    """
-    ✅ FIX-AUTH-3 + FIX-AUTH-6: Returns machine-readable error codes in 401
-    responses so the frontend can stop the retry loop and clear its token.
-
-    Response shape on error:
-      { "detail": "human message" }
-      Header: X-Token-Error: TOKEN_EXPIRED | TOKEN_INVALID
-    """
     result = verify_access_token(token)
 
     if result == "expired":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Your session has expired. Please sign in again.",
-            headers={
-                "WWW-Authenticate": "Bearer",
-                "X-Token-Error":    "TOKEN_EXPIRED",
-            },
+            headers={"WWW-Authenticate": "Bearer", "X-Token-Error": "TOKEN_EXPIRED"},
         )
 
     if result == "invalid":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token. Please sign in again.",
-            headers={
-                "WWW-Authenticate": "Bearer",
-                "X-Token-Error":    "TOKEN_INVALID",
-            },
+            headers={"WWW-Authenticate": "Bearer", "X-Token-Error": "TOKEN_INVALID"},
         )
 
-    # result is the decoded payload dict
     try:
         user_id: int = int(result.get("sub"))
     except (TypeError, ValueError):
@@ -224,10 +158,7 @@ def get_current_user(
 
 
 def require_hr(current_user: User = Depends(get_current_user)) -> User:
-    """
-    ✅ FIX-AUTH-5: Raises a clean 403 (no WWW-Authenticate header) if the
-    logged-in user is not HR.
-    """
+    """Allows only HR role. HR manages candidates, jobs, shortlisting."""
     if current_user.role != UserRole.hr:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -237,12 +168,38 @@ def require_hr(current_user: User = Depends(get_current_user)) -> User:
 
 
 def require_applicant(current_user: User = Depends(get_current_user)) -> User:
-    """
-    ✅ FIX-AUTH-5: Raises a clean 403 if the logged-in user is not an applicant.
-    """
+    """Allows only applicant role."""
     if current_user.role != UserRole.applicant:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Applicant access required.",
+        )
+    return current_user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """
+    ✅ FIX-AUTH-8: Allows only the System Administrator role.
+    Admin controls: user management, system logs, HR invites.
+    """
+    if current_user.role != UserRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System Administrator access required.",
+        )
+    return current_user
+
+
+def require_hr_or_admin(current_user: User = Depends(get_current_user)) -> User:
+    """
+    ✅ FIX-AUTH-9: Allows both HR and Admin to access shared routes.
+    Used for: candidate management, jobs, shortlisting, reports, document downloads.
+    This ensures Admin can oversee all HR operations without needing
+    to switch accounts, while HR retains full operational access.
+    """
+    if current_user.role not in (UserRole.hr, UserRole.admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="HR or Administrator access required.",
         )
     return current_user

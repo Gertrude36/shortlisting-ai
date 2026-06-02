@@ -3,27 +3,27 @@
  *
  * FIXES IN v5.1.0 (over v5.0.0):
  *
- *   ✅ FIX WB-1 — "Retry" sub-message added when the server confirmed awake
+ *   FIX WB-1 — "Retry" sub-message added when the server confirmed awake
  *              but a document upload still failed (net error post-wake).
  *              Previously users saw nothing actionable after the banner
  *              disappeared — now the banner surfaces a "Try again" prompt
  *              if an upload error event is dispatched.
  *
- *   ✅ FIX WB-2 — "Still starting up…" past-deadline state now shows an
+ *    FIX WB-2 — "Still starting up…" past-deadline state now shows an
  *              amber pulsing ring instead of staying indigo, making it
  *              visually distinct from the normal waking state so users
  *              understand something extra is happening (ML models loading).
  *
- *   ✅ FIX WB-3 — Banner no longer flickers when rearmWakeGate() is called
+ *   FIX WB-3 — Banner no longer flickers when rearmWakeGate() is called
  *              immediately after a failed upload. Added a 400ms debounce
  *              before switching from 'awake' → 'waking' to absorb the
  *              brief status bounce that follows a network error recovery.
  *
  * All v5.0.0 fixes retained unchanged:
- *   ✅ COUNTDOWN_MS = 45s (matches WAKE_SAFETY_TIMEOUT_MS in axios.js)
- *   ✅ Honest "up to 45 seconds" wording
- *   ✅ "Still waking…" sub-state after countdown reaches 0
- *   ✅ Duplicate WakeBanner removed from ApplyPage.jsx
+ *    COUNTDOWN_MS = 45s (matches WAKE_SAFETY_TIMEOUT_MS in axios.js)
+ *    Honest "up to 45 seconds" wording
+ *    "Still waking…" sub-state after countdown reaches 0
+ *   Duplicate WakeBanner removed from ApplyPage.jsx
  *
  * Usage (unchanged — drop into App.jsx root):
  *
@@ -45,7 +45,7 @@ import { getServerStatus, onServerStatusChange } from '../api/axios'
 // Must match WAKE_SAFETY_TIMEOUT_MS in axios.js
 const COUNTDOWN_MS = 45_000
 
-// ✅ FIX WB-3: Debounce ms before accepting a waking/sleeping status after
+// FIX WB-3: Debounce ms before accepting a waking/sleeping status after
 // being awake. Prevents a single failed upload from flickering the banner.
 const REARM_DEBOUNCE_MS = 400
 
@@ -92,18 +92,18 @@ export default function WakeBanner() {
   const [msLeft,       setMsLeft]       = useState(COUNTDOWN_MS)
   const [visible,      setVisible]      = useState(false)
   const [pastDeadline, setPastDeadline] = useState(false)
-  // ✅ FIX WB-1: Show actionable retry hint after upload fails post-wake.
+  // FIX WB-1: Show actionable retry hint after upload fails post-wake.
   const [showRetryHint, setShowRetryHint] = useState(false)
 
   const startRef       = useRef(null)
   const rafRef         = useRef(null)
   const hideTimerRef   = useRef(null)
-  // ✅ FIX WB-3: Debounce timer for waking status after being awake.
+  // FIX WB-3: Debounce timer for waking status after being awake.
   const rearmDebounce  = useRef(null)
 
   useEffect(() => { injectStyles() }, [])
 
-  // ✅ FIX WB-1: Listen for upload-failed events dispatched by ApplyPage
+  //  FIX WB-1: Listen for upload-failed events dispatched by ApplyPage
   // after axios surfaces a network error on /profile/documents.
   useEffect(() => {
     const handleUploadFailed = () => {
@@ -122,7 +122,7 @@ export default function WakeBanner() {
 
   useEffect(() => {
     const unsub = onServerStatusChange((nextStatus) => {
-      // ✅ FIX WB-3: Debounce waking/sleeping transitions from awake state.
+      // FIX WB-3: Debounce waking/sleeping transitions from awake state.
       if (status === 'awake' && (nextStatus === 'waking' || nextStatus === 'sleeping')) {
         clearTimeout(rearmDebounce.current)
         rearmDebounce.current = setTimeout(() => setStatus(nextStatus), REARM_DEBOUNCE_MS)
@@ -186,7 +186,7 @@ export default function WakeBanner() {
   const C   = 2 * Math.PI * R
   const arc = C * (1 - progress / 100)
 
-  // ✅ FIX WB-2: Amber ring class for past-deadline state.
+  // FIX WB-2: Amber ring class for past-deadline state.
   const ringClass = !isAwake
     ? pastDeadline
       ? 'wb-countdown-ring-amber'
@@ -199,7 +199,7 @@ export default function WakeBanner() {
       ? 'linear-gradient(90deg, #f59e0b, #d97706)'
       : 'linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1)'
 
-  // ✅ FIX WB-2: Amber stroke for past-deadline ring.
+  // FIX WB-2: Amber stroke for past-deadline ring.
   const ringStroke = isAwake ? '#22c55e' : pastDeadline ? '#f59e0b' : '#6366f1'
 
   return (
@@ -254,7 +254,7 @@ export default function WakeBanner() {
 
         {/* Text */}
         <div style={S.textBlock}>
-          {/* ✅ FIX WB-1: Retry hint shown when upload failed after wakeup */}
+          {/* FIX WB-1: Retry hint shown when upload failed after wakeup */}
           {showRetryHint ? (
             <>
               <h2 style={{ ...S.title, color: '#f59e0b' }}>Upload failed</h2>

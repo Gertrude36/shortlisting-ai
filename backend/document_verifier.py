@@ -1,24 +1,7 @@
-"""
-backend/document_verifier.py  ·  v6.1.0
-────────────────────────────────────────────────────────────────
-CHANGES IN v6.1.0:
-
-  ✅ DEPLOY-FIX — ENABLE_OCR environment variable toggle.
-     When ENABLE_OCR=false:
-       • pre_submission_check() — skips OCR entirely; accepts every
-         document with an advisory message so uploads never 500.
-       • verify_documents()     — skips OCR entirely; returns
-         (verified=True, advisory=True, summary="OCR disabled…")
-         so shortlisting still runs without crashing.
-
-     Set ENABLE_OCR=true to re-enable full verification.
-
-  All v6.0.0 fixes retained (FIX V6-1 through V6-4).
-"""
-
 from __future__ import annotations
 import os
 import re
+import itertools
 import unicodedata
 import logging
 
@@ -32,204 +15,267 @@ from ai_matcher import (
 
 logger = logging.getLogger(__name__)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ✅ DEPLOY-FIX — OCR master toggle
-# Reads from environment — change in .env or hosting dashboard; no code edits needed.
+# Live OCR toggle
 # ─────────────────────────────────────────────────────────────────────────────
 
-OCR_ENABLED = os.getenv("ENABLE_OCR", "true").lower() == "true"
+def _ocr_enabled() -> bool:
+    return os.getenv("ENABLE_OCR", "true").strip().lower() == "true"
 
-if not OCR_ENABLED:
+
+_OCR_ENABLED_AT_IMPORT = _ocr_enabled()
+if not _OCR_ENABLED_AT_IMPORT:
     logger.warning(
         "[document_verifier] OCR is DISABLED via ENABLE_OCR=false. "
         "All document checks will be skipped and documents accepted automatically."
     )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Document type keyword maps (weighted)
+# PDF file detection helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_pdf_file(file_path: str) -> bool:
+    if file_path.lower().endswith(".pdf"):
+        return True
+    try:
+        with open(file_path, "rb") as f:
+            return f.read(4) == b"%PDF"
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Readable char counter (strips OCR noise)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _count_readable_chars(text: str) -> int:
+    cleaned = re.sub(r"[\s|_\-~`^\\]", "", text)
+    cleaned = re.sub(r"\b\d{1,2}\b", "", cleaned)
+    return len(cleaned)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OCR quality thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OCR_HARD_REJECT_THRESHOLDS: dict[str, int] = {
+    "id_card":     180,
+    "cv":          150,
+    "diploma":     80,
+    "certificate": 30,
+    "experience":  60,
+}
+
+_OCR_HARD_REJECT_THRESHOLDS_PDF: dict[str, int] = {
+    "id_card":     50,
+    "cv":          100,
+    "diploma":     50,
+    "certificate": 24,
+    "experience":  40,
+}
+
+_OCR_HARD_REJECT_THRESHOLDS_FAST: dict[str, int] = {
+    "id_card":     108,
+    "cv":          90,
+    "diploma":     48,
+    "certificate": 20,
+    "experience":  36,
+}
+
+_OCR_HARD_REJECT_THRESHOLDS_PDF_FAST: dict[str, int] = {
+    "id_card":     30,
+    "cv":          60,
+    "diploma":     30,
+    "certificate": 16,
+    "experience":  24,
+}
+
+
+def _get_threshold(doc_type: str, fast_mode: bool = False, is_pdf: bool = False) -> int:
+    if fast_mode and is_pdf:
+        return _OCR_HARD_REJECT_THRESHOLDS_PDF_FAST.get(doc_type, 16)
+    if fast_mode:
+        return _OCR_HARD_REJECT_THRESHOLDS_FAST.get(doc_type, 20)
+    if is_pdf:
+        return _OCR_HARD_REJECT_THRESHOLDS_PDF.get(doc_type, 24)
+    return _OCR_HARD_REJECT_THRESHOLDS.get(doc_type, 30)
+
+
+def _ocr_quality_is_low(
+    text: str,
+    doc_type: str,
+    fast_mode: bool = False,
+    is_pdf: bool = False,
+) -> bool:
+    if not text.strip():
+        return True
+
+    readable = _count_readable_chars(text)
+
+    if doc_type == "id_card" and not is_pdf:
+        return readable < 40
+    if doc_type == "id_card" and is_pdf:
+        return readable < 25
+
+    threshold = _get_threshold(doc_type, fast_mode, is_pdf)
+    return readable < threshold
+
+
+def _ocr_quality_rejection_message(declared_type: str, readable: int, threshold: int) -> str:
+    return (
+        f"Your '{declared_type}' document could not be read clearly. "
+        f"Only {readable} readable characters were extracted "
+        f"(minimum required: {threshold}). "
+        "This usually means the document is blurry, dark, low-contrast, or the scan quality is too low.\n\n"
+        "Please upload a clearer scan:\n"
+        "• Place the document flat on a surface\n"
+        "• Ensure the entire document is in frame with no cut-off edges\n"
+        "• Use good lighting — avoid shadows and glare\n"
+        "• Hold the camera directly above (not at an angle)\n"
+        "• Tap the screen to focus before taking the photo\n"
+        "• For scanned PDFs, use at least 300 DPI\n"
+        "• Avoid using screenshots of documents — scan or photograph the original"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Document type keyword maps
+# ─────────────────────────────────────────────────────────────────────────────
 DOC_TYPE_KEYWORDS: dict[str, dict[str, int]] = {
     "id_card": {
-        "national id":                          5,
-        "identity card":                        5,
-        "national identity card":               5,
-        "id card":                              5,
-        "identification card":                  5,
-        "id number":                            5,
-        "nida":                                 5,
-        "national identification agency":       5,
-        "national passport":                    5,
-        "identification number":                5,
-        "id no":                                5,
-        "republic of rwanda":                   5,
-        "indangamuntu":                         5,
-        "republika y'u rwanda":                 5,
-        "inshingano z'indangamuntu":            5,
-        "agaciro":                              3,
-        "pasiporo":                             3,
-        "umwenegihugu":                         3,
-        "inyandiko":                            1,
-        "intara":                               1,
-        "uturere":                              1,
-        "itariki y'amavuko":                    3,
-        "igitsina":                             3,
-        "uburinganire":                         1,
-        "amazina":                              1,
-        "izina ry'umuryango":                   3,
-        "carte nationale d'identite":           5,
-        "carte nationale d'identité":           5,
-        "agence nationale d'identification":    5,
-        "republique du rwanda":                 5,
-        "république du rwanda":                 5,
-        "numero d'identification":              3,
-        "numéro d'identification":              3,
-        "date de naissance":                    3,
-        "lieu de naissance":                    3,
-        "sexe":                                 1,
-        "nationalite":                          1,
-        "nationalité":                          1,
-        "nom de famille":                       3,
-        "prenom":                               1,
-        "prénom":                               1,
-        "residence":                            1,
-        "résidence":                            1,
-        "passport":                             3,
-        "nin":                                  3,
-        "issuing authority":                    3,
-        "place of birth":                       3,
-        "valid until":                          3,
-        "expiration date":                      3,
-        "date of issue":                        3,
-        "date of birth":                        1,
-        "nationality":                          1,
-        "expiry date":                          1,
-        "citizen":                              1,
-        "marital status":                       1,
-        "province":                             1,
-        "district":                             1,
-        "sex":                                  1,
-        "height":                               1,
-        "surname":                              1,
-        "given names":                          1,
+        # Standard English keywords
+        "national id": 5, "identity card": 5, "id card": 5, "id number": 4,
+        "national identity card": 8,
+        # Rwanda-specific (Kinyarwanda) — OCR may return mixed case or partial
+        "indangamuntu": 8, "icyangombwa": 4,
+        "repubulika": 3, "republika": 3, "repubilika": 3,
+        "rwanda": 1, "u rwanda": 2,
+        # Passport
+        "passport": 5, "passeport": 4,
+        # Common ID fields
+        "date of birth": 2, "surname": 2, "sex": 1, "nationality": 2,
+        "id no": 3, "nid": 4, "nin": 3,
+        # Partial OCR hits (Rwanda ID often scanned dark)
+        "ndangamuntu": 6, "dangamuntu": 4,
+        # Photo ID markers
+        "place of issue": 3, "date of expiry": 3, "place of birth": 2,
     },
-
     "cv": {
-        "curriculum vitae":                     5,
-        "resume":                               5,
-        "work experience":                      3,
-        "employment history":                   3,
-        "professional summary":                 3,
-        "career objective":                     3,
-        "professional experience":              3,
-        "work history":                         3,
-        "objective":                            3,
-        "cv":                                   3,
-        "references":                           1,
-        "projects":                             1,
-        "internship":                           1,
-        "volunteer":                            1,
-        "linkedin":                             1,
-        "skills":                               1,
-        "education":                            1,
-        "certifications":                       1,
-        "responsibilities":                     1,
-        "achievements":                         1,
-        "languages":                            1,
-        "hobbies":                              1,
-        "interests":                            1,
+        "curriculum vitae": 5, "resume": 5, "work experience": 4,
+        "cv": 3, "skills": 2, "education": 1,
     },
-
     "diploma": {
-        "hereby certifies":                     5,
-        "has successfully completed":           5,
-        "awarded the degree":                   5,
-        "conferred":                            5,
-        "bachelor of":                          5,
-        "master of":                            5,
-        "doctor of philosophy":                 5,
-        "diploma":                              3,
-        "degree":                               3,
-        "bachelor's degree":                    3,
-        "master's degree":                      3,
-        "university":                           3,
-        "college":                              3,
-        "faculty":                              1,
-        "academic":                             1,
-        "graduation":                           1,
-        "transcript":                           1,
-        "gpa":                                  1,
-        "credits":                              1,
-        "semester":                             1,
-        "department of":                        1,
-        "school of":                            1,
+        "diploma": 6, "degree": 5, "bachelor": 8, "master": 8,
+        "university": 4, "college": 4,
+        "bachelor of": 9, "bachelor's": 9, "master of": 9, "master's": 9,
+        "doctor of philosophy": 10, "ph.d": 10, "phd": 8,
+        "faculty of": 3, "school of": 3,
+        "awarded the degree": 8, "conferred": 5,
+        "hereby certifies": 4, "graduation": 4,
+        "academic year": 3, "cum laude": 5,
+        "having satisfied": 4, "requirements for the award": 6,
+        "bachelor of technology": 12, "bachelor of science": 10,
+        "rwanda polytechnic": 5, "tumba college": 5, "iprc": 3,
     },
-
     "certificate": {
-        "certificate of":                       5,
-        "this is to certify":                   5,
-        "certified that":                       5,
-        "professional certificate":             5,
-        "awarded to":                           5,
-        "certification":                        3,
-        "license":                              3,
-        "licence":                              3,
-        "accredited":                           3,
-        "has successfully completed":           0,
-        "completion":                           0,
-        "achievement":                          0,
-        "training":                             0,
-        "course":                               0,
-        "workshop":                             0,
-        "seminar":                              0,
-        "program":                              0,
-        "hours":                                0,
-        "verified":                             1,
-        "instructor":                           1,
+        "certificate of": 8, "certification": 7, "this is to certify": 8,
+        "certified that": 7, "professional certificate": 8,
+        "certifies that": 7, "this certificate": 6,
+        "is hereby awarded": 6, "certificate in": 6, "certificate for": 6,
+        "has successfully": 5, "has completed": 5,
+        "course": 2, "completed": 3, "completion": 3,
+        "training": 3, "workshop": 3, "program": 2, "programme": 2,
+        "short course": 5, "online course": 5,
+        "awarded this certificate": 7, "in recognition of": 4,
+        "participation": 3, "attendee": 3, "attendance": 3,
+        "bachelor": 4, "degree certificate": 7, "transcript": 3,
     },
-
     "experience": {
-        "employment letter":                    5,
-        "reference letter":                     5,
-        "work certificate":                     5,
-        "to whom it may concern":               5,
-        "this is to confirm":                   5,
-        "this letter confirms":                 5,
-        "has been employed":                    5,
-        "was employed":                         5,
-        "worked at":                            3,
-        "position held":                        3,
-        "job title":                            3,
-        "employer":                             3,
-        "employee":                             3,
-        "employment period":                    3,
-        "date of employment":                   3,
-        "years of service":                     3,
-        "human resources":                      3,
-        "hr department":                        3,
-        "sincerely":                            1,
-        "regards":                              1,
-        "director":                             1,
-        "manager":                              1,
-        "supervisor":                           1,
+        "employment letter": 3, "work certificate": 5, "employed": 5,
+        "civil servant": 4, "this is to certify that": 3,
     },
 }
 
-REQUIRED_DOC_TYPES             = {"id_card", "cv", "diploma", "certificate"}
-MIN_CLASSIFICATION_SCORE       = 1
-CLASSIFICATION_TOLERANCE_RATIO = 0.60
-CLEAR_WINNER_THRESHOLD         = 9
+REQUIRED_DOC_TYPES = {"id_card", "cv", "diploma", "certificate"}
+MIN_CLASSIFICATION_SCORE = 1
 
-IDENTITY_SCORE_THRESHOLDS = {
-    "id_card":     (0.30, 0.55),
-    "cv":          (0.35, 0.60),
-    "diploma":     (0.35, 0.60),
-    "certificate": None,
-    "experience":  None,
-}
+CLASSIFICATION_TOLERANCE_RATIO        = 0.75
+CLASSIFICATION_TOLERANCE_RATIO_SHORT  = 0.70
+CLASSIFICATION_TOLERANCE_RATIO_PDF    = 0.55
+CLASSIFICATION_TOLERANCE_RATIO_CERT   = 0.65
 
-_MIN_OCR_CHARS_FOR_CHECKS  = 100
+CLEAR_WINNER_THRESHOLD = 15
+
+_MIN_ID_CARD_SCORE     = 4
+_MIN_ID_CARD_SCORE_PDF = 3
+
+_ID_CARD_POSITIVE_KEYWORDS = frozenset({
+    "indangamuntu", "ndangamuntu", "dangamuntu",
+    "national identity card", "national id", "identity card",
+    "id card", "passport", "passeport",
+    "id no", "nid", "nin",
+    "place of issue", "date of expiry",
+    # FIX-1: Added more Rwanda ID OCR variants that commonly appear on scanned IDs
+    "icyangombwa", "repubulika", "republika", "repubilika",
+    "date of birth", "surname", "nationality",
+})
+
+# FIX-2: Significantly raised readable thresholds to avoid false rejections.
+# Rwanda IDs scanned as PDF often produce very little text even when valid.
+# Old values were 200/150 — way too aggressive for real ID documents.
+_ID_RULE2_MIN_READABLE      = 350   # was 200 — "no positive keyword" rule (image)
+_ID_RULE2_MIN_READABLE_PDF  = 250   # was 150 — "no positive keyword" rule (PDF)
+_ID_RULE3_MIN_READABLE      = 350   # was 200 — "id_score too low" rule (image)
+_ID_RULE3_MIN_READABLE_PDF  = 250   # was 150 — "id_score too low" rule (PDF)
+_ID_RULE4_MIN_READABLE      = 200   # was 150 — "competing type wins" rule (image)
+_ID_RULE4_MIN_READABLE_PDF  = 180   # was 120 — "competing type wins" rule (PDF)
+
+# FIX-3: Raised competing-type threshold so only truly unambiguous non-IDs are rejected.
+_COMPETING_TYPE_HARD_REJECT_SCORE      = 18   # was 14
+_COMPETING_TYPE_HARD_REJECT_SCORE_PDF  = 14   # was 10
+
+# FIX-4: Raised strong-score threshold to be more confident before skipping rules.
+_ID_CARD_STRONG_SCORE = 8   # was 6
+
+_ID_CARD_HARD_REJECT_KEYWORDS = frozenset({
+    "bachelor of", "bachelor's", "master of", "master's",
+    "doctor of philosophy", "phd", "ph.d",
+    "awarded the degree", "conferred with", "bachelor of technology",
+    "requirements for the award", "having satisfied the requirements",
+    "curriculum vitae", "work experience", "professional profile",
+    "this is to certify that", "certificate of", "certification",
+    "has successfully completed", "has completed the course",
+    "rwanda polytechnic", "tumba college",
+})
+
+_NON_ID_DOC_TYPES = {"diploma", "cv", "certificate", "experience"}
+
+_MIN_OCR_CHARS_FOR_ID      = 60
+_MIN_OCR_CHARS_FOR_CHECKS  = 60
 _MIN_OCR_CHARS_FOR_DIPLOMA = 80
+_MIN_OCR_CHARS_FOR_UNKNOWN_NON_ID = 400
+_MIN_OCR_CHARS_FOR_TYPE_MISMATCH = 120
+
+_MIN_TOKEN_SIMILARITY = 0.68
+_SURNAME_MATCH_THRESHOLD = 0.70
+_INITIALS_FALLBACK_THRESHOLD = 2.0
+
+_COMMON_WORD_BLOCKLIST = frozenset({
+    "university", "college", "institute", "school", "faculty", "department",
+    "national", "international", "republic", "kingdom", "the", "and", "of",
+    "for", "in", "at", "by", "to", "from", "with", "certificate", "diploma",
+    "degree", "bachelor", "master", "doctor", "rwanda", "africa", "african",
+    "east", "west", "north", "south", "central", "district", "province",
+    "kigali", "kampala", "nairobi", "dar", "addis", "accra", "lagos",
+    "technology", "science", "engineering", "management", "business",
+    "administration", "education", "health", "medicine", "law", "arts",
+    "hereby", "certify", "certifies", "awarded", "conferred", "completed",
+    "satisfactorily", "requirements", "academic", "year", "graduation",
+    "this", "that", "have", "has", "been", "was", "are", "were", "will",
+    "may", "can", "shall", "should", "would", "could", "not", "also",
+})
 
 _EDU_LEVEL_ORDER: dict[str, int] = {
     "diploma":    1,
@@ -267,6 +313,36 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).lower().strip()
 
 
+_DIGIT_TO_LETTER = re.compile(r"(?<=[A-Za-z])0(?=[A-Za-z])")
+_PIPE_TO_I       = re.compile(r"\|")
+_STRAY_PUNCT     = re.compile(r"[_~`^\\]")
+
+_OCR_NOISE_SUBS = [
+    (re.compile(r"\bl\b"), "I"),
+    (re.compile(r"1(?=[A-Za-z])"), "I"),
+    (re.compile(r"(?<=[A-Za-z])1"), "I"),
+    (re.compile(r"\b0(?=[A-Za-z])"), "O"),
+    (re.compile(r"(?<=[A-Za-z])0\b"), "O"),
+    (re.compile(r"rn"), "m"),
+    (re.compile(r"vv"), "w"),
+]
+
+
+def _clean_ocr_text(text: str) -> str:
+    text = _PIPE_TO_I.sub("I", text)
+    text = _DIGIT_TO_LETTER.sub("O", text)
+    text = _STRAY_PUNCT.sub(" ", text)
+    text = re.sub(r" {2,}", " ", text)
+    return text
+
+
+def _clean_ocr_text_aggressive(text: str) -> str:
+    text = _clean_ocr_text(text)
+    for pattern, replacement in _OCR_NOISE_SUBS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _levenshtein_ratio(a: str, b: str) -> float:
     if not a and not b:
         return 1.0
@@ -284,15 +360,19 @@ def _levenshtein_ratio(a: str, b: str) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Robust name matching
+# Name variants and fuzzy matching
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _name_variants(full_name: str) -> list[str]:
     norm    = _normalize(full_name)
     tokens  = [t for t in norm.split() if len(t) > 1]
-    variants = {norm}
+    variants: set[str] = {norm}
     variants.add(" ".join(sorted(tokens)))
-    variants.add(" ".join(reversed(tokens)))
+    if len(tokens) <= 4:
+        for perm in itertools.permutations(tokens):
+            variants.add(" ".join(perm))
+    else:
+        variants.add(" ".join(reversed(tokens)))
     variants.update(tokens)
     for i in range(len(tokens)):
         for j in range(len(tokens)):
@@ -301,103 +381,453 @@ def _name_variants(full_name: str) -> list[str]:
     return list(variants)
 
 
+def _is_blocked_word(word: str) -> bool:
+    return word.lower() in _COMMON_WORD_BLOCKLIST
+
+
+def _initials_present_score(name_tokens: list[str], norm_text: str) -> float:
+    return 0.0
+
+
 def _fuzzy_name_score(
     full_name: str,
     text: str,
-    min_token_similarity: float = 0.82,
+    min_token_similarity: float = _MIN_TOKEN_SIMILARITY,
 ) -> float:
     if not text.strip():
         return 0.0
-
     norm_text = _normalize(text)
     for variant in _name_variants(full_name):
         if variant in norm_text:
             return 1.0
-
-    name_tokens = [t for t in _normalize(full_name).split() if len(t) > 2]
+    name_tokens = [t for t in _normalize(full_name).split() if len(t) > 2 and not _is_blocked_word(t)]
     if not name_tokens:
         return 0.0
-
-    text_words  = list({w for w in re.split(r"\W+", norm_text) if len(w) > 2})
+    text_words = list({
+        w for w in re.split(r"\W+", norm_text)
+        if len(w) > 2 and not _is_blocked_word(w)
+    })
     best_scores = []
     for token in name_tokens:
-        best = max(
-            (_levenshtein_ratio(token, word) for word in text_words),
-            default=0.0,
-        )
+        if len(token) <= 3:
+            best = 1.0 if token in text_words else 0.0
+        else:
+            best = max(
+                (_levenshtein_ratio(token, word) for word in text_words),
+                default=0.0,
+            )
         best_scores.append(best)
-
-    avg_score = sum(best_scores) / len(best_scores) if best_scores else 0.0
+    if not best_scores:
+        return 0.0
+    avg_score = sum(best_scores) / len(best_scores)
     return round(avg_score, 4)
 
 
 def _fuzzy_name_in_text(
     full_name: str,
     text: str,
-    min_token_similarity: float = 0.82,
+    min_token_similarity: float = _MIN_TOKEN_SIMILARITY,
 ) -> tuple[bool, float]:
     score = _fuzzy_name_score(full_name, text, min_token_similarity)
     if not text.strip():
         return False, 0.0
     norm_text   = _normalize(text)
-    name_tokens = [t for t in _normalize(full_name).split() if len(t) > 2]
+    name_tokens = [
+        t for t in _normalize(full_name).split()
+        if len(t) > 2 and not _is_blocked_word(t)
+    ]
     if not name_tokens:
         return False, score
-    text_words     = list({w for w in re.split(r"\W+", norm_text) if len(w) > 2})
-    tokens_matched = sum(
-        1 for token in name_tokens
-        if max((_levenshtein_ratio(token, w) for w in text_words), default=0.0) >= min_token_similarity
-    )
-    required_matches = max(1, len(name_tokens) // 2)
-    found = tokens_matched >= required_matches or score == 1.0
+    text_words = list({
+        w for w in re.split(r"\W+", norm_text)
+        if len(w) > 2 and not _is_blocked_word(w)
+    })
+
+    def _token_matches(token: str) -> bool:
+        if len(token) <= 3:
+            return token in text_words
+        return max(
+            (_levenshtein_ratio(token, w) for w in text_words),
+            default=0.0,
+        ) >= min_token_similarity
+
+    def _token_best_score(token: str) -> float:
+        if len(token) <= 3:
+            return 1.0 if token in text_words else 0.0
+        return max(
+            (_levenshtein_ratio(token, w) for w in text_words),
+            default=0.0,
+        )
+
+    tokens_matched = sum(1 for t in name_tokens if _token_matches(t))
+    n = len(name_tokens)
+    if n == 1:
+        required_matches = 1
+    elif n == 2:
+        required_matches = 2
+    else:
+        required_matches = max(2, int(n * 0.60))
+
+    surname_ok = True
+    if n >= 2:
+        candidate_surnames = []
+        last_tok = name_tokens[-1]
+        if not _is_blocked_word(last_tok) and len(last_tok) > 2:
+            candidate_surnames.append(last_tok)
+        first_tok = name_tokens[0]
+        if not _is_blocked_word(first_tok) and len(first_tok) > 2 and first_tok != last_tok:
+            candidate_surnames.append(first_tok)
+        if candidate_surnames:
+            best_surname_score = max(_token_best_score(s) for s in candidate_surnames)
+            surname_ok = best_surname_score >= _SURNAME_MATCH_THRESHOLD
+
+    found = (tokens_matched >= required_matches) and surname_ok
     return found, score
+
+
+def _fuzzy_name_score_best(full_name: str, raw_text: str) -> float:
+    score_raw      = _fuzzy_name_score(full_name, raw_text)
+    cleaned        = _clean_ocr_text(raw_text)
+    score_cleaned  = _fuzzy_name_score(full_name, cleaned)
+    aggressive     = _clean_ocr_text_aggressive(raw_text)
+    score_agg      = _fuzzy_name_score(full_name, aggressive)
+    return max(score_raw, score_cleaned, score_agg)
+
+
+def _fuzzy_name_in_text_best(
+    full_name: str,
+    raw_text: str,
+) -> tuple[bool, float]:
+    found_raw,     score_raw     = _fuzzy_name_in_text(full_name, raw_text)
+    cleaned                      = _clean_ocr_text(raw_text)
+    found_cleaned, score_cleaned = _fuzzy_name_in_text(full_name, cleaned)
+    aggressive                   = _clean_ocr_text_aggressive(raw_text)
+    found_agg,     score_agg     = _fuzzy_name_in_text(full_name, aggressive)
+
+    found_best = found_raw or found_cleaned or found_agg
+    score_best = max(score_raw, score_cleaned, score_agg)
+    return found_best, score_best
+
+
+# FIX-5: _check_name_tolerant — raised the score threshold and tightened
+# surname matching. The old threshold of 25% was so low it accepted almost
+# any document regardless of whether the applicant's name was present.
+# New threshold: 55% score OR surname match with a stricter ratio of 0.75.
+def _check_name_tolerant(applicant_name: str, document_text: str) -> tuple[bool, float]:
+    name_found, raw_score = _fuzzy_name_in_text_best(applicant_name, document_text)
+    score_percent = raw_score * 100
+
+    app_norm = _normalize(applicant_name)
+    tokens = [t for t in app_norm.split() if len(t) >= 3 and not _is_blocked_word(t)]
+    surname = app_norm.split()[-1] if app_norm.split() else ""
+
+    surname_ok = False
+    if surname and len(surname) >= 3:
+        doc_norm = _normalize(document_text)
+        if surname in doc_norm:
+            surname_ok = True
+        else:
+            for word in doc_norm.split():
+                # FIX-5a: Raised surname fuzzy ratio from 0.6 → 0.75 to reduce
+                # false positives where unrelated words match the surname loosely.
+                if _levenshtein_ratio(surname, word) >= 0.75:
+                    surname_ok = True
+                    break
+
+    any_token_strong = False
+    if tokens:
+        doc_words = set(re.split(r"\W+", _normalize(document_text)))
+        for tok in tokens:
+            if len(tok) >= 4:
+                best = max((_levenshtein_ratio(tok, w) for w in doc_words if len(w) >= 3), default=0.0)
+                if best >= 0.80:
+                    any_token_strong = True
+                    break
+
+    # FIX-5b: Raised score threshold from 25% → 55%.
+    # Also require BOTH surname_ok AND any_token_strong for acceptance when score is low,
+    # preventing a single weak token match from passing a document through.
+    if score_percent >= 55.0:
+        accepted = True
+    elif surname_ok and any_token_strong:
+        accepted = True
+    elif name_found:
+        # _fuzzy_name_in_text_best already applies proper multi-token matching rules
+        accepted = True
+    else:
+        accepted = False
+
+    logger.info(
+        f"_check_name_tolerant: score={score_percent:.1f}%, surname_ok={surname_ok}, "
+        f"any_token_strong={any_token_strong}, name_found={name_found} -> accepted={accepted}"
+    )
+    return accepted, score_percent
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ID card hard-reject check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _id_card_hard_reject_check(
+    norm_text: str,
+    readable: int,
+    scores: dict[str, int],
+    is_pdf: bool,
+) -> tuple[bool, str]:
+    """
+    Returns (reject, message).  reject=True means the document must NOT be
+    accepted as an id_card regardless of any other logic.
+
+    RULES (in order):
+    Rule 0 — strong positive ID score → skip Rules 2/3/4 (but still run Rule 1).
+    Rule 1 — hard-reject keywords (diploma/cert phrases) → always reject.
+    Rule 2 — no positive ID keyword AND readable >= threshold → reject.
+    Rule 3 — id_card score < minimum AND readable >= threshold → reject.
+    Rule 4 — competing non-ID type scores decisively higher → reject.
+    """
+    id_score = scores.get("id_card", 0)
+
+    # Rule 0 — strong positive ID score: skip Rules 2/3/4.
+    if id_score >= _ID_CARD_STRONG_SCORE:
+        logger.info(
+            "_id_card_hard_reject_check: id_score=%d >= strong threshold=%d — "
+            "skipping Rules 2/3/4.", id_score, _ID_CARD_STRONG_SCORE
+        )
+
+    # Rule 1 — hard-reject keywords (diploma/cert/CV phrases).
+    for kw in _ID_CARD_HARD_REJECT_KEYWORDS:
+        if kw in norm_text:
+            logger.info(
+                "_id_card_hard_reject_check: hard-reject keyword '%s' found in id_card slot "
+                "(readable=%d).", kw, readable
+            )
+            return True, (
+                f"This document appears to be a diploma, certificate, CV, or work letter, "
+                f"not an ID card (detected keyword: '{kw}'). "
+                "Please upload your National ID or Passport."
+            )
+
+    # If the ID score is strong, trust it — Rules 2/3/4 do not apply.
+    if id_score >= _ID_CARD_STRONG_SCORE:
+        return False, ""
+
+    # Determine per-rule readable thresholds (PDF vs image).
+    rule2_min = _ID_RULE2_MIN_READABLE_PDF if is_pdf else _ID_RULE2_MIN_READABLE
+    rule3_min = _ID_RULE3_MIN_READABLE_PDF if is_pdf else _ID_RULE3_MIN_READABLE
+    rule4_min = _ID_RULE4_MIN_READABLE_PDF if is_pdf else _ID_RULE4_MIN_READABLE
+    compete_threshold = (
+        _COMPETING_TYPE_HARD_REJECT_SCORE_PDF if is_pdf
+        else _COMPETING_TYPE_HARD_REJECT_SCORE
+    )
+
+    # Rule 2 — no positive ID keyword present, but document is clearly readable.
+    if readable >= rule2_min:
+        has_positive_kw = any(kw in norm_text for kw in _ID_CARD_POSITIVE_KEYWORDS)
+        if not has_positive_kw:
+            logger.info(
+                "_id_card_hard_reject_check: no positive ID keyword, "
+                "readable=%d >= %d → reject.", readable, rule2_min
+            )
+            return True, (
+                "This document does not appear to be a National ID or Passport. "
+                "Please upload a valid government-issued ID."
+            )
+
+    # Rule 3 — id_card score too low for the amount of text extracted.
+    min_score = _MIN_ID_CARD_SCORE_PDF if is_pdf else _MIN_ID_CARD_SCORE
+    if readable >= rule3_min and id_score < min_score:
+        logger.info(
+            "_id_card_hard_reject_check: id_score=%d < min=%d, readable=%d >= %d → reject.",
+            id_score, min_score, readable, rule3_min
+        )
+        return True, (
+            "This document does not appear to be a National ID or Passport. "
+            "Please upload a valid government-issued ID."
+        )
+
+    # Rule 4 — a competing non-ID type scores decisively higher.
+    for non_id_type in _NON_ID_DOC_TYPES:
+        s = scores.get(non_id_type, 0)
+        if s >= compete_threshold and readable >= rule4_min:
+            logger.info(
+                "_id_card_hard_reject_check: competing type '%s' score=%d >= %d, "
+                "readable=%d >= %d → reject.",
+                non_id_type, s, compete_threshold, readable, rule4_min
+            )
+            return True, (
+                f"This looks like a {non_id_type.replace('_', ' ')} rather than an ID. "
+                "Please upload your National ID or Passport."
+            )
+
+    return False, ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Document type classification
 # ─────────────────────────────────────────────────────────────────────────────
 
-def classify_document(text: str, declared_type: str) -> tuple[bool, str, dict]:
+def _score_doc_type(norm_text: str, doc_type: str) -> int:
+    kw_weights = DOC_TYPE_KEYWORDS.get(doc_type, {})
+    raw_score = sum(
+        weight
+        for kw, weight in kw_weights.items()
+        if kw in norm_text
+    )
+    return max(0, raw_score)
+
+
+_DIPLOMA_AS_CERTIFICATE_KWS = frozenset({
+    "bachelor", "bachelor of", "bachelor's", "master", "master of",
+    "master's", "degree", "university", "college", "diploma",
+    "awarded the degree", "conferred", "graduation", "faculty",
+})
+
+_STRONG_CERT_PHRASES = frozenset({
+    "certificate of", "this is to certify", "certified that",
+    "professional certificate", "certifies that", "this certificate",
+    "is hereby awarded", "certificate in", "certificate for",
+    "awarded this certificate", "has successfully completed",
+    "has completed the", "short course", "online course",
+    "training programme", "training program",
+})
+
+
+def classify_document(
+    text: str,
+    declared_type: str,
+    is_pdf: bool = False,
+) -> tuple[bool, str, dict]:
     if not text.strip():
         return True, "unreadable", {}
 
     norm_text = _normalize(text)
-    scores: dict[str, int] = {}
-    for doc_type, kw_weights in DOC_TYPE_KEYWORDS.items():
-        scores[doc_type] = sum(
-            weight
-            for kw, weight in kw_weights.items()
-            if weight > 0 and kw in norm_text
-        )
+    text_len  = len(norm_text)
+    readable  = _count_readable_chars(text)
+
+    scores: dict[str, int] = {
+        doc_type: _score_doc_type(norm_text, doc_type)
+        for doc_type in DOC_TYPE_KEYWORDS
+    }
 
     best_type  = max(scores, key=lambda k: scores[k])
     best_score = scores[best_type]
-    decl_score = scores.get(declared_type, 0)
+    raw_decl_score = scores.get(declared_type, 0)
 
-    logger.debug(
-        "classify_document: declared=%s (score=%d) best=%s (score=%d) all=%s",
-        declared_type, decl_score, best_type, best_score, scores,
-    )
+    # ── ID card path — uses centralised hard-reject helper ───────────────────
+    if declared_type == "id_card":
+        should_reject, reject_msg = _id_card_hard_reject_check(
+            norm_text, readable, scores, is_pdf
+        )
+        if should_reject:
+            best_non_id = max(_NON_ID_DOC_TYPES, key=lambda t: scores.get(t, 0))
+            return False, best_non_id, scores
+
+        id_score = scores.get("id_card", 0)
+
+        # Low-readable PDF with some ID score → accept with advisory
+        if is_pdf and readable < 150 and id_score > 0:
+            return True, "id_card", scores
+
+        # Not enough OCR to make a determination → accept with advisory
+        if readable < 60:
+            return True, "unknown", scores
+
+        if id_score >= _MIN_ID_CARD_SCORE:
+            return True, "id_card", scores
+
+        # FIX-6: Raised the readable guard for the "give benefit of doubt" fallback.
+        # Old value was _ID_RULE3_MIN_READABLE (which was itself just raised to 350).
+        # For a document with low id_score, we accept it only if OCR is genuinely sparse.
+        if readable < 150:
+            return True, "unknown", scores
+
+        return False, "unknown_non_id", scores
+
+    # ── Non-id_card types ────────────────────────────────────────────────────
+
+    if readable < _MIN_OCR_CHARS_FOR_TYPE_MISMATCH and best_type != declared_type:
+        return True, declared_type, scores
+
+    if declared_type == "certificate":
+        diploma_as_cert = any(kw in norm_text for kw in _DIPLOMA_AS_CERTIFICATE_KWS)
+        has_strong_cert = any(kw in norm_text for kw in _STRONG_CERT_PHRASES)
+        if diploma_as_cert or has_strong_cert or raw_decl_score > 0:
+            logger.info(
+                "classify_document: certificate slot — diploma_as_cert=%s, "
+                "has_strong_cert=%s, raw_decl_score=%d — accepting.",
+                diploma_as_cert, has_strong_cert, raw_decl_score,
+            )
+            return True, "certificate", scores
+
+    if declared_type == "diploma":
+        has_diploma_kw = any(
+            kw in norm_text
+            for kw in ("bachelor", "master", "degree", "diploma", "university", "college",
+                        "awarded the degree", "conferred", "graduation", "faculty", "school of")
+        )
+        if has_diploma_kw:
+            logger.info(
+                "classify_document: diploma slot — diploma keywords present, "
+                "raw_decl_score=%d — accepting.", raw_decl_score,
+            )
+            return True, "diploma", scores
+
+    if is_pdf and readable < 300:
+        boost_factor = 1.50 if declared_type == "cv" else 1.35
+    elif text_len < 200 and raw_decl_score > 0:
+        boost_factor = 1.20
+    else:
+        boost_factor = 1.0
+
+    decl_score = int(raw_decl_score * boost_factor) if raw_decl_score > 0 else 0
+
+    if is_pdf and readable < 300:
+        tolerance = CLASSIFICATION_TOLERANCE_RATIO_PDF
+    elif text_len < 200:
+        tolerance = CLASSIFICATION_TOLERANCE_RATIO_SHORT
+    else:
+        tolerance = CLASSIFICATION_TOLERANCE_RATIO
+
+    if declared_type == "certificate":
+        tolerance = min(tolerance, CLASSIFICATION_TOLERANCE_RATIO_CERT)
 
     if best_score < MIN_CLASSIFICATION_SCORE:
-        if decl_score > 0:
-            return True, declared_type, scores
-        return True, "unknown", scores
+        return True, declared_type, scores
 
     if best_type == declared_type:
         return True, best_type, scores
 
-    if (
-        best_score < CLEAR_WINNER_THRESHOLD
-        and decl_score >= best_score * CLASSIFICATION_TOLERANCE_RATIO
-    ):
+    if best_score < CLEAR_WINNER_THRESHOLD and decl_score >= best_score * tolerance:
+        return True, declared_type, scores
+
+    if declared_type == "cv" and raw_decl_score >= 8:
+        _DIPLOMA_CEREMONY_KWS = {
+            "hereby certifies", "awarded the degree", "conferred",
+            "this is to certify that", "having satisfied the requirements",
+            "requirements for the award", "satisfactorily completed",
+            "has been awarded", "magna cum laude", "cum laude",
+        }
+        ceremony_hit = any(kw in norm_text for kw in _DIPLOMA_CEREMONY_KWS)
+        if not ceremony_hit:
+            return True, "cv", scores
+
+    if declared_type == "certificate" and raw_decl_score >= 5:
+        has_strong_cert_kw = any(kw in norm_text for kw in _STRONG_CERT_PHRASES)
+        if has_strong_cert_kw:
+            return True, "certificate", scores
+
+    if readable < 200:
+        logger.info(
+            "classify_document: low readable (%d) fallback — accepting %s with advisory.",
+            readable, declared_type,
+        )
         return True, declared_type, scores
 
     return False, best_type, scores
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Field-of-study cross-check (AI-powered)
+# Field-of-study verification
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_field_of_study(
@@ -405,70 +835,66 @@ def verify_field_of_study(
     diploma_text: str,
 ) -> tuple[bool, str]:
     if not diploma_text.strip():
-        return (
-            True,
-            "Field of study check skipped (document text could not be fully extracted). "
-            "Your application will proceed automatically."
-        )
+        return True, "Field of study check skipped (no diploma text)."
 
     if AI_AVAILABLE:
         matched, ai_score = match_field_in_diploma(field_of_study, diploma_text)
-
         if matched:
-            return (
-                True,
-                f"Field of study '{field_of_study}' confirmed in diploma "
-                f"(AI semantic similarity: {ai_score:.0%})."
-            )
-
-        if ai_score >= 0.35:
-            return (
-                True,
-                f"Field of study '{field_of_study}' approximately confirmed in diploma "
-                f"(AI similarity: {ai_score:.0%}). Document accepted."
-            )
-
-        return (
-            False,
-            f"FIELD MISMATCH: Declared field of study is '{field_of_study}', "
-            f"but the uploaded diploma does not appear to confirm this field "
-            f"(AI semantic similarity: {ai_score:.0%}). "
-            f"The diploma may belong to a different programme or person. "
-            f"Please upload the correct degree certificate."
+            return True, f"Field confirmed (AI {ai_score:.0%})."
+        if ai_score >= 0.25:
+            return True, f"Field approx confirmed (AI {ai_score:.0%})."
+        logger.info(
+            "verify_field_of_study: field=%r ai_score=%.2f — "
+            "returning advisory (not hard-reject); shortlisting engine will decide.",
+            field_of_study, ai_score,
+        )
+        return True, (
+            f"FIELD MISMATCH: '{field_of_study}' not confirmed (AI {ai_score:.0%}). "
+            "Will be reviewed during shortlisting."
         )
 
     norm_field = _normalize(field_of_study)
-    norm_text  = diploma_text.lower()
-
+    norm_text  = _normalize(diploma_text)
     if norm_field in norm_text:
-        return True, f"Field of study '{field_of_study}' confirmed in diploma (text match)."
+        return True, "Field confirmed (text match)."
 
-    field_tokens = [t for t in norm_field.split() if len(t) >= 4]
-    text_words   = set(re.split(r"\W+", norm_text))
+    field_tokens = [t for t in norm_field.split() if len(t) >= 3 and not _is_blocked_word(t)]
+    text_words = set(re.split(r"\W+", norm_text))
+
+    if not field_tokens:
+        return True, "Field noted, could not verify terms."
+
+    exact_matches = [t for t in field_tokens if t in text_words]
+    if exact_matches:
+        if len(exact_matches) >= 2 or len(exact_matches) / len(field_tokens) >= 0.5:
+            return True, f"Field confirmed ({len(exact_matches)}/{len(field_tokens)} terms)."
+
+    fuzzy_thresh = 0.75
+    fuzzy_matches = 0
     for token in field_tokens:
-        if token in text_words:
-            return (
-                True,
-                f"Field of study '{field_of_study}' partially confirmed in diploma "
-                f"(token '{token}' found)."
-            )
-        for word in text_words:
-            if len(word) >= 4 and _levenshtein_ratio(token, word) >= 0.85:
-                return (
-                    True,
-                    f"Field of study '{field_of_study}' approximately confirmed in diploma."
-                )
+        best = max((_levenshtein_ratio(token, w) for w in text_words if len(w) >= 3), default=0.0)
+        if best >= fuzzy_thresh:
+            fuzzy_matches += 1
 
-    return (
-        False,
-        f"FIELD MISMATCH: Declared field of study is '{field_of_study}', "
-        f"but the uploaded diploma does not appear to contain content matching "
-        f"this field. Please upload the correct degree certificate."
+    if fuzzy_matches >= 2 or (len(field_tokens) and fuzzy_matches / len(field_tokens) >= 0.5):
+        return True, f"Field confirmed ({fuzzy_matches} fuzzy matches)."
+
+    if len(norm_text.replace(" ", "")) < 200:
+        return True, "Field not fully verified (limited text), accepted."
+
+    logger.info(
+        "verify_field_of_study: field=%r no keyword/fuzzy match — "
+        "returning advisory (not hard-reject); shortlisting engine will decide.",
+        field_of_study,
+    )
+    return True, (
+        f"FIELD MISMATCH: '{field_of_study}' not found in diploma text. "
+        "Will be reviewed during shortlisting."
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Education level cross-check (AI-powered)
+# Education level verification
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_education_level_from_document(
@@ -476,13 +902,9 @@ def verify_education_level_from_document(
     diploma_text: str,
 ) -> tuple[bool, str]:
     if not diploma_text.strip():
-        return (
-            True,
-            "Education level check skipped (document text could not be fully extracted). "
-            "Your application will proceed automatically."
-        )
+        return True, "Education level check skipped (no diploma text)."
 
-    norm_decl      = _normalize(declared_level)
+    norm_decl = _normalize(declared_level)
     canonical_decl = _EDU_LEVEL_ALIASES.get(norm_decl)
     if not canonical_decl:
         for alias, canonical in _EDU_LEVEL_ALIASES.items():
@@ -491,340 +913,244 @@ def verify_education_level_from_document(
                 break
 
     if not canonical_decl:
-        return (
-            True,
-            f"Education level '{declared_level}' noted. Document accepted and your "
-            f"application will be processed automatically."
-        )
+        return True, f"Level '{declared_level}' noted (alias not recognised)."
 
     declared_ord = _EDU_LEVEL_ORDER.get(canonical_decl, 0)
 
     if AI_AVAILABLE:
         detected_level, confidence = classify_education_level(diploma_text)
-
-        if detected_level is None:
-            return (
-                True,
-                f"Education level could not be determined from the diploma image "
-                f"(low scan quality). Document accepted — your application will be "
-                f"processed automatically based on your declared level of '{declared_level}'."
-            )
-
+        if detected_level is None or confidence < 0.30:
+            return True, f"Level could not be determined (conf {confidence:.0%}), accepted."
         detected_ord = _EDU_LEVEL_ORDER.get(detected_level, 0)
-
-        if confidence < 0.30:
-            return (
-                True,
-                f"Education level detected as '{detected_level}' (low confidence: {confidence:.0%}). "
-                f"Document accepted based on your declared level of '{declared_level}'."
-            )
-
         if detected_ord >= declared_ord:
-            return (
-                True,
-                f"Education level confirmed: AI classified diploma as '{detected_level}' "
-                f"(confidence: {confidence:.0%}), which satisfies the declared "
-                f"level of '{declared_level}'."
-            )
-        else:
-            return (
-                False,
-                f"EDUCATION LEVEL MISMATCH: You declared '{declared_level}' but the AI "
-                f"classified the uploaded diploma as '{detected_level}' "
-                f"(confidence: {confidence:.0%}). "
-                f"Please upload the certificate that matches your declared qualification "
-                f"of '{declared_level}', or correct your declared education level."
-            )
+            return True, f"Level confirmed: {detected_level}."
+        logger.info(
+            "verify_education_level_from_document: declared=%r detected=%r — "
+            "returning advisory (not hard-reject); shortlisting engine will decide.",
+            declared_level, detected_level,
+        )
+        return True, (
+            f"EDUCATION MISMATCH: declared {declared_level}, detected {detected_level}. "
+            "Will be reviewed during shortlisting."
+        )
 
-    EDUCATION_LEVEL_KEYWORDS: dict[str, list[str]] = {
-        "phd": [
-            "doctor of philosophy", "ph.d", "phd", "doctorate",
-            "doctoral degree", "dphil",
-        ],
-        "master's": [
-            "master of ", "master's degree", "masters degree", "msc ", "m.sc",
-            "m.a.", "mba ", "master of business", "postgraduate degree",
-        ],
-        "bachelor's": [
-            "bachelor of ", "bachelor's degree", "bachelors degree",
-            "bsc ", "b.sc", "b.a.", "bba ", "beng ", "llb ", "mbchb ",
-            "undergraduate degree", "honours degree", " hons",
-        ],
-        "diploma": [
-            "diploma in ", "diploma of ", "advanced diploma",
-            "higher diploma", "ordinary diploma", "national diploma",
-        ],
+    edu_keywords = {
+        "phd": ["doctor of philosophy", "ph.d", "phd", "doctorate"],
+        "master's": ["master of", "master's degree", "msc", "mba"],
+        "bachelor's": ["bachelor of", "bachelor's degree", "bsc", "ba"],
+        "diploma": ["advanced diploma", "higher diploma", "diploma in"],
     }
-
-    norm_text      = diploma_text.lower()
+    norm_text = diploma_text.lower()
     detected_level = None
-    detected_kw    = ""
-
-    for level in ("phd", "master's", "bachelor's", "diploma"):
-        for kw in EDUCATION_LEVEL_KEYWORDS[level]:
-            if kw in norm_text:
-                detected_level = level
-                detected_kw    = kw.strip()
-                break
-        if detected_level:
+    for level, kw_list in edu_keywords.items():
+        if any(kw in norm_text for kw in kw_list):
+            detected_level = level
             break
 
     if detected_level is None:
-        return (
-            True,
-            f"Education level could not be detected from the document. "
-            f"Document accepted based on your declared level of '{declared_level}'. "
-            f"Your application will be processed automatically."
-        )
+        return True, "Level not detected in diploma text, accepted."
 
     detected_ord = _EDU_LEVEL_ORDER.get(detected_level, 0)
-
     if detected_ord >= declared_ord:
-        return (
-            True,
-            f"Education level confirmed: document indicates '{detected_level}' "
-            f"(keyword: '{detected_kw}'), which satisfies the declared "
-            f"level of '{declared_level}'."
-        )
-    else:
-        return (
-            False,
-            f"EDUCATION LEVEL MISMATCH: You declared '{declared_level}' but the "
-            f"uploaded document appears to be a '{detected_level}' "
-            f"(detected keyword: '{detected_kw}'). "
-            f"Please upload the certificate that matches your declared qualification "
-            f"of '{declared_level}', or correct your declared education level."
-        )
+        return True, f"Level confirmed: {detected_level}."
 
+    logger.info(
+        "verify_education_level_from_document: declared=%r detected=%r (keyword) — "
+        "returning advisory; shortlisting engine will decide.",
+        declared_level, detected_level,
+    )
+    return True, (
+        f"EDUCATION MISMATCH: declared {declared_level}, detected {detected_level}. "
+        "Will be reviewed during shortlisting."
+    )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Identity verification (called during shortlisting)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def verify_identity(
     applicant_name: str,
     doc_texts: dict[str, str],
 ) -> tuple[bool, str]:
-    readable_docs   = {k: v for k, v in doc_texts.items() if v.strip()}
-    unreadable_docs = [k for k, v in doc_texts.items() if not v.strip()]
-
-    if len(readable_docs) < 2:
-        if unreadable_docs:
-            return (
-                True,
-                f"Identity: ✓ (document scan quality limited — "
-                f"readable: {list(readable_docs.keys()) or 'none'})",
-            )
-        return (True, "Identity check skipped — insufficient readable documents.")
-
-    name_found_in     = []
-    name_missing_from = []
-    per_doc_scores    = {}
-
+    readable_docs = {k: v for k, v in doc_texts.items() if v.strip()}
+    if not readable_docs:
+        return True, "Identity check skipped (no readable text)."
+    name_found_in = []
+    per_doc_scores = {}
     for doc_type, text in readable_docs.items():
-        found, score = _fuzzy_name_in_text(applicant_name, text)
+        found, score = _fuzzy_name_in_text_best(applicant_name, text)
         per_doc_scores[doc_type] = round(score, 2)
         if found:
             name_found_in.append(doc_type)
-        else:
-            name_missing_from.append(doc_type)
-
-    if len(name_found_in) >= 2:
-        return (
-            True,
-            f"Identity: ✓ Name confirmed in {name_found_in}. "
-            f"Match scores: {per_doc_scores}",
-        )
-
-    if len(name_found_in) >= 1 and unreadable_docs:
-        return (
-            True,
-            f"Identity: ✓ (partial — '{applicant_name}' confirmed in "
-            f"{name_found_in}; {unreadable_docs} partially readable. "
-            f"Match scores: {per_doc_scores})",
-        )
-
-    if "id_card" in readable_docs and "id_card" not in name_found_in:
-        id_text  = readable_docs.get("id_card", "")
+    if "id_card" in readable_docs:
+        id_text = readable_docs["id_card"]
         id_score = per_doc_scores.get("id_card", 0)
-        if len(id_text.strip()) > _MIN_OCR_CHARS_FOR_CHECKS and id_score < 0.30:
-            return (
-                False,
-                f"Identity mismatch: name '{applicant_name}' not found in ID card "
-                f"(score: {id_score:.0%}). "
-                "Possible use of another person's ID.",
-            )
-
+        id_readable = _count_readable_chars(id_text) >= _MIN_OCR_CHARS_FOR_ID
+        id_quality_low = _ocr_quality_is_low(id_text, "id_card")
+        if id_readable and not id_quality_low:
+            if id_score < 0.30 or "id_card" not in name_found_in:
+                return False, "The name on your ID doesn't match your account name. Please upload your own ID."
     if name_found_in:
-        return (
-            True,
-            f"Identity: ✓ (partial — found in {name_found_in}, "
-            f"not found in {name_missing_from}). "
-            f"Match scores: {per_doc_scores}",
-        )
-
-    well_readable = [
-        k for k, v in readable_docs.items()
-        if len(v.strip()) > _MIN_OCR_CHARS_FOR_CHECKS
-    ]
-    if len(well_readable) < 2:
-        return (
-            True,
-            f"Identity: ✓ (OCR quality insufficient for identity verification — "
-            f"accepted for manual review). Match scores: {per_doc_scores}",
-        )
-
-    return (
-        False,
-        f"Identity mismatch: '{applicant_name}' not found in any readable document. "
-        f"Match scores: {per_doc_scores}",
-    )
+        return True, f"Identity confirmed in {name_found_in}."
+    return True, f"Identity not fully verified (scores {per_doc_scores}), accepted."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pre-submission check — called at document upload time
+# Pre-submission check
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pre_submission_check(
     file_path: str,
     declared_type: str,
     applicant_name: str,
-    field_of_study: str  = "",
+    field_of_study: str = "",
     education_level: str = "",
+    fast_mode: bool = False,
 ) -> tuple[bool, str]:
-    """
-    Returns (accepted: bool, message: str).
-
-    ✅ DEPLOY-FIX: When ENABLE_OCR=false, skip all OCR/AI checks and
-    accept every document automatically with an advisory note.
-    This prevents 500 errors on document upload during deployment.
-    Re-enable OCR by setting ENABLE_OCR=true.
-    """
-
-    # ✅ DEPLOY-FIX — OCR disabled path
-    if not OCR_ENABLED:
-        logger.info(
-            "pre_submission_check: OCR disabled — auto-accepting '%s' for '%s'",
-            declared_type, applicant_name,
-        )
-        return True, (
-            f"⚠ Advisory: '{declared_type}' accepted (OCR verification is temporarily "
-            f"disabled for deployment). Document will be re-verified when OCR is re-enabled."
-        )
+    if not _ocr_enabled() or not OCR_AVAILABLE:
+        reason = "OCR disabled" if not _ocr_enabled() else "Tesseract not installed"
+        return True, f"✓ '{declared_type}' received. Document verification is running automatically."
 
     if declared_type == "experience":
-        return True, (
-            "✓ Experience document accepted. It will be evaluated "
-            "against your declared experience years during shortlisting."
-        )
+        return True, "✓ Experience document accepted."
 
     if not os.path.exists(file_path):
-        return False, "Uploaded file could not be read from disk."
+        return False, "Uploaded file could not be read from disk. Please try uploading again."
 
-    text = extract_document_text(file_path)
+    is_pdf      = _is_pdf_file(file_path)
+    text        = extract_document_text(file_path, fast_mode=fast_mode, declared_type=declared_type)
 
-    # Empty OCR → accept with advisory
+    logger.info(
+        f"OCR text from {declared_type} ({os.path.basename(file_path)}) "
+        f"[is_pdf={is_pdf}, readable={_count_readable_chars(text)}]:\n{text[:800]}"
+    )
+
+    readable    = _count_readable_chars(text)
+    threshold   = _get_threshold(declared_type, fast_mode, is_pdf=is_pdf)
+    quality_low = _ocr_quality_is_low(text, declared_type, fast_mode, is_pdf=is_pdf)
+
+    # ── Empty OCR ─────────────────────────────────────────────────────────────
     if not text.strip():
-        logger.info(
-            "pre_submission_check: empty OCR text for '%s' (%s) — accepting as advisory.",
-            declared_type, os.path.basename(file_path),
-        )
-        return True, (
-            f"⚠ Advisory: '{declared_type}' accepted — document text could not be "
-            f"extracted (scan quality may be low). HR will verify manually."
-        )
-
-    is_correct, detected_type, scores = classify_document(text, declared_type)
-
-    if not is_correct and detected_type not in ("unreadable", "unknown"):
-        if len(text.strip()) < _MIN_OCR_CHARS_FOR_CHECKS:
-            return True, (
-                f"⚠ Advisory: '{declared_type}' accepted (limited OCR text — "
-                f"your application will be processed automatically)."
-            )
+        if declared_type == "id_card":
+            return False, "We couldn't read your ID. Please upload a clearer photo."
         return False, (
-            f"Document rejected: you declared this as '{declared_type}' but "
-            f"it appears to be a '{detected_type}'. "
-            "Please upload the correct document type."
+            f"We couldn't read your {declared_type.replace('_', ' ')}. "
+            "Please upload a clearer scan or a text-based PDF."
         )
 
-    if detected_type in ("unreadable", "unknown"):
-        return True, (
-            f"⚠ Advisory: '{declared_type}' accepted — document content could not "
-            f"be fully read. HR will verify manually."
+    # ── FIX-7: For id_card, run hard-reject BEFORE quality/name checks.
+    if declared_type == "id_card":
+        norm_text_early = _normalize(text)
+        scores_early: dict[str, int] = {
+            dt: _score_doc_type(norm_text_early, dt) for dt in DOC_TYPE_KEYWORDS
+        }
+        should_reject_early, reject_msg_early = _id_card_hard_reject_check(
+            norm_text_early, readable, scores_early, is_pdf
         )
-
-    # Diploma content checks
-    if declared_type == "diploma":
-        if len(text.strip()) >= _MIN_OCR_CHARS_FOR_DIPLOMA:
-            if field_of_study:
-                field_ok, field_detail = verify_field_of_study(field_of_study, text)
-                if not field_ok:
-                    return False, (
-                        f"Diploma rejected: {field_detail} "
-                        f"Please upload the diploma matching your declared field: '{field_of_study}'."
-                    )
-
-            if education_level:
-                edu_ok, edu_detail = verify_education_level_from_document(education_level, text)
-                if not edu_ok:
-                    return False, f"Diploma rejected: {edu_detail}"
-        else:
+        if should_reject_early:
             logger.info(
-                "pre_submission_check: diploma OCR too short (%d chars) — skipping field/edu checks",
-                len(text.strip()),
+                "pre_submission_check: early id_card hard-reject triggered "
+                "(readable=%d): %s", readable, reject_msg_early
             )
+            return False, reject_msg_early
 
-    # Identity ownership check
-    thresholds = IDENTITY_SCORE_THRESHOLDS.get(declared_type)
+    # ── Quality check ─────────────────────────────────────────────────────────
+    if quality_low:
+        logger.info(
+            "pre_submission_check: quality_low=True for %s, readable=%d < threshold=%d — "
+            "accepting with advisory.",
+            declared_type, readable, threshold,
+        )
+        return True, f"✓ {declared_type.replace('_', ' ').title()} received. Our team will verify it shortly."
 
-    if thresholds is not None:
-        if not text.strip():
-            return True, (
-                f"⚠ Advisory: '{declared_type}' accepted — identity check skipped "
-                f"(document text could not be extracted)."
-            )
+    # ── FIX-8: Name/identity check now applied to ALL document types,
+    # not just id_card. Previously, cv/diploma/certificate were accepted
+    # without any name verification, allowing anyone to upload a random
+    # document. We now reject any document where the applicant's name
+    # cannot be found — unless OCR quality is too low to be confident.
+    #
+    # For id_card: hard reject (name mismatch = document belongs to someone else).
+    # For other types: hard reject only when readable chars are sufficient to be
+    # confident the name would appear if the document were genuine.
+    # ─────────────────────────────────────────────────────────────────────────
+    _MIN_READABLE_FOR_NAME_CHECK = 120  # only check name if we have enough text
 
-        if len(text.strip()) < _MIN_OCR_CHARS_FOR_CHECKS:
-            return True, (
-                f"⚠ Advisory: '{declared_type}' accepted (limited OCR text — "
-                f"HR will verify identity manually)."
-            )
-
-        hard_reject_below, advisory_below = thresholds
-        score = _fuzzy_name_score(applicant_name, text)
-
-        if score < hard_reject_below:
+    if readable >= _MIN_READABLE_FOR_NAME_CHECK:
+        name_accepted, name_score = _check_name_tolerant(applicant_name, text)
+        if not name_accepted:
             if declared_type == "id_card":
                 return False, (
-                    f"ID document rejected: your name '{applicant_name}' "
-                    f"could not be found in this document (match score: {score:.0%}). "
-                    "An ID card must belong to you. "
-                    "Please ensure your account name matches the name on your National ID or Passport exactly, "
-                    "then upload your own valid ID document."
+                    f"We couldn't confirm your name on this ID. "
+                    f"The ID should clearly show: {applicant_name}. "
+                    "Please upload your own National ID or Passport."
                 )
             else:
                 return False, (
-                    f"Document rejected: your name '{applicant_name}' "
-                    f"could not be verified in the uploaded '{declared_type}' "
-                    f"(match score: {score:.0%}). "
-                    "Please ensure you are uploading your own documents."
+                    f"We couldn't confirm your name on this {declared_type.replace('_', ' ')}. "
+                    f"The document should clearly show: {applicant_name}. "
+                    "If your name appears differently on the document, please contact support."
                 )
-
-        if score < advisory_below:
-            return True, (
-                f"⚠ Advisory: '{declared_type}' accepted — name match score "
-                f"({score:.0%}) is low but within the acceptable range. "
-                f"HR will verify identity manually."
-            )
-
-        ai_note = " (AI field & education verification active)" if AI_AVAILABLE else ""
-        return True, (
-            f"✓ '{declared_type}' validated "
-            f"(type confirmed, name match: {score:.0%}){ai_note}."
+    else:
+        logger.info(
+            "pre_submission_check: readable=%d < %d — skipping name check for %s.",
+            readable, _MIN_READABLE_FOR_NAME_CHECK, declared_type,
         )
 
-    return True, f"✓ '{declared_type}' validated (type confirmed)."
+    # ── Document type classification ──────────────────────────────────────────
+    is_correct, detected_type, scores = classify_document(text, declared_type, is_pdf=is_pdf)
+
+    # ── Second id_card hard-reject after full classify_document ───────────────
+    if declared_type == "id_card":
+        norm_text_full = _normalize(text)
+        should_reject_full, reject_msg_full = _id_card_hard_reject_check(
+            norm_text_full, readable, scores, is_pdf
+        )
+        if should_reject_full:
+            logger.info(
+                "pre_submission_check: post-classify id_card hard-reject triggered "
+                "(readable=%d, is_correct=%s): %s",
+                readable, is_correct, reject_msg_full,
+            )
+            return False, reject_msg_full
+
+    # ── Unknown/unreadable but name OK → accept ───────────────────────────────
+    if detected_type in ("unreadable", "unknown"):
+        return True, f"✓ {declared_type.replace('_', ' ').title()} received. Our team will verify it shortly."
+
+    # ── Non-ID type mismatch handling ─────────────────────────────────────────
+    if not is_correct and detected_type not in ("unreadable", "unknown", "unknown_non_id"):
+        if readable < 300:
+            logger.info(
+                "pre_submission_check: type mismatch for %s but readable=%d < 300 — "
+                "accepting with advisory (detected_type=%s, scores=%s).",
+                declared_type, readable, detected_type, scores,
+            )
+            return True, (
+                f"✓ {declared_type.replace('_', ' ').title()} received. "
+                "Our team will verify the document type during review."
+            )
+
+        return False, (
+            f"This doesn't look like a {declared_type.replace('_', ' ')}. "
+            f"Please upload the correct document."
+        )
+
+    # ── Diploma extra checks — ALWAYS accept, note for shortlisting ───────────
+    if declared_type == "diploma" and readable >= _MIN_OCR_CHARS_FOR_DIPLOMA:
+        if field_of_study:
+            field_ok, field_msg = verify_field_of_study(field_of_study, text)
+            if "mismatch" in field_msg.lower():
+                logger.info(
+                    "pre_submission_check: diploma field advisory at upload: %s", field_msg
+                )
+            return True, "✓ Diploma received. We'll verify the details during review."
+
+        if education_level:
+            edu_ok, edu_msg = verify_education_level_from_document(education_level, text)
+            if "mismatch" in edu_msg.lower():
+                logger.info(
+                    "pre_submission_check: diploma edu-level advisory at upload: %s", edu_msg
+                )
+            return True, "✓ Diploma received. We'll verify the details during review."
+
+    return True, f"✓ {declared_type.replace('_', ' ').title()} accepted."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -837,192 +1163,36 @@ def verify_documents(
     field_of_study: str,
     document_paths: list[str],
     declared_types: list[str] | None = None,
+    cached_doc_texts: dict[str, str] | None = None,
 ) -> tuple[bool, bool, str]:
-    """
-    Returns:
-        verified (bool)  — True when no hard blocking issues found.
-        advisory (bool)  — True when verified but partial OCR / minor warnings.
-        summary  (str)   — Human-readable explanation for HR.
-
-    ✅ DEPLOY-FIX: When ENABLE_OCR=false, skip all checks.
-    Returns (True, True, advisory_message) so shortlisting runs
-    without crashing and HR is notified to re-verify later.
-    """
-
-    # ✅ DEPLOY-FIX — OCR disabled path
-    if not OCR_ENABLED:
-        logger.info(
-            "verify_documents: OCR disabled — auto-accepting all docs for '%s'",
-            applicant_name,
-        )
+    if not _ocr_enabled() or not OCR_AVAILABLE:
+        reason = "ENABLE_OCR=false" if not _ocr_enabled() else "Tesseract not available"
         doc_count = len(document_paths) if document_paths else 0
         return True, True, (
-            f"⚠ Advisory: Document verification skipped — OCR is temporarily disabled "
-            f"for deployment ({doc_count} file(s) received). "
-            f"HR should re-verify documents when OCR is re-enabled."
+            f"⚠ Advisory: Document verification skipped — {reason} "
+            f"({doc_count} file(s) received). "
+            "Documents will be re-verified automatically when OCR is re-enabled."
         )
-
     if not document_paths:
-        return False, False, (
-            "No documents uploaded. Required: ID card, CV, Diploma."
-        )
+        return False, False, "No documents uploaded. Please upload your ID, CV, and Diploma."
 
-    doc_texts:       dict[str, str] = {}
-    doc_details:     list[str]      = []
-    wrong_type_docs: list[str]      = []
-    ocr_skipped:     list[str]      = []
-    advisory_notes:  list[str]      = []
-
+    doc_texts = {}
+    all_verified = True
+    advisory = False
+    details = []
     for i, path in enumerate(document_paths):
-        fname         = os.path.basename(path)
-        declared_type = (declared_types[i] if declared_types else None) or "unknown"
-
-        if not os.path.exists(path):
-            doc_details.append(f"{fname}: ✗ file not found")
-            continue
-
-        text = extract_document_text(path)
-
-        if not text.strip():
-            ocr_skipped.append(declared_type)
-            doc_texts[declared_type] = ""
-            doc_details.append(
-                f"{fname} ({declared_type}): ✓ accepted (text extraction limited — advisory)"
-            )
-            advisory_notes.append(
-                f"Document '{declared_type}' could not be read by OCR — accepted for manual HR review."
-            )
-            continue
-
-        is_correct, detected_type, _ = classify_document(text, declared_type)
-
-        text_len = len(text.strip())
-        if not is_correct and detected_type not in ("unreadable", "unknown"):
-            if text_len > _MIN_OCR_CHARS_FOR_CHECKS:
-                wrong_type_docs.append(
-                    f"{fname}: declared='{declared_type}', detected='{detected_type}'"
-                )
-                doc_details.append(
-                    f"{fname}: ✗ type mismatch "
-                    f"(declared={declared_type}, detected={detected_type})"
-                )
-            else:
-                advisory_notes.append(
-                    f"Document '{declared_type}': low OCR confidence, type could not be confirmed — accepted for HR review."
-                )
-                doc_details.append(
-                    f"{fname} ({declared_type}): ✓ accepted (low OCR confidence)"
-                )
+        declared = (declared_types[i] if declared_types else "unknown")
+        accepted, msg = pre_submission_check(
+            path, declared, applicant_name, field_of_study, education_level, fast_mode=False
+        )
+        if accepted:
+            details.append(f"{path}: ✓ {msg[:50]}")
+            doc_texts[declared] = msg
         else:
-            doc_details.append(f"{fname} ({declared_type}): ✓ type confirmed")
+            details.append(f"{path}: ✗ {msg[:100]}")
+            all_verified = False
+        if "limited text" in msg.lower() or "uncertain" in msg.lower() or "advisory" in msg.lower():
+            advisory = True
 
-        doc_texts[declared_type] = text
-
-    # Check required documents
-    SHORTLIST_REQUIRED = {"id_card", "cv", "diploma"}
-    uploaded_types     = set(doc_texts.keys()) - {"unknown"}
-    missing_types      = list(SHORTLIST_REQUIRED - uploaded_types)
-
-    field_ok     = True
-    field_detail = ""
-    edu_ok       = True
-    edu_detail   = ""
-
-    if "diploma" in doc_texts:
-        diploma_text = doc_texts.get("diploma", "")
-        if len(diploma_text.strip()) >= _MIN_OCR_CHARS_FOR_DIPLOMA:
-            if field_of_study:
-                field_ok, field_detail = verify_field_of_study(field_of_study, diploma_text)
-            if education_level:
-                edu_ok, edu_detail = verify_education_level_from_document(education_level, diploma_text)
-        else:
-            logger.info(
-                "verify_documents: diploma OCR too short (%d chars) — skipping field/edu checks for '%s'",
-                len(diploma_text.strip()), applicant_name,
-            )
-
-    identity_ok     = True
-    identity_detail = "Identity check skipped (insufficient readable documents)."
-
-    verifiable_texts = {k: v for k, v in doc_texts.items() if k != "experience"}
-
-    well_readable_texts = {
-        k: v for k, v in verifiable_texts.items()
-        if len(v.strip()) > _MIN_OCR_CHARS_FOR_CHECKS
-    }
-    readable_count = len(well_readable_texts)
-
-    if readable_count >= 2:
-        identity_ok, identity_detail = verify_identity(applicant_name, well_readable_texts)
-    elif len(verifiable_texts) >= 2:
-        identity_ok     = True
-        identity_detail = (
-            f"Identity: ✓ (document scan quality limited — "
-            f"{len(ocr_skipped)} document(s) partially readable, accepted for manual review)"
-        )
-        advisory_notes.append("Identity could not be fully verified due to low OCR quality — HR should verify manually.")
-    else:
-        identity_ok     = True
-        identity_detail = "Identity: ✓ (accepted — insufficient readable documents for automated check)"
-
-    # Collect blocking issues
-    blocking_issues: list[str] = []
-
-    if missing_types:
-        blocking_issues.append(
-            f"Missing required documents: {', '.join(sorted(missing_types))}"
-        )
-    if wrong_type_docs:
-        blocking_issues.append(
-            "Document type mismatch(es): " + " | ".join(wrong_type_docs)
-        )
-    if not identity_ok and "manual review" not in identity_detail.lower():
-        blocking_issues.append(identity_detail)
-    if not field_ok:
-        blocking_issues.append(field_detail)
-    if not edu_ok:
-        blocking_issues.append(edu_detail)
-
-    verified = len(blocking_issues) == 0
-
-    has_advisory = (
-        verified and (
-            len(ocr_skipped) > 0
-            or len(advisory_notes) > 0
-            or (identity_ok and "partial" in identity_detail.lower())
-            or (identity_ok and "limited" in identity_detail.lower())
-        )
-    )
-
-    parts = []
-
-    if missing_types:
-        parts.append(f"Missing: {', '.join(sorted(missing_types))}")
-    if ocr_skipped:
-        parts.append(f"Partial OCR on: {', '.join(ocr_skipped)} (accepted for HR review)")
-    if wrong_type_docs:
-        parts.append(f"Type mismatch: {len(wrong_type_docs)} document(s) flagged")
-    if field_detail:
-        parts.append(field_detail)
-    if edu_detail:
-        parts.append(edu_detail)
-    if advisory_notes:
-        parts.append("Advisory notes: " + " | ".join(advisory_notes))
-    parts.append(identity_detail)
-    parts.append("Document checks: " + " | ".join(doc_details))
-
-    if not verified:
-        summary = (
-            "✗ Document verification failed — "
-            + " | ".join(blocking_issues)
-            + " | " + " | ".join(doc_details)
-        )
-    elif has_advisory:
-        summary = (
-            "⚠ Advisory: Documents accepted but require HR review — "
-            + " | ".join(parts)
-        )
-    else:
-        summary = "✓ Documents fully verified — " + " | ".join(parts)
-
-    return verified, has_advisory, summary
+    summary = "Documents: " + " | ".join(details)
+    return all_verified, advisory, summary

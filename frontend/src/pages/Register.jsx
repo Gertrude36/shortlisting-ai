@@ -166,7 +166,7 @@ function RequestInviteModal({ onClose }) {
                 >
                   {loading
                     ? <><div className="spinner" style={{ width: 14, height: 14, borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' }} /> Sending…</>
-                    : '📧 Send Invite Code'
+                    : 'Send Invite Code'
                   }
                 </button>
               </div>
@@ -422,7 +422,7 @@ export default function Register() {
                       </div>
                     </div>
 
-                    {/* ✅ NEW: Request invite code by email button */}
+                    {/* NEW: Request invite code by email button */}
                     <button
                       type="button"
                       onClick={() => setShowInviteModal(true)}
@@ -437,7 +437,7 @@ export default function Register() {
                       onMouseEnter={e => { e.currentTarget.style.background = '#fef3c7' }}
                       onMouseLeave={e => { e.currentTarget.style.background = '#fffbeb' }}
                     >
-                      📧 Don't have a code? Request it by email
+                      Don't have a code? Request it by email
                     </button>
                   </div>
                 )}
@@ -503,7 +503,7 @@ export default function Register() {
                 >
                   {loading
                     ? <><div className="spinner" style={{ width: 16, height: 16, borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' }} /> Creating account…</>
-                    : isHR ? '🔐 Create HR Account' : 'Create Account'
+                    : isHR ? 'Create HR Account' : 'Create Account'
                   }
                 </button>
               </form>
