@@ -63,7 +63,7 @@ function ProfileWarningBanner({ issues, onOpenProfile }) {
 
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 800, fontSize: '1rem', color: '#78350f', marginBottom: 6 }}>
-            ⚠️ Your profile is incomplete
+            Your profile is incomplete
           </div>
 
           <div style={{ fontSize: '.88rem', color: '#92400e', lineHeight: 1.7, marginBottom: 14 }}>

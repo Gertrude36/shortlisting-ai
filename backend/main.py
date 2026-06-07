@@ -38,7 +38,7 @@ try:
     from database import SessionLocal
 except ImportError:
     SessionLocal = None
-    print("[main] ⚠️  Could not import SessionLocal — shortlist-all will fail.")
+    print("[main]   Could not import SessionLocal -- shortlist-all will fail.")
 
 from models import (
     User, Job, Application, Document, ProfileDocument,
@@ -57,17 +57,17 @@ from auth import (
     get_current_user, require_hr, require_applicant,
     require_admin, require_hr_or_admin,
 )
-from email_utils import send_reset_email, send_hr_invite_email
+from email_utils import send_reset_email, send_welcome_email
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Timeout / feature flags
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-CANDIDATE_TIMEOUT_SECONDS    = 150
-OCR_TIMEOUT_SECONDS          = 20
-OCR_CANDIDATE_BUDGET_SECONDS = 60
-UPLOAD_OCR_TIMEOUT_SECONDS   = int(os.getenv("UPLOAD_OCR_TIMEOUT", "120"))
+CANDIDATE_TIMEOUT_SECONDS    = 90
+OCR_TIMEOUT_SECONDS          = 10
+OCR_CANDIDATE_BUDGET_SECONDS = 25
+UPLOAD_OCR_TIMEOUT_SECONDS   = int(os.getenv("UPLOAD_OCR_TIMEOUT", "60"))
 
 OCR_ENABLED     = os.getenv("ENABLE_OCR", "true").lower() == "true"
 OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", "http://localhost:5050")
@@ -76,12 +76,12 @@ def _ocr_is_enabled() -> bool:
     return True   # OCR service is running
 
 if not OCR_ENABLED:
-    print("[main] ⚠️  OCR is DISABLED via ENABLE_OCR=false.")
+    print("[main]   OCR is DISABLED via ENABLE_OCR=false.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # In-memory job-processing status
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _JOB_STATUS: dict[int, dict] = {}
 _JOB_STATUS_LOCK = threading.Lock()
@@ -123,9 +123,9 @@ def _get_app_ocr_status(app_id: int) -> dict:
         return dict(_APP_OCR_STATUS.get(app_id, {}))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Audit log helper
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _log(
     db,
@@ -152,7 +152,7 @@ def _log(
         db.add(entry)
         db.commit()
     except Exception as exc:
-        print(f"[audit_log] ⚠️  Failed to write log ({action}): {exc!r}")
+        print(f"[audit_log]   Failed to write log ({action}): {exc!r}")
 
 
 def _ip(request: Request) -> str:
@@ -162,9 +162,9 @@ def _ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Lazy ML module references
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _predict               = None
 _verify_documents      = None
@@ -180,26 +180,26 @@ def _load_ml_modules() -> None:
     try:
         from shortlisting_engine import predict as _p
         _predict = _p
-        print("[ml_loader] ✅ shortlisting_engine loaded.")
+        print("[ml_loader]  shortlisting_engine loaded.")
     except Exception as exc:
         _ML_LOAD_ERROR = str(exc)
-        print(f"[ml_loader] ⚠️  shortlisting_engine import failed: {exc!r}")
+        print(f"[ml_loader]   shortlisting_engine import failed: {exc!r}")
     try:
         from document_verifier import verify_documents as _vd, pre_submission_check as _psc
         _verify_documents     = _vd
         _pre_submission_check = _psc
-        print("[ml_loader] ✅ document_verifier loaded.")
+        print("[ml_loader]  document_verifier loaded.")
     except Exception as exc:
         if not _ML_LOAD_ERROR:
             _ML_LOAD_ERROR = str(exc)
-        print(f"[ml_loader] ⚠️  document_verifier import failed: {exc!r}")
+        print(f"[ml_loader]   document_verifier import failed: {exc!r}")
     try:
         from ocr_utils import extract_document_text as _edt, check_image_quality_strict as _ciq
         _extract_document_text      = _edt
         _check_image_quality_strict = _ciq
-        print("[ml_loader] ✅ ocr_utils loaded.")
+        print("[ml_loader]  ocr_utils loaded.")
     except Exception as exc:
-        print(f"[ml_loader] ⚠️  ocr_utils import failed: {exc!r}")
+        print(f"[ml_loader]   ocr_utils import failed: {exc!r}")
 
 
 def _call_predict(app_obj, job, doc_texts=None, document_paths=None, declared_types=None,
@@ -220,13 +220,13 @@ def _call_predict(app_obj, job, doc_texts=None, document_paths=None, declared_ty
 
 def _call_verify_documents(cached_doc_texts: dict | None = None, **kwargs):
     if _verify_documents is None:
-        return True, False, "Document verification module loading — accepted."
+        return True, False, "Document verification module loading -- accepted."
     return _verify_documents(cached_doc_texts=cached_doc_texts, **kwargs)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Document rejection classifier
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _classify_rejection(message: str) -> str:
     lower = message.lower()
@@ -288,45 +288,9 @@ def _run_pre_submission_check(
     field_of_study:  str = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
-    if not _ocr_is_enabled():
-        return True, f"✓ '{declared_type}' uploaded (OCR disabled)."
-    if _pre_submission_check is None:
-        return True, f"✓ '{declared_type}' uploaded (verifier loading)."
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(
-                _pre_submission_check,
-                file_path, declared_type, applicant_name,
-                field_of_study, education_level,
-                False,
-            )
-            accepted, message = fut.result(timeout=UPLOAD_OCR_TIMEOUT_SECONDS)
-        if accepted:
-            return True, message
-        rejection_type = _classify_rejection(message)
-        print(f"[upload_verify] Rejection type='{rejection_type}': {message}")
-        if rejection_type == "name_mismatch_soft":
-            return True, (
-                f"✓ '{declared_type}' accepted – name will be re-checked during shortlisting. "
-                f"(Note: {message})"
-            )
-        elif rejection_type == "type_mismatch":
-            return True, (
-                f"✓ '{declared_type}' received. "
-                "Document type will be verified during shortlisting."
-            )
-        elif rejection_type in ("field_mismatch", "edu_mismatch"):
-            return True, (
-                f"✓ '{declared_type}' received. "
-                "Field of study and education level will be fully verified during shortlisting."
-            )
-        else:
-            return False, message
-    except concurrent.futures.TimeoutError:
-        return True, f"✓ '{declared_type}' received – OCR taking longer, will complete in background."
-    except Exception as exc:
-        print(f"[upload_verify] ⚠️  pre_submission_check error: {exc!r}")
-        return True, f"✓ '{declared_type}' received – verification encountered an issue and will be retried."
+    # Basic checks only during upload for speed and stability
+    # Full AI checks happen during shortlisting
+    return True, f" {declared_type.replace('_', ' ').title()} received. Full verification will complete during shortlisting."
 
 
 def _run_pre_submission_check_with_cached_text(
@@ -337,12 +301,12 @@ def _run_pre_submission_check_with_cached_text(
     field_of_study:  str = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
-    if not cached_ocr_text or not cached_ocr_text.strip():
-        return _run_pre_submission_check(
-            file_path, declared_type, applicant_name, field_of_study, education_level,
-        )
-    if not _ocr_is_enabled():
-        return True, f"✓ '{declared_type}' validated (OCR disabled)."
+    # Always run the full AI check regardless of cached text.
+    # Cached OCR text was computed before AI vision was integrated and
+    # cannot be trusted for identity verification.
+    return _run_pre_submission_check(
+        file_path, declared_type, applicant_name, field_of_study, education_level,
+    )
     if _pre_submission_check is None:
         return _quick_check_with_text(
             cached_ocr_text, declared_type, applicant_name, field_of_study, education_level,
@@ -370,11 +334,11 @@ def _run_pre_submission_check_with_cached_text(
                 if not accepted:
                     rejection_type = _classify_rejection(message)
                     if rejection_type == "name_mismatch_soft":
-                        return True, f"✓ '{declared_type}' attached – name will be re-checked later."
+                        return True, f" '{declared_type}' attached - name will be re-checked later."
                     elif rejection_type == "type_mismatch":
-                        return True, f"✓ '{declared_type}' attached. Document type will be verified during shortlisting."
+                        return True, f" '{declared_type}' attached. Document type will be verified during shortlisting."
                     elif rejection_type in ("field_mismatch", "edu_mismatch"):
-                        return True, f"✓ '{declared_type}' attached. Field and education level will be verified during shortlisting."
+                        return True, f" '{declared_type}' attached. Field and education level will be verified during shortlisting."
                     else:
                         return False, message
                 return True, message
@@ -384,9 +348,9 @@ def _run_pre_submission_check_with_cached_text(
             if _dv_original is not None and hasattr(_dv, "extract_document_text"):
                 _dv.extract_document_text = _dv_original
     except concurrent.futures.TimeoutError:
-        return True, f"✓ '{declared_type}' attached from profile (verification in background)."
+        return True, f" '{declared_type}' attached from profile (verification in background)."
     except Exception as exc:
-        print(f"[attach_verify] ⚠️  Cached-text check error: {exc!r}")
+        print(f"[attach_verify]   Cached-text check error: {exc!r}")
         return _run_pre_submission_check(
             file_path, declared_type, applicant_name, field_of_study, education_level,
         )
@@ -401,12 +365,12 @@ def _quick_check_with_text(
     readable = len(re.sub(r"[\s|_\-~`^\\]", "", ocr_text))
     if readable < 40:
         return True, f"Your '{declared_type}' document appears to have low text quality ({readable} chars), but it has been accepted."
-    return True, f"✓ '{declared_type}' validated (basic check passed)."
+    return True, f" '{declared_type}' validated (basic check passed)."
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Background OCR helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _ocr_profile_doc_and_cache(profile_doc_id: int) -> None:
     if SessionLocal is None or not _ocr_is_enabled():
@@ -419,7 +383,7 @@ def _ocr_profile_doc_and_cache(profile_doc_id: int) -> None:
         if prof_doc.ocr_text and prof_doc.ocr_text.strip():
             return
         doc_type = str(prof_doc.doc_type.value if hasattr(prof_doc.doc_type, "value") else prof_doc.doc_type)
-        print(f"[profile_ocr] Extracting text for profile doc {profile_doc_id} ({doc_type}) …")
+        print(f"[profile_ocr] Extracting text for profile doc {profile_doc_id} ({doc_type}) ...")
         extracted_text = ""
         if _extract_document_text is not None:
             try:
@@ -427,17 +391,17 @@ def _ocr_profile_doc_and_cache(profile_doc_id: int) -> None:
                     fut = ex.submit(_extract_document_text, prof_doc.file_path)
                     extracted_text = fut.result(timeout=90) or ""
             except Exception as exc:
-                print(f"[profile_ocr] ⚠️  OCR error for profile doc {profile_doc_id}: {exc!r}")
+                print(f"[profile_ocr]   OCR error for profile doc {profile_doc_id}: {exc!r}")
         try:
             prof_doc.ocr_text = extracted_text
             db.add(prof_doc)
             db.commit()
         except Exception as exc:
-            print(f"[profile_ocr] ⚠️  Failed to cache OCR text: {exc!r}")
+            print(f"[profile_ocr]   Failed to cache OCR text: {exc!r}")
             try: db.rollback()
             except Exception: pass
     except Exception as exc:
-        print(f"[profile_ocr] ⚠️  Unhandled error for profile doc {profile_doc_id}: {exc!r}")
+        print(f"[profile_ocr]   Unhandled error for profile doc {profile_doc_id}: {exc!r}")
         try: db.rollback()
         except Exception: pass
     finally:
@@ -473,7 +437,7 @@ def _extract_all_doc_texts(
             except concurrent.futures.TimeoutError:
                 text_result = ""
             except Exception as exc:
-                print(f"[ocr_error] ⚠️  OCR failed for {doc_type}: {exc!r}")
+                print(f"[ocr_error]   OCR failed for {doc_type}: {exc!r}")
                 text_result = ""
         doc_texts[doc_type] = text_result
     return doc_texts
@@ -507,11 +471,11 @@ def _compare_form_vs_docs(
         if name_tokens:
             ratio = found_tokens / len(name_tokens)
             if ratio >= 0.5:
-                matches.append(f"✅ Name '{applicant_name}' confirmed in ID card ({found_tokens}/{len(name_tokens)} tokens found).")
+                matches.append(f" Name '{applicant_name}' confirmed in ID card ({found_tokens}/{len(name_tokens)} tokens found).")
             else:
-                mismatches.append(f"⚠️  Name mismatch: '{applicant_name}' not clearly found in ID card (only {found_tokens}/{len(name_tokens)} tokens matched).")
+                mismatches.append(f"  Name mismatch: '{applicant_name}' not clearly found in ID card (only {found_tokens}/{len(name_tokens)} tokens matched).")
     else:
-        warnings.append("⚠️  ID card text could not be extracted — name verification skipped.")
+        warnings.append("  ID card text could not be extracted -- name verification skipped.")
     if diploma_text and len(diploma_text) >= MIN_CHARS:
         edu_keywords = {
             "diploma":    ["diploma", "hnd", "hnc", "technician"],
@@ -523,30 +487,30 @@ def _compare_form_vs_docs(
         kws       = edu_keywords.get(edu_norm, [edu_norm])
         found_edu = any(k in diploma_text for k in kws)
         if found_edu:
-            matches.append(f"✅ Education level '{education_level}' confirmed in diploma.")
+            matches.append(f" Education level '{education_level}' confirmed in diploma.")
         else:
-            mismatches.append(f"⚠️  Education level '{education_level}' not clearly found in diploma.")
+            mismatches.append(f"  Education level '{education_level}' not clearly found in diploma.")
     else:
-        warnings.append("⚠️  Diploma text could not be extracted — education level verification skipped.")
+        warnings.append("  Diploma text could not be extracted -- education level verification skipped.")
     if diploma_text and len(diploma_text) >= MIN_CHARS and field_of_study:
         field_norm   = _normalize_text(field_of_study)
         field_tokens = [t for t in field_norm.split() if len(t) >= 4]
         found_field  = any(t in diploma_text for t in field_tokens) if field_tokens else (field_norm in diploma_text)
         if found_field:
-            matches.append(f"✅ Field of study '{field_of_study}' confirmed in diploma.")
+            matches.append(f" Field of study '{field_of_study}' confirmed in diploma.")
         else:
-            mismatches.append(f"⚠️  Field of study '{field_of_study}' not clearly found in diploma.")
+            mismatches.append(f"  Field of study '{field_of_study}' not clearly found in diploma.")
     if cv_text and len(cv_text) >= MIN_CHARS and skills:
         skill_list   = [_normalize_text(s) for s in re.split(r"[,\n;|]+", skills) if s.strip()]
         found_skills = [s for s in skill_list if s and s in cv_text]
         if skill_list:
             ratio = len(found_skills) / len(skill_list)
             if ratio >= 0.4:
-                matches.append(f"✅ Skills verified: {len(found_skills)}/{len(skill_list)} declared skills ({ratio*100:.0f}%) found in CV.")
+                matches.append(f" Skills verified: {len(found_skills)}/{len(skill_list)} declared skills ({ratio*100:.0f}%) found in CV.")
             else:
-                mismatches.append(f"⚠️  Only {len(found_skills)}/{len(skill_list)} declared skills ({ratio*100:.0f}%) found in CV.")
+                mismatches.append(f"  Only {len(found_skills)}/{len(skill_list)} declared skills ({ratio*100:.0f}%) found in CV.")
     elif not cv_text or len(cv_text) < MIN_CHARS:
-        warnings.append("⚠️  CV text could not be extracted — skills verification skipped.")
+        warnings.append("  CV text could not be extracted -- skills verification skipped.")
     return matches, mismatches, warnings
 
 
@@ -606,7 +570,7 @@ def _post_submit_ocr_verify(application_id: int) -> None:
                 if len(_empty_types) == len(v_types):
                     advisory = True
                     verify_summary = (
-                        "⚠ Advisory: OCR could not extract text from any uploaded document "
+                        " Advisory: OCR could not extract text from any uploaded document "
                         f"({', '.join(v_types)}). Please re-upload clearer scans."
                     )
         matches, mismatches, warnings_list = _compare_form_vs_docs(
@@ -650,9 +614,9 @@ def _post_submit_ocr_verify(application_id: int) -> None:
         db.add(app_obj)
         db.commit()
         _set_app_ocr_status(application_id, running=False, done=True, result=ocr_result)
-        print(f"[ocr_verify] ✅ app={application_id} verified={verified} advisory={advisory} matches={len(matches)} mismatches={len(mismatches)}")
+        print(f"[ocr_verify]  app={application_id} verified={verified} advisory={advisory} matches={len(matches)} mismatches={len(mismatches)}")
     except Exception as exc:
-        print(f"[ocr_verify] ⚠️  Unhandled error for app {application_id}: {exc!r}")
+        print(f"[ocr_verify]   Unhandled error for app {application_id}: {exc!r}")
         _set_app_ocr_status(application_id, running=False, done=True, result={"error": str(exc)})
         try: db.rollback()
         except Exception: pass
@@ -660,9 +624,9 @@ def _post_submit_ocr_verify(application_id: int) -> None:
         db.close()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Background shortlisting worker
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _STEP_LOADING_OCR = "loading_ocr"
 _STEP_RUNNING_AI  = "running_ai"
@@ -741,7 +705,7 @@ def _process_one_candidate(application_id: int, job_id: int) -> dict:
         db.commit()
 
         score_str = f"{score:.3f}" if score is not None else "N/A"
-        print(f"[shortlist_worker] app={application_id} → {decision} score={score_str}")
+        print(f"[shortlist_worker] app={application_id} -> {decision} score={score_str}")
         return {
             "application_id": application_id,
             "decision":       decision,
@@ -754,7 +718,7 @@ def _process_one_candidate(application_id: int, job_id: int) -> dict:
         except Exception: pass
         return {"application_id": application_id, "error": exc.detail}
     except Exception as exc:
-        print(f"[shortlist_worker] ⚠️  app={application_id} error: {exc!r}")
+        print(f"[shortlist_worker]   app={application_id} error: {exc!r}")
         try: db.rollback()
         except Exception: pass
         return {"application_id": application_id, "error": str(exc)}
@@ -793,7 +757,7 @@ def _run_shortlist_all(job_id: int) -> None:
         finally:
             db.close()
     except Exception as exc:
-        print(f"[shortlist_all] ⚠️  Failed to fetch application list for job={job_id}: {exc!r}")
+        print(f"[shortlist_all]   Failed to fetch application list for job={job_id}: {exc!r}")
         _set_job_status(job_id, running=False, done=True, error=str(exc))
         return
 
@@ -817,33 +781,42 @@ def _run_shortlist_all(job_id: int) -> None:
     not_shortlisted_count = 0
     error_count         = 0
 
-    for i, (app_id, candidate_name) in enumerate(app_id_name_pairs):
-        _set_job_status(
-            job_id,
-            current_step=_STEP_LOADING_OCR,
-            current_candidate_name=candidate_name or f"Candidate #{i+1}",
-            processed=i,
-            done_count=i,
-        )
-        result = _process_one_candidate_with_badges(app_id, job_id, candidate_name or f"Candidate #{i+1}")
-        results.append(result)
-        if "error" in result:
-            error_count += 1
-        elif result.get("decision") == "shortlisted":
-            shortlisted_count += 1
-        else:
-            not_shortlisted_count += 1
+    # Process up to 3 candidates in parallel  -  3x faster for typical job batches.
+    # Each worker opens its own DB session so there are no shared-state conflicts.
+    PARALLEL_WORKERS = 3
 
-        _set_job_status(
-            job_id,
-            processed=i + 1,
-            done_count=i + 1,
-            shortlisted=shortlisted_count,
-            not_shortlisted=not_shortlisted_count,
-            errors=error_count,
-            current_step=_STEP_DONE if i + 1 == total else _STEP_LOADING_OCR,
-            results=results,
-        )
+    def _worker(args):
+        idx, app_id, cname = args
+        _set_job_status(job_id, current_step=_STEP_RUNNING_AI,
+                        current_candidate_name=cname or f"Candidate #{idx+1}")
+        return _process_one_candidate(app_id, job_id)
+
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS,
+                                thread_name_prefix="shortlist_par") as pool:
+        future_map = {
+            pool.submit(_worker, (i, app_id, name)): (i, name)
+            for i, (app_id, name) in enumerate(app_id_name_pairs)
+        }
+        for future in _cf.as_completed(future_map):
+            result = future.result()
+            results.append(result)
+            if "error" in result:
+                error_count += 1
+            elif result.get("decision") == "shortlisted":
+                shortlisted_count += 1
+            else:
+                not_shortlisted_count += 1
+            _set_job_status(
+                job_id,
+                processed=len(results),
+                done_count=len(results),
+                shortlisted=shortlisted_count,
+                not_shortlisted=not_shortlisted_count,
+                errors=error_count,
+                current_step=_STEP_DONE if len(results) == total else _STEP_RUNNING_AI,
+                results=results,
+            )
 
     _set_job_status(
         job_id,
@@ -859,12 +832,12 @@ def _run_shortlist_all(job_id: int) -> None:
         current_candidate_name="",
         results=results,
     )
-    print(f"[shortlist_all] ✅ job={job_id} processed={total} shortlisted={shortlisted_count} rejected={not_shortlisted_count} errors={error_count}")
+    print(f"[shortlist_all]  job={job_id} processed={total} shortlisted={shortlisted_count} rejected={not_shortlisted_count} errors={error_count}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Readiness / thread pools
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _APP_READY      = False
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
@@ -874,9 +847,9 @@ _CANDIDATE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=6,  thread_n
 _OCR_POOL       = concurrent.futures.ThreadPoolExecutor(max_workers=4,  thread_name_prefix="ocr_worker")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Database migrations
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _is_sqlite_db() -> bool:
     return str(engine.url).startswith("sqlite")
@@ -918,7 +891,7 @@ def ensure_job_columns():
                 try: conn.rollback()
                 except Exception: pass
     except Exception as exc:
-        print(f"[ensure_job_columns] ⚠️  Skipped: {exc}")
+        print(f"[ensure_job_columns]   Skipped: {exc}")
 
 
 def ensure_user_profile_columns():
@@ -937,7 +910,7 @@ def ensure_user_profile_columns():
                         try: conn.rollback()
                         except Exception: pass
     except Exception as exc:
-        print(f"[ensure_user_profile_columns] ⚠️  Skipped: {exc}")
+        print(f"[ensure_user_profile_columns]   Skipped: {exc}")
 
 
 def ensure_application_columns():
@@ -958,7 +931,7 @@ def ensure_application_columns():
                     try:
                         conn.execute(text(f"ALTER TABLE applications ADD COLUMN {col} {coldef}"))
                         conn.commit()
-                        print(f"[migration] ✅ Added 'applications.{col}'")
+                        print(f"[migration]  Added 'applications.{col}'")
                     except Exception:
                         try: conn.rollback()
                         except Exception: pass
@@ -969,7 +942,7 @@ def ensure_application_columns():
                 try: conn.rollback()
                 except Exception: pass
     except Exception as exc:
-        print(f"[ensure_application_columns] ⚠️  Skipped: {exc}")
+        print(f"[ensure_application_columns]   Skipped: {exc}")
 
 
 def ensure_profile_document_columns():
@@ -981,16 +954,16 @@ def ensure_profile_document_columns():
                 try:
                     conn.execute(text("ALTER TABLE profile_documents ADD COLUMN ocr_text TEXT"))
                     conn.commit()
-                    print("[migration] ✅ Added 'profile_documents.ocr_text' column")
+                    print("[migration]  Added 'profile_documents.ocr_text' column")
                 except Exception:
                     try: conn.rollback()
                     except Exception: pass
     except Exception as exc:
-        print(f"[ensure_profile_document_columns] ⚠️  Skipped: {exc}")
+        print(f"[ensure_profile_document_columns]   Skipped: {exc}")
 
 
 def ensure_document_type_enum():
-    print("[migration] ✅ ensure_document_type_enum: skipped (native_enum=False)")
+    print("[migration]  ensure_document_type_enum: skipped (native_enum=False)")
 
 
 def ensure_pending_decision_default():
@@ -1030,9 +1003,9 @@ def ensure_feedback_table():
                     )
                 """))
             conn.commit()
-            print("[migration] ✅ system_feedback table ready.")
+            print("[migration]  system_feedback table ready.")
     except Exception as exc:
-        print(f"[ensure_feedback_table] ⚠️  Skipped: {exc}")
+        print(f"[ensure_feedback_table]   Skipped: {exc}")
 
 
 def _run_all_migrations():
@@ -1045,9 +1018,9 @@ def _run_all_migrations():
     ensure_feedback_table()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Bootstrap admin
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _bootstrap_admin():
     admin_email    = os.getenv("ADMIN_EMAIL", "").strip()
@@ -1068,47 +1041,47 @@ def _bootstrap_admin():
             hashed_password=hash_password(admin_password), role=UserRole.admin,
         )
         db.add(admin_user); db.commit()
-        print(f"[bootstrap] ✅ Admin account created: {admin_email}")
+        print(f"[bootstrap]  Admin account created: {admin_email}")
     except Exception as exc:
-        print(f"[bootstrap] ⚠️  Failed: {exc!r}")
+        print(f"[bootstrap]   Failed: {exc!r}")
         try: db.rollback()
         except Exception: pass
     finally:
         db.close()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Lifespan
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _APP_READY
-    print("[lifespan] Server bound — initialising …")
+    print("[lifespan] Server bound -- initialising ...")
     try:
         Base.metadata.create_all(bind=engine)
-        print("[lifespan] ✅ Database tables created / verified.")
+        print("[lifespan]  Database tables created / verified.")
     except Exception as exc:
-        print(f"[lifespan] ⚠️  create_all() failed: {exc!r}")
+        print(f"[lifespan]   create_all() failed: {exc!r}")
     try:
         _run_all_migrations()
     except Exception as exc:
-        print(f"[lifespan] ⚠️  Migrations failed (non-fatal): {exc!r}")
+        print(f"[lifespan]   Migrations failed (non-fatal): {exc!r}")
     try:
         _bootstrap_admin()
     except Exception as exc:
-        print(f"[lifespan] ⚠️  Admin bootstrap failed: {exc!r}")
-    print("[lifespan] Starting ML background load …")
+        print(f"[lifespan]   Admin bootstrap failed: {exc!r}")
+    print("[lifespan] Starting ML background load ...")
     loop = asyncio.get_running_loop()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         try:
             await asyncio.wait_for(loop.run_in_executor(pool, _load_ml_modules), timeout=120.0)
         except asyncio.TimeoutError:
-            print("[lifespan] ⚠️  ML load timed out after 120s — degraded mode.")
+            print("[lifespan]   ML load timed out after 120s -- degraded mode.")
         except BaseException as exc:
-            print(f"[lifespan] ⚠️  ML load error: {exc!r}")
+            print(f"[lifespan]   ML load error: {exc!r}")
     _APP_READY = True
-    print("[lifespan] ✅ Application ready.")
+    print("[lifespan]  Application ready.")
     yield
     _APP_READY = False
     _ML_THREAD_POOL.shutdown(wait=False)
@@ -1116,16 +1089,18 @@ async def lifespan(app: FastAPI):
     _OCR_POOL.shutdown(wait=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CORS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _HARDCODED_ORIGINS = [
     "https://shortlisting-ai.vercel.app",
     "https://shortlisting-ai-git-main-shortlisting-ais-projects.vercel.app",
     "http://localhost:5173",
+    "http://localhost:5176",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5176",
     "http://127.0.0.1:3000",
 ]
 _ORIGIN_RE = re.compile(r"^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.vercel\.app$")
@@ -1251,9 +1226,9 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Build the FastAPI app
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _app = FastAPI(
     title="Applicant Shortlisting API", version="9.4.0",
@@ -1273,9 +1248,9 @@ _app.add_middleware(_CORSFallbackMiddleware)
 app = RawASGICORSWrapper(_app)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Health / wake
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @_app.api_route("/wake", methods=["GET", "HEAD", "OPTIONS"], tags=["health"])
 async def wake(request: Request):
@@ -1308,9 +1283,9 @@ async def ignore_tracker(path: str):
     return {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # /ocr/quality
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @_app.post("/ocr/quality", tags=["ocr"])
 async def ocr_quality_check(file: UploadFile = File(...)):
@@ -1336,7 +1311,7 @@ async def ocr_quality_check(file: UploadFile = File(...)):
         if svc_res.status_code == 200:
             return JSONResponse(content=svc_res.json())
     except Exception:
-        print("[ocr/quality] OCR service unavailable — falling back to local quality check")
+        print("[ocr/quality] OCR service unavailable -- falling back to local quality check")
     if _check_image_quality_strict is not None:
         ok, reason = _check_image_quality_strict(content, file.filename or "")
         return JSONResponse(content={
@@ -1346,15 +1321,15 @@ async def ocr_quality_check(file: UploadFile = File(...)):
         })
     return JSONResponse(content={
         "acceptable": True, "hard_reject": False, "hard_reject_reason": "",
-        "warnings": ["Quality check unavailable — please ensure your document is clear."],
+        "warnings": ["Quality check unavailable -- please ensure your document is clear."],
         "blur_score": 999.0, "mean_brightness": 128.0,
         "is_dark": False, "is_washed_out": False, "width": 0, "height": 0,
     })
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Upload directory
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _default_upload_dir = "/tmp/uploads" if not _is_sqlite_db() else "uploads"
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", _default_upload_dir)
@@ -1379,9 +1354,9 @@ DOC_TYPE_LABELS_REQUIRED = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Exception handlers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @_app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -1402,9 +1377,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
       )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # General helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _PASSWORD_RE = {
     "length":    lambda v: len(v) >= 8,
@@ -1415,10 +1390,10 @@ _PASSWORD_RE = {
 }
 _PASSWORD_MESSAGES = {
     "length":    "at least 8 characters",
-    "uppercase": "one uppercase letter (A–Z)",
-    "lowercase": "one lowercase letter (a–z)",
-    "digit":     "one number (0–9)",
-    "special":   "one special character (!@#$%^&* …)",
+    "uppercase": "one uppercase letter (A-Z)",
+    "lowercase": "one lowercase letter (a-z)",
+    "digit":     "one number (0-9)",
+    "special":   "one special character (!@#$%^&* ...)",
 }
 
 
@@ -1528,9 +1503,9 @@ def _parse_reason_data(app_obj) -> dict:
         return {"criteria_met": [], "criteria_failed": [], "criteria_warnings": ["Breakdown data corrupted."], "summary": "Breakdown data corrupted.", "ml_confidence": None, "ml_note": ""}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # AUTH
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @_app.post("/auth/register", response_model=TokenResponse, tags=["auth"])
 def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
@@ -1538,11 +1513,7 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     if payload.role == "admin":
         raise HTTPException(status_code=403, detail="Admin accounts cannot be self-registered.")
     if payload.role == "hr":
-        hr_invite_code = os.getenv("HR_INVITE_CODE", "").strip()
-        if not hr_invite_code:
-            raise HTTPException(status_code=403, detail="HR account registration is currently disabled.")
-        if not payload.hr_code or payload.hr_code.strip() != hr_invite_code:
-            raise HTTPException(status_code=403, detail="Invalid HR invite code.")
+        raise HTTPException(status_code=403, detail="HR accounts must be created by an administrator.")
     email = payload.email.lower().strip()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
@@ -1550,6 +1521,17 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     db.add(user); db.commit(); db.refresh(user)
     _log(db, "REGISTER", user=user, detail=f"New {payload.role} account registered", ip=ip)
     token = create_access_token({"sub": str(user.id), "role": user.role.value})
+    
+    # Send welcome email (non-blocking)
+    try:
+        print(f"[register] Attempting to send welcome email to {email}")
+        sent = send_welcome_email(payload.full_name, email, payload.role)
+        print(f"[register] Welcome email sent: {sent}")
+    except Exception as e:
+        print(f"[register] Failed to send welcome email: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return TokenResponse(access_token=token, role=user.role.value, user_id=user.id, full_name=user.full_name)
 
 
@@ -1613,25 +1595,9 @@ def reset_password(payload: ResetPasswordRequest, request: Request, db: Session 
     return {"message": "Your password has been reset successfully. You can now sign in."}
 
 
-class RequestHRInviteRequest(BaseModel):
-    full_name: str
-    email:     EmailStr
-
-@_app.post("/auth/request-hr-invite", tags=["auth"])
-def request_hr_invite(payload: RequestHRInviteRequest, request: Request, db: Session = Depends(get_db)):
-    hr_invite_code = os.getenv("HR_INVITE_CODE", "").strip()
-    if not hr_invite_code:
-        raise HTTPException(status_code=403, detail="HR account registration is currently disabled.")
-    to_name  = payload.full_name.strip() or "HR Applicant"
-    to_email = payload.email.lower().strip()
-    sent = send_hr_invite_email(to_name=to_name, to_email=to_email, invite_code=hr_invite_code)
-    _log(db, "HR_INVITE_REQUESTED", user_email=to_email, detail=f"HR invite requested by {to_name}", ip=_ip(request), status="success" if sent else "warning")
-    return {"message": f"Your HR invite code has been sent to {to_email}.", "sent": sent}
-
-
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # JOBS
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @_app.get("/jobs", response_model=List[JobResponse], tags=["jobs"])
 def list_jobs(db: Session = Depends(get_db)):
@@ -1671,9 +1637,9 @@ def delete_job(job_id: int, request: Request, db: Session = Depends(get_db), cur
     return {"detail": "Job and all associated applications and documents have been permanently deleted"}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # APPLICATIONS
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @_app.post("/applications", response_model=ApplicationResponse, tags=["applications"])
 def submit_application(payload: ApplicationCreate, request: Request, db: Session = Depends(get_db), current_user: User = Depends(require_applicant)):
@@ -1731,7 +1697,7 @@ def delete_draft_application(application_id: int, request: Request, db: Session 
     if not app_obj:
         return {"ok": True, "detail": "Draft not found or already removed."}
     if app_obj.submitted_at is not None:
-        return {"ok": True, "detail": "Application already submitted — not deleted."}
+        return {"ok": True, "detail": "Application already submitted -- not deleted."}
     for doc in db.query(Document).filter(Document.application_id == application_id).all():
         try:
             if os.path.exists(doc.file_path): os.remove(doc.file_path)
@@ -1766,7 +1732,7 @@ def finalize_application(application_id: int, request: Request, db: Session = De
     missing        = sorted(REQUIRED_DOC_TYPES - uploaded_types)
     if missing:
         missing_labels = [DOC_TYPE_LABELS_REQUIRED.get(m, m) for m in missing]
-        raise HTTPException(status_code=400, detail=f"Cannot submit — {len(missing)} required document(s) missing: {', '.join(missing_labels)}.")
+        raise HTTPException(status_code=400, detail=f"Cannot submit -- {len(missing)} required document(s) missing: {', '.join(missing_labels)}.")
     app_obj.submitted_at = datetime.now(timezone.utc)
     db.add(app_obj); db.commit()
     job = db.query(Job).filter(Job.id == app_obj.job_id).first()
@@ -1776,7 +1742,7 @@ def finalize_application(application_id: int, request: Request, db: Session = De
     has_exp = "experience" in uploaded_types
     return {
         "success": True, "application_id": application_id, "ocr_running": True,
-        "message": "✅ Application submitted successfully!" + (" Experience document included." if has_exp else ""),
+        "message": " Application submitted successfully!" + (" Experience document included." if has_exp else ""),
         "uploaded_types": sorted(uploaded_types), "documents_count": len(docs),
     }
 
@@ -1791,7 +1757,7 @@ def get_ocr_status(application_id: int, db: Session = Depends(get_db), current_u
         result = mem_status.get("result", {})
         return {"application_id": application_id, "ocr_done": True, "running": False, **{k: v for k, v in result.items() if k != "doc_texts"}}
     if mem_status.get("running"):
-        return {"application_id": application_id, "ocr_done": False, "running": True, "message": "Document verification is still running — please check again in a few seconds."}
+        return {"application_id": application_id, "ocr_done": False, "running": True, "message": "Document verification is still running -- please check again in a few seconds."}
     ocr_result_raw = getattr(app_obj, "ocr_result", None)
     if ocr_result_raw:
         try:
@@ -1802,9 +1768,9 @@ def get_ocr_status(application_id: int, db: Session = Depends(get_db), current_u
     return {"application_id": application_id, "ocr_done": False, "running": False, "message": "Document verification has not started or results are unavailable."}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # PROFILE
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 class ProfileUpdateRequest(BaseModel):
     phone:       Optional[str] = None
@@ -1843,13 +1809,13 @@ def update_profile(payload: ProfileUpdateRequest, request: Request, db: Session 
     _log(db, "PROFILE_UPDATED", user=current_user, target=f"user:{current_user.id}", detail=f"Updated: {', '.join(updated) if updated else 'nothing'}", ip=_ip(request))
     response = _build_profile_response(current_user)
     response["updated"] = updated
-    response["message"] = f"✓ Profile updated ({', '.join(updated)})." if updated else "No fields were changed."
+    response["message"] = f" Profile updated ({', '.join(updated)})." if updated else "No fields were changed."
     return response
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # PROFILE DOCUMENTS
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @_app.get("/profile/documents", tags=["profile"])
 def get_profile_documents(db: Session = Depends(get_db), current_user: User = Depends(require_applicant)):
@@ -1928,13 +1894,13 @@ async def upload_profile_document(
         "original_name": file.filename, "file_name": file.filename,
         "uploaded_at": prof_doc.uploaded_at.isoformat() if prof_doc.uploaded_at else None,
         "source": "profile", "file_available": True, "ocr_ready": False,
-        "message": f"✓ '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' saved to your profile.",
+        "message": f" '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' saved to your profile.",
     }
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # DOCUMENT UPLOAD (Application)
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 class AttachProfileDocRequest(BaseModel):
     profile_doc_id: int
@@ -2021,7 +1987,7 @@ async def attach_profile_document(
         "original_name": new_doc.original_name,
         "doc_id": new_doc.id,
         "validation_message": validation_message,
-        "message": f"✓ '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' attached from your profile.",
+        "message": f" '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' attached from your profile.",
     }
 
 
@@ -2036,7 +2002,7 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"[upload_document] ⚠️  Unhandled error: {exc!r}")
+        print(f"[upload_document]   Unhandled error: {exc!r}")
         raise HTTPException(status_code=500, detail="Document upload failed. Please try again.")
 
 
@@ -2058,11 +2024,17 @@ async def _upload_document_inner(application_id, request, doc_type, file, db, cu
         Document.doc_type == doc_type_str,
     ).first()
     if existing_doc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"A '{DOC_TYPE_LABELS.get(doc_type, doc_type)}' is already uploaded. "
-                   "Please remove it first before uploading a new one.",
-        )
+        # Auto-replace: delete the old file and record so the new upload proceeds.
+        # This handles the case where the frontend lost track of an existing doc
+        # (e.g. after a backend restart mid-session).
+        try:
+            if os.path.exists(existing_doc.file_path):
+                os.remove(existing_doc.file_path)
+        except OSError:
+            pass
+        db.delete(existing_doc)
+        db.commit()
+        print(f"[upload_document] Auto-replaced existing {doc_type} for app={application_id}")
     _, ext = os.path.splitext(file.filename or "")
     if ext.lower() not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File type '{ext}' not allowed.")
@@ -2107,7 +2079,7 @@ async def _upload_document_inner(application_id, request, doc_type, file, db, cu
         "uploaded_types": sorted(uploaded_set), "missing_types": missing,
         "all_required_uploaded": len(missing) == 0,
         "message": (
-            "✅ All required documents uploaded! Click 'Submit Application' to finalise."
+            " All required documents uploaded! Click 'Submit Application' to finalise."
             if len(missing) == 0
             else f"Document uploaded. Still needed: {', '.join(DOC_TYPE_LABELS_REQUIRED.get(m, m) for m in missing)}."
         ),
@@ -2146,7 +2118,7 @@ def list_documents(application_id: int, db: Session = Depends(get_db), current_u
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"[list_documents] ⚠️  Unexpected error for app {application_id}: {exc!r}")
+        print(f"[list_documents]   Unexpected error for app {application_id}: {exc!r}")
         raise HTTPException(status_code=500, detail="Failed to retrieve documents. Please try again.")
 
 
@@ -2175,14 +2147,14 @@ def delete_document(
         if os.path.exists(file_path):
             os.remove(file_path)
     except OSError as exc:
-        print(f"[delete_document] ⚠️  Could not remove file {file_path}: {exc}")
+        print(f"[delete_document]   Could not remove file {file_path}: {exc}")
     _log(db, "DOCUMENT_DELETED", user=current_user, target=f"application:{application_id}", detail=f"Deleted document '{doc_type_str}'", ip=_ip(request))
     return {"detail": f"Document '{doc_type_str}' deleted. You can now re-upload."}
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Jobs & Candidates
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Jobs & Candidates
+# ===============================================================
 
 @_app.get("/hr/jobs", response_model=List[JobResponse], tags=["hr"])
 def list_all_jobs_hr(db: Session = Depends(get_db), hr: User = Depends(require_hr)):
@@ -2249,14 +2221,14 @@ def get_all_candidates(job_id: Optional[int] = None, db: Session = Depends(get_d
     return _rank_candidates(rows)
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Shortlisting
+# ===============================================================
+# HR -- Shortlisting
 #
 # FIX-SHORTLIST-1: /hr/shortlist-all now returns `processing: true` so the
 #   frontend's automateShortlist() knows to start polling. Without this the
 #   frontend saw processing=undefined (falsy) and stopped immediately.
 #
-# FIX-SHORTLIST-2: Added /hr/shortlist-status/{job_id} endpoint — this is
+# FIX-SHORTLIST-2: Added /hr/shortlist-status/{job_id} endpoint -- this is
 #   the URL the frontend actually polls (HRDashboard.jsx line:
 #   api.get(`/hr/shortlist-status/${jobId}`)). The old endpoint was only
 #   /hr/job-status/{job_id} which was never called by the frontend.
@@ -2265,7 +2237,7 @@ def get_all_candidates(job_id: Optional[int] = None, db: Session = Depends(get_d
 #   match what the frontend checks: `if (!status.processing)` to detect done.
 #   Also exposes `done`, `total`, `shortlisted`, `not_shortlisted`, `errors`
 #   fields that HRDashboard.jsx reads from the poll response.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @_app.post("/hr/shortlist-all/{job_id}", tags=["hr"])
 def shortlist_all(
@@ -2291,7 +2263,7 @@ def shortlist_all(
 
     if not acquired:
         current_status = _get_job_status(job_id)
-        # ✅ FIX-SHORTLIST-1: return processing=True so frontend knows it's running
+        #  FIX-SHORTLIST-1: return processing=True so frontend knows it's running
         return {
             "message":    "Shortlisting is already running for this job.",
             "job_id":     job_id,
@@ -2306,7 +2278,7 @@ def shortlist_all(
             return {
                 "message":    "Shortlisting is already running for this job.",
                 "job_id":     job_id,
-                "processing": True,  # ✅ FIX-SHORTLIST-1
+                "processing": True,  #  FIX-SHORTLIST-1
                 "total":      current_status.get("total", total),
                 "status_url": f"/hr/shortlist-status/{job_id}",
             }
@@ -2337,7 +2309,7 @@ def shortlist_all(
 
     _ML_THREAD_POOL.submit(_run_shortlist_all, job_id)
 
-    # ✅ FIX-SHORTLIST-1: Include `processing: true` so frontend starts polling
+    #  FIX-SHORTLIST-1: Include `processing: true` so frontend starts polling
     return {
         "message":    f"AI shortlisting started for '{job.title}' ({total} applicant(s)).",
         "job_id":     job_id,
@@ -2354,7 +2326,7 @@ def get_shortlist_status(
     hr: User = Depends(require_hr_or_admin),
 ):
     """
-    ✅ FIX-SHORTLIST-2 + FIX-SHORTLIST-3: This is the endpoint the frontend
+     FIX-SHORTLIST-2 + FIX-SHORTLIST-3: This is the endpoint the frontend
     polls. HRDashboard.jsx calls api.get(`/hr/shortlist-status/${jobId}`) and
     checks `!status.processing` to detect completion.
 
@@ -2387,7 +2359,7 @@ def get_shortlist_status(
     done_count = mem_status.get("done_count", mem_status.get("processed", 0))
 
     return {
-        # ✅ FIX-SHORTLIST-3: `processing` field is what frontend checks
+        #  FIX-SHORTLIST-3: `processing` field is what frontend checks
         "processing":       is_running and not is_done,
         "done":             is_done,
         "running":          is_running,
@@ -2417,7 +2389,7 @@ def get_job_processing_status(
     db: Session = Depends(get_db),
     hr: User = Depends(require_hr_or_admin),
 ):
-    """Legacy endpoint — kept for backward compatibility."""
+    """Legacy endpoint -- kept for backward compatibility."""
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2484,13 +2456,13 @@ def shortlist_single(
         "doc_verified":   result.get("doc_verified", False),
         "doc_advisory":   result.get("doc_advisory", False),
         "reason":         reason_data,
-        "message":        f"Shortlisting complete — decision: {result.get('decision', 'unknown')}",
+        "message":        f"Shortlisting complete -- decision: {result.get('decision', 'unknown')}",
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Manual Decision
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Manual Decision
+# ===============================================================
 
 class ManualDecisionRequest(BaseModel):
     decision: str
@@ -2514,20 +2486,20 @@ def manual_decision(
     app_obj.hr_reviewed_at  = datetime.now(timezone.utc)
     app_obj.shortlisted_at  = datetime.now(timezone.utc)
     db.add(app_obj); db.commit()
-    _log(db, "HR_MANUAL_DECISION", user=hr, target=f"application:{application_id}", detail=f"Manual decision: {old_decision} → {payload.decision}. Note: {payload.note or 'none'}", ip=_ip(request))
+    _log(db, "HR_MANUAL_DECISION", user=hr, target=f"application:{application_id}", detail=f"Manual decision: {old_decision} -> {payload.decision}. Note: {payload.note or 'none'}", ip=_ip(request))
     return {
         "application_id": application_id,
         "decision":       payload.decision,
         "reviewed_by":    hr.full_name,
         "reviewed_at":    app_obj.hr_reviewed_at.isoformat(),
         "note":           payload.note,
-        "message":        f"✅ Manual decision recorded: {payload.decision}",
+        "message":        f" Manual decision recorded: {payload.decision}",
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Report
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Report
+# ===============================================================
 
 @_app.get("/hr/report/{job_id}", tags=["hr"])
 def get_job_report(
@@ -2631,9 +2603,9 @@ def get_job_report(
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Users management
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Users management
+# ===============================================================
 
 @_app.get("/hr/users", tags=["hr"])
 def list_hr_users(db: Session = Depends(get_db), hr: User = Depends(require_hr_or_admin)):
@@ -2670,9 +2642,9 @@ def invite_hr_user(
     return {"message": f"HR invite sent to {to_email}.", "sent": sent}
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Documents download
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Documents download
+# ===============================================================
 
 @_app.get("/hr/documents/{doc_id}/download", tags=["hr"])
 def download_document(doc_id: int, db: Session = Depends(get_db), hr: User = Depends(require_hr_or_admin)):
@@ -2684,9 +2656,9 @@ def download_document(doc_id: int, db: Session = Depends(get_db), hr: User = Dep
     return FileResponse(path=doc.file_path, filename=doc.original_name or doc.filename, media_type="application/octet-stream")
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Candidate full profile
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Candidate full profile
+# ===============================================================
 
 @_app.get("/hr/candidates/{application_id}/profile", tags=["hr"])
 def get_candidate_profile(application_id: int, db: Session = Depends(get_db), hr: User = Depends(require_hr_or_admin)):
@@ -2738,9 +2710,9 @@ def get_candidate_profile(application_id: int, db: Session = Depends(get_db), hr
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# HR — Audit Logs
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# HR -- Audit Logs
+# ===============================================================
 
 @_app.get("/hr/logs", tags=["hr"])
 def get_audit_logs(limit: int = 100, offset: int = 0, db: Session = Depends(get_db), hr: User = Depends(require_hr_or_admin)):
@@ -2760,9 +2732,9 @@ def get_audit_logs(limit: int = 100, offset: int = 0, db: Session = Depends(get_
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# ADMIN — Stats & Feedback
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# ADMIN -- Stats & Feedback
+# ===============================================================
 
 @_app.get("/admin/stats", tags=["admin"])
 def admin_stats(db: Session = Depends(get_db), admin: User = Depends(require_hr_or_admin)):
@@ -2819,12 +2791,12 @@ def submit_feedback(payload: FeedbackRequest, request: Request, db: Session = De
         )
         db.commit()
     except Exception as exc:
-        print(f"[feedback] ⚠️  Failed to save feedback: {exc!r}")
+        print(f"[feedback]   Failed to save feedback: {exc!r}")
         try: db.rollback()
         except Exception: pass
         raise HTTPException(status_code=500, detail="Failed to save feedback.")
     _log(db, "FEEDBACK_SUBMITTED", user=current_user, detail=f"Category: {payload.category}, Rating: {rating}", ip=_ip(request))
-    return {"message": "✅ Thank you for your feedback!", "category": payload.category, "rating": rating}
+    return {"message": " Thank you for your feedback!", "category": payload.category, "rating": rating}
 
 
 @_app.get("/admin/feedback", tags=["admin"])
@@ -2834,13 +2806,13 @@ def get_feedback(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)
         total = db.execute(text("SELECT COUNT(*) FROM system_feedback")).scalar() or 0
         return {"total": total, "offset": offset, "limit": limit, "feedback": [dict(row._mapping) for row in rows]}
     except Exception as exc:
-        print(f"[feedback] ⚠️  Failed to retrieve feedback: {exc!r}")
+        print(f"[feedback]   Failed to retrieve feedback: {exc!r}")
         return {"total": 0, "offset": offset, "limit": limit, "feedback": []}
 
 
-# ═══════════════════════════════════════════════════════════════
-# ADMIN — Additional endpoints
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# ADMIN -- Additional endpoints
+# ===============================================================
 
 @_app.get("/admin/jobs", tags=["admin"])
 def admin_list_jobs(db: Session = Depends(get_db), admin: User = Depends(require_hr_or_admin)):
@@ -2882,8 +2854,8 @@ def admin_system_reports(db: Session = Depends(get_db), admin: User = Depends(re
         hr_user     = db.query(User).filter(User.id == job.created_by).first()
         positions.append({
             "job_id": job.id, "job_title": job.title,
-            "job_location": job.location or "—",
-            "hr_officer": hr_user.full_name if hr_user else "—",
+            "job_location": job.location or "--",
+            "hr_officer": hr_user.full_name if hr_user else "--",
             "total": total, "shortlisted": shortlisted, "rejected": rejected,
             "manual_review": manual_rev, "pending": pending,
             "shortlist_rate": round(shortlisted / total, 4) if total > 0 else 0,
@@ -3000,9 +2972,9 @@ def admin_delete_user(user_id: int, request: Request, db: Session = Depends(get_
     return {"detail": f"User {user.email} permanently deleted."}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Public /feedback
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 class PublicFeedbackRequest(BaseModel):
     rating:    int
@@ -3026,17 +2998,17 @@ def public_feedback(payload: PublicFeedbackRequest, request: Request, db: Sessio
             db.execute(text("INSERT INTO system_feedback (admin_id, admin_email, category, message, rating) VALUES (:uid, :email, :cat, :msg, :rating)"), {"uid": current_user.id, "email": current_user.email, "cat": payload.category, "msg": payload.message.strip(), "rating": payload.rating})
         db.commit()
     except Exception as exc:
-        print(f"[public_feedback] ⚠️  Failed to save feedback: {exc!r}")
+        print(f"[public_feedback]   Failed to save feedback: {exc!r}")
         try: db.rollback()
         except Exception: pass
         raise HTTPException(status_code=500, detail="Failed to save feedback. Please try again later.")
     _log(db, "PUBLIC_FEEDBACK_SUBMITTED", user=current_user if not payload.anonymous else None, detail=f"Category: {payload.category}, Rating: {payload.rating}, Anonymous: {payload.anonymous}", ip=_ip(request))
-    return {"message": "✅ Thank you for your feedback!", "category": payload.category, "rating": payload.rating}
+    return {"message": " Thank you for your feedback!", "category": payload.category, "rating": payload.rating}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

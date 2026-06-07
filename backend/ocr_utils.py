@@ -12,9 +12,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # OCR toggle
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _ocr_enabled() -> bool:
     return True  # Always enabled
@@ -22,20 +22,20 @@ def _ocr_enabled() -> bool:
 
 _OCR_ENABLED_AT_IMPORT = True
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Optional OpenCV
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 try:
     import cv2
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    logger.warning("opencv-python not installed — advanced preprocessing disabled.")
+    logger.warning("opencv-python not installed -- advanced preprocessing disabled.")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # pytesseract + Pillow
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 OCR_AVAILABLE = False
 PILImage      = None
@@ -51,14 +51,14 @@ try:
 
     pytesseract.get_tesseract_version()
     OCR_AVAILABLE = True
-    logger.info("✓ pytesseract available")
+    logger.info(" pytesseract available")
 except Exception as _e:
     OCR_AVAILABLE = False
     logger.warning("pytesseract not available (%s). Install Tesseract + pip install pytesseract pillow.", _e)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Bundled poppler (Windows)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _POPPLER_WIN_PATH: str | None = None
@@ -71,39 +71,39 @@ for _candidate in [
 ]:
     if os.path.isdir(_candidate):
         _POPPLER_WIN_PATH = _candidate
-        logger.info("✓ Bundled poppler at: %s", _POPPLER_WIN_PATH)
+        logger.info(" Bundled poppler at: %s", _POPPLER_WIN_PATH)
         break
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PDF libraries
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 try:
     import pdfplumber
     PDFPLUMBER_AVAILABLE = True
-    logger.info("✓ pdfplumber available")
+    logger.info(" pdfplumber available")
 except ImportError:
     PDFPLUMBER_AVAILABLE = False
 
 try:
     import fitz
     PYMUPDF_AVAILABLE = True
-    logger.info("✓ PyMuPDF (fitz) available")
+    logger.info(" PyMuPDF (fitz) available")
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
 try:
     from pdf2image import convert_from_bytes as _pdf2image_convert
     PDF2IMAGE_AVAILABLE = True
-    logger.info("✓ pdf2image available")
+    logger.info(" pdf2image available")
 except ImportError:
     PDF2IMAGE_AVAILABLE = False
 
 POPPLER_AVAILABLE = PYMUPDF_AVAILABLE or PDF2IMAGE_AVAILABLE
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OCR microservice — silent health check, no noisy warnings
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# OCR microservice -- silent health check, no noisy warnings
+# -----------------------------------------------------------------------------
 
 OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", "http://localhost:5050")
 
@@ -117,8 +117,8 @@ def _check_ocr_service_live() -> bool:
     """
     FIX-UTIL-LOG-1: Health check is now fully silent on failure.
     Previously every failed check emitted a warning-level log that showed
-    up in the UI as "OCR service unavailable — falling back to local quality check".
-    Now uses DEBUG level only — the service being down is expected in local-only
+    up in the UI as "OCR service unavailable -- falling back to local quality check".
+    Now uses DEBUG level only -- the service being down is expected in local-only
     deployments and should not alarm users or clutter logs.
     """
     global _OCR_SERVICE_AVAILABLE, _OCR_SERVICE_LAST_CHECK
@@ -141,7 +141,7 @@ def _check_ocr_service_live() -> bool:
                 logger.debug("OCR microservice is now reachable at %s", OCR_SERVICE_URL)
             else:
                 logger.debug(
-                    "OCR microservice not reachable at %s — using local OCR", OCR_SERVICE_URL
+                    "OCR microservice not reachable at %s -- using local OCR", OCR_SERVICE_URL
                 )
         return result
 
@@ -149,14 +149,14 @@ def _check_ocr_service_live() -> bool:
 try:
     import requests as _requests_mod
     _REQUESTS_AVAILABLE = True
-    # FIX-UTIL-LOG-2: Startup health check at DEBUG — no console noise on import
+    # FIX-UTIL-LOG-2: Startup health check at DEBUG -- no console noise on import
     _check_ocr_service_live()
 except ImportError:
     _REQUESTS_AVAILABLE = False
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # In-memory OCR result cache
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _OCR_CACHE: dict[tuple, str] = {}
 _OCR_CACHE_LOCK = threading.Lock()
@@ -198,9 +198,9 @@ def clear_ocr_cache() -> int:
         return n
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Language detection
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _get_ocr_languages() -> str:
     if not OCR_AVAILABLE:
@@ -219,22 +219,22 @@ def _get_ocr_languages() -> str:
 
 _OCR_LANG = _get_ocr_languages() if OCR_AVAILABLE else "eng"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Quality thresholds
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _BLUR_THRESHOLD_HARD  = 40
 _BLUR_THRESHOLD_WARN  = 80
 _MIN_RESOLUTION       = 150
-_MIN_ALPHA_CHARS      = 15   # lowered — Rwanda IDs may yield 15-25 alpha chars
+_MIN_ALPHA_CHARS      = 15   # lowered -- Rwanda IDs may yield 15-25 alpha chars
 _MIN_ALPHA_CHARS_PDF  = 20
 _BRIGHTNESS_TOO_DARK   = 40
 _BRIGHTNESS_TOO_BRIGHT = 230
 _PDF_TEXT_MIN_ALPHA    = 20
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Yellow/gold background detection (Rwanda NID holographic laminate)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _detect_yellow_background_local(bgr: np.ndarray) -> bool:
     if not CV2_AVAILABLE:
@@ -250,13 +250,13 @@ def _detect_yellow_background_local(bgr: np.ndarray) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Image quality gate (pre-upload, images only)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def check_image_quality_strict(file_bytes: bytes, filename: str = "") -> tuple[bool, str]:
     """
-    Pre-upload quality gate for IMAGE files only. PDFs skipped — checked post-OCR.
+    Pre-upload quality gate for IMAGE files only. PDFs skipped -- checked post-OCR.
     Returns (ok, short_user_friendly_message).
     FIX-UTIL-16: Rwanda ID yellow background bypasses brightness-too-bright gate.
     """
@@ -287,9 +287,9 @@ def check_image_quality_strict(file_bytes: bytes, filename: str = "") -> tuple[b
         if blur_score < _BLUR_THRESHOLD_HARD:
             return False, (
                 "The photo is too blurry. Please retake it:\n"
-                "• Hold steady and tap the screen to focus\n"
-                "• Keep the document flat and fully in frame\n"
-                "• Use good lighting, avoid glare"
+                "- Hold steady and tap the screen to focus\n"
+                "- Keep the document flat and fully in frame\n"
+                "- Use good lighting, avoid glare"
             )
 
         if w < _MIN_RESOLUTION or h < _MIN_RESOLUTION:
@@ -302,9 +302,9 @@ def check_image_quality_strict(file_bytes: bytes, filename: str = "") -> tuple[b
         return True, ""  # Don't block on unexpected errors
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # OpenCV preprocessing helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _pil_to_cv2(img):
     return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -485,9 +485,9 @@ def _yellow_aware_grayscale(bgr: np.ndarray) -> np.ndarray:
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Rwanda ID card preprocessing variants
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _build_id_card_variants(img) -> list:
     if not CV2_AVAILABLE or PILImage is None:
@@ -883,9 +883,9 @@ def _ocr_with_rotation(img, fast_mode: bool = False) -> str:
     return best
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OCR microservice helper — silent fallthrough
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# OCR microservice helper -- silent fallthrough
+# -----------------------------------------------------------------------------
 
 def _extract_via_service(file_path: str, fast_mode: bool = False) -> str:
     """
@@ -909,11 +909,11 @@ def _extract_via_service(file_path: str, fast_mode: bool = False) -> str:
             if data.get("success"):
                 text = data.get("text", "")
                 if text.strip():
-                    logger.debug("_extract_via_service: %s → %d chars",
+                    logger.debug("_extract_via_service: %s -> %d chars",
                                  os.path.basename(file_path), len(text))
                     return text
         elif r.status_code == 422:
-            logger.debug("_extract_via_service: 422 for %s — falling through to local OCR",
+            logger.debug("_extract_via_service: 422 for %s -- falling through to local OCR",
                          os.path.basename(file_path))
         else:
             logger.debug("_extract_via_service: status %d for %s",
@@ -924,9 +924,9 @@ def _extract_via_service(file_path: str, fast_mode: bool = False) -> str:
         return ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PDF helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _pdfplumber_text(file_path: str) -> str:
     if not PDFPLUMBER_AVAILABLE:
@@ -1072,7 +1072,7 @@ def _image_ocr(file_path: str, fast_mode: bool = False) -> str:
                 result = rotated
 
         if _count_alpha(result) < _MIN_ALPHA_CHARS:
-            logger.debug("Image %s: only %d alpha chars — treating as unreadable",
+            logger.debug("Image %s: only %d alpha chars -- treating as unreadable",
                          os.path.basename(file_path), _count_alpha(result))
             return ""
         return result
@@ -1089,9 +1089,9 @@ def _filename_suggests_id_card(file_path: str) -> bool:
     return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def extract_document_text(
     file_path: str,
@@ -1122,7 +1122,7 @@ def extract_document_text(
             if service_text.strip():
                 _cache_set(file_path, service_text)
                 return service_text
-            # Service returned empty — fall through silently (no log noise)
+            # Service returned empty -- fall through silently (no log noise)
 
         # Step 2: PDF local chain
         if ext == ".pdf":

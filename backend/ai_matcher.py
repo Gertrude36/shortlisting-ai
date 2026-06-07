@@ -1,29 +1,29 @@
 """
 backend/ai_matcher.py  ·  v2.3.0
-────────────────────────────────────────────────────────────────
-AI-powered semantic document matching — 100% FREE, no API key.
+----------------------------------------------------------------
+AI-powered semantic document matching -- 100% FREE, no API key.
 
 Uses sentence-transformers (all-MiniLM-L6-v2) running fully locally.
 Model (~90 MB) downloads automatically on first use from HuggingFace.
 
 FIXES IN v2.3.0 (new):
 
-  ✅ FIX-AM-16 — FIELD_ALIASES expanded with "electrical and electronics
+   FIX-AM-16 -- FIELD_ALIASES expanded with "electrical and electronics
      engineering" (the exact field shown in the screenshot causing rejection),
      plus EEE, ECE, E&E and all common OCR-degraded variants. Also added
      veterinary, pharmacy, architecture, and other fields missing from aliases.
 
-  ✅ FIX-AM-17 — match_field_in_diploma() now tries OCR-noise-cleaned
+   FIX-AM-17 -- match_field_in_diploma() now tries OCR-noise-cleaned
      variants of the diploma text before giving up. If the raw text doesn't
-     match, cleaning fixes common OCR errors (1→I, 0→O, l→I) and retries
+     match, cleaning fixes common OCR errors (1->I, 0->O, l->I) and retries
      both the keyword check and AI scoring.
 
-  ✅ FIX-AM-18 — _field_keyword_match() now strips punctuation and
+   FIX-AM-18 -- _field_keyword_match() now strips punctuation and
      normalises whitespace before matching, so "electrical & electronics"
      matches "electrical and electronics engineering" regardless of how
      the ampersand was OCR-extracted.
 
-  ✅ FIX-AM-19 — _get_field_queries() now includes common word-stem
+   FIX-AM-19 -- _get_field_queries() now includes common word-stem
      fragments (e.g. "electr") so partial OCR extracts like "Electr. Eng."
      are still matched against "electrical engineering".
 
@@ -57,9 +57,9 @@ warnings.filterwarnings("ignore", message=r".*HF_TOKEN.*")
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Background model loading
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _model: object | None = None
 AI_AVAILABLE: bool    = False
@@ -67,8 +67,8 @@ _model_lock           = threading.Lock()
 _model_ready          = threading.Event()
 _load_started         = threading.Event()
 
-_MODEL_WAIT_TIMEOUT = 12   # ✅ FIX-AM-15 retained
-_ENCODE_TIMEOUT     = 20   # ✅ FIX TIMEOUT-AI-3 retained
+_MODEL_WAIT_TIMEOUT = 12   #  FIX-AM-15 retained
+_ENCODE_TIMEOUT     = 20   #  FIX TIMEOUT-AI-3 retained
 
 
 def _load_model_background() -> None:
@@ -81,7 +81,7 @@ def _load_model_background() -> None:
             AI_AVAILABLE = True
         _model_ready.set()
         logger.info(
-            "✓ AI Matcher ready — sentence-transformers (all-MiniLM-L6-v2), "
+            " AI Matcher ready -- sentence-transformers (all-MiniLM-L6-v2), "
             "local inference, no API key required."
         )
     except Exception as exc:
@@ -89,9 +89,9 @@ def _load_model_background() -> None:
             AI_AVAILABLE = False
         _model_ready.set()
         logger.warning(
-            "⚠ sentence-transformers not available (%s). "
+            " sentence-transformers not available (%s). "
             "Fix: pip install sentence-transformers torch  "
-            "(free — runs 100%% locally, no API key needed)", exc
+            "(free -- runs 100%% locally, no API key needed)", exc
         )
 
 
@@ -110,9 +110,9 @@ def _m() -> object | None:
     return _model
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Safe encoding helper with timeout
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _safe_encode(model, texts, **kwargs):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
@@ -121,7 +121,7 @@ def _safe_encode(model, texts, **kwargs):
             return fut.result(timeout=_ENCODE_TIMEOUT)
         except concurrent.futures.TimeoutError:
             logger.warning(
-                "_safe_encode timed out after %ds — falling back to keyword matching",
+                "_safe_encode timed out after %ds -- falling back to keyword matching",
                 _ENCODE_TIMEOUT,
             )
             return None
@@ -130,14 +130,14 @@ def _safe_encode(model, texts, **kwargs):
             return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX-AM-16: Substantially expanded FIELD_ALIASES
+# -----------------------------------------------------------------------------
+#  FIX-AM-16: Substantially expanded FIELD_ALIASES
 # Key additions: "electrical and electronics engineering" (the exact failure
 # case from the screenshot), ECE, EEE, E&E variants, and many more fields.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 FIELD_ALIASES: dict[str, list[str]] = {
-    # ── ICT / Computing ───────────────────────────────────────────────────────
+    # -- ICT / Computing -------------------------------------------------------
     "information and communication technology": [
         "ict", "information technology", "it", "information & communication technology",
         "information communications technology", "computing", "computer science",
@@ -168,7 +168,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
         "ict", "beng computer", "bsc computer engineering",
         "computer and electronics engineering",
     ],
-    # ── Electrical / Electronics (FIX-AM-16: PRIMARY NEW ADDITION) ───────────
+    # -- Electrical / Electronics (FIX-AM-16: PRIMARY NEW ADDITION) -----------
     "electrical and electronics engineering": [
         "eee", "electrical engineering", "electronics engineering",
         "electrical & electronics engineering",
@@ -209,7 +209,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
         "beng civil", "environmental engineering", "bsc civil engineering",
         "building and civil engineering",
     ],
-    # ── Business / Finance ───────────────────────────────────────────────────
+    # -- Business / Finance ---------------------------------------------------
     "business administration": [
         "bba", "mba", "business management", "management", "commerce",
         "business studies", "business and management", "administration",
@@ -229,7 +229,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
         "economic studies", "applied economics", "development economics",
         "economics and finance", "political economy", "bsc economics",
     ],
-    # ── Health Sciences ───────────────────────────────────────────────────────
+    # -- Health Sciences -------------------------------------------------------
     "nursing": [
         "clinical nursing", "registered nursing", "bsc nursing", "nursing science",
         "nursing and midwifery", "health sciences", "patient care",
@@ -255,35 +255,35 @@ FIELD_ALIASES: dict[str, list[str]] = {
         "veterinary surgery", "animal medicine",
         "veternary medicine", "vetenary medicine",
     ],
-    # ── Education ─────────────────────────────────────────────────────────────
+    # -- Education -------------------------------------------------------------
     "education": [
         "b.ed", "bed", "bachelor of education", "teaching", "pedagogy",
         "educational management", "secondary education", "primary education",
         "teacher education", "arts and education",
     ],
-    # ── Agriculture ───────────────────────────────────────────────────────────
+    # -- Agriculture -----------------------------------------------------------
     "agriculture": [
         "agricultural science", "agronomy", "crop science", "animal science",
         "food science", "bsc agriculture", "tropical agriculture",
         "agricultural engineering", "rural development",
     ],
-    # ── Law ───────────────────────────────────────────────────────────────────
+    # -- Law -------------------------------------------------------------------
     "law": [
         "llb", "bachelor of laws", "legal studies", "jurisprudence",
         "international law", "commercial law", "llb hons",
     ],
-    # ── Management / General ─────────────────────────────────────────────────
+    # -- Management / General -------------------------------------------------
     "management": [
         "business management", "management studies", "leadership",
         "organizational management", "msc management", "project management",
     ],
-    # ── Architecture ──────────────────────────────────────────────────────────
+    # -- Architecture ----------------------------------------------------------
     "architecture": [
         "architectural studies", "building design", "urban planning",
         "b.arch", "barch", "bachelor of architecture",
         "interior architecture",
     ],
-    # ── Social Sciences ───────────────────────────────────────────────────────
+    # -- Social Sciences -------------------------------------------------------
     "social work": [
         "sociology", "community development", "bsc social work",
         "social sciences", "psychology and social work",
@@ -294,16 +294,16 @@ FIELD_ALIASES: dict[str, list[str]] = {
     ],
 }
 
-# Reverse lookup: alias → canonical field name
+# Reverse lookup: alias -> canonical field name
 _ALIAS_REVERSE: dict[str, str] = {}
 for _canonical, _aliases in FIELD_ALIASES.items():
     for _alias in _aliases:
         _ALIAS_REVERSE[_alias.lower()] = _canonical
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX-AM-17: OCR noise cleaning for diploma text
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+#  FIX-AM-17: OCR noise cleaning for diploma text
+# -----------------------------------------------------------------------------
 
 _OCR_FIX_SUBS = [
     (re.compile(r"\b1(?=[a-z])", re.I),  "I"),
@@ -329,20 +329,20 @@ _OCR_FIX_SUBS = [
 
 
 def _clean_ocr_noise(text: str) -> str:
-    """✅ FIX-AM-17: Fix common OCR substitutions in diploma text."""
+    """ FIX-AM-17: Fix common OCR substitutions in diploma text."""
     for pattern, replacement in _OCR_FIX_SUBS:
         text = pattern.sub(replacement, text)
     text = re.sub(r" {2,}", " ", text)
     return text
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ✅ FIX-AM-18 / FIX-AM-19: Enhanced field query helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+#  FIX-AM-18 / FIX-AM-19: Enhanced field query helpers
+# -----------------------------------------------------------------------------
 
 def _normalise_for_match(text: str) -> str:
     """
-    ✅ FIX-AM-18: Normalise text for keyword matching.
+     FIX-AM-18: Normalise text for keyword matching.
     Strips punctuation, normalises whitespace, lowercases,
     and replaces '&' with 'and' so 'electrical & electronics'
     matches 'electrical and electronics engineering'.
@@ -356,7 +356,7 @@ def _normalise_for_match(text: str) -> str:
 
 def _get_field_queries(declared_field: str) -> list[str]:
     """
-    ✅ FIX-AM-11/13/19: Return the declared field plus all its aliases as
+     FIX-AM-11/13/19: Return the declared field plus all its aliases as
     separate query strings for multi-query AI encoding.
     Also includes partial stems (FIX-AM-19) for OCR-degraded text.
     """
@@ -382,7 +382,7 @@ def _get_field_queries(declared_field: str) -> list[str]:
                 queries.extend(FIELD_ALIASES.get(canonical, []))
                 break
 
-    # ✅ FIX-AM-19: Add significant word stems (≥6 chars) to catch partial OCR
+    #  FIX-AM-19: Add significant word stems (6 chars) to catch partial OCR
     stem_queries: list[str] = []
     for q in queries[:5]:  # stems from top 5 only to avoid explosion
         words = [w for w in q.split() if len(w) >= 6 and w.isalpha()]
@@ -404,7 +404,7 @@ def _get_field_queries(declared_field: str) -> list[str]:
 
 def _field_keyword_match(declared_field: str, diploma_text: str) -> bool:
     """
-    ✅ FIX-AM-12/18: Fast literal keyword pre-check before invoking the AI model.
+     FIX-AM-12/18: Fast literal keyword pre-check before invoking the AI model.
     Now normalises punctuation so 'electrical & electronics' matches
     'electrical and electronics engineering' regardless of OCR output.
     Also tries OCR-cleaned variant of diploma text (FIX-AM-17).
@@ -430,9 +430,9 @@ def _field_keyword_match(declared_field: str, diploma_text: str) -> bool:
     return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Text chunking helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _sentence_chunks(text: str, limit: int = 60) -> list[str]:
     parts = re.split(r"(?<=[.!?\n])\s*", text)
@@ -458,9 +458,9 @@ def _all_chunks(text: str, max_chunks: int = 80) -> list[str]:
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Core similarity primitive
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def semantic_similarity(text_a: str, text_b: str) -> float:
     model = _m()
@@ -478,9 +478,9 @@ def semantic_similarity(text_a: str, text_b: str) -> float:
         return 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Skill ↔ CV matching
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Skill  CV matching
+# -----------------------------------------------------------------------------
 
 def match_skills_in_cv(
     declared_skills: list[str],
@@ -527,9 +527,9 @@ def match_skills_in_cv(
         return {s: (False, 0.0) for s in declared_skills}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Field-of-study ↔ Diploma matching
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Field-of-study  Diploma matching
+# -----------------------------------------------------------------------------
 
 def match_field_in_diploma(
     declared_field: str,
@@ -539,33 +539,33 @@ def match_field_in_diploma(
     """
     AI check: does the diploma text confirm the declared field of study?
 
-    ✅ FIX-AM-10: Threshold lowered 0.50 → 0.38.
-    ✅ FIX-AM-11: Declared field expanded via FIELD_ALIASES before encoding.
-    ✅ FIX-AM-12/18: Keyword pre-check normalises punctuation ('&'→'and' etc).
-    ✅ FIX-AM-13: Multiple query strings encoded; MAX similarity taken.
-    ✅ FIX-AM-17: Also tries OCR-cleaned diploma text for both keyword and AI steps.
-    ✅ FIX-AM-16: FIELD_ALIASES now includes EEE/ECE and all common variants.
+     FIX-AM-10: Threshold lowered 0.50 -> 0.38.
+     FIX-AM-11: Declared field expanded via FIELD_ALIASES before encoding.
+     FIX-AM-12/18: Keyword pre-check normalises punctuation ('&'->'and' etc).
+     FIX-AM-13: Multiple query strings encoded; MAX similarity taken.
+     FIX-AM-17: Also tries OCR-cleaned diploma text for both keyword and AI steps.
+     FIX-AM-16: FIELD_ALIASES now includes EEE/ECE and all common variants.
 
     Returns (matched: bool, best_score: float).
     Returns (True, 1.0) on keyword hit.
-    Returns (True, 0.0) on model timeout — defers to HR.
+    Returns (True, 0.0) on model timeout -- defers to HR.
     """
     if not diploma_text.strip():
         return True, 0.0
 
-    # ✅ FIX-AM-12/17: Keyword pre-check on both raw and OCR-cleaned text
+    #  FIX-AM-12/17: Keyword pre-check on both raw and OCR-cleaned text
     if _field_keyword_match(declared_field, diploma_text):
         logger.info(
-            "match_field_in_diploma [FIX-AM-12]: keyword match for field=%r → PASS",
+            "match_field_in_diploma [FIX-AM-12]: keyword match for field=%r -> PASS",
             declared_field,
         )
         return True, 1.0
 
-    # ✅ FIX-AM-17: Also try OCR-cleaned version of diploma text
+    #  FIX-AM-17: Also try OCR-cleaned version of diploma text
     cleaned_diploma = _clean_ocr_noise(diploma_text)
     if cleaned_diploma != diploma_text and _field_keyword_match(declared_field, cleaned_diploma):
         logger.info(
-            "match_field_in_diploma [FIX-AM-17]: keyword match after OCR cleaning for field=%r → PASS",
+            "match_field_in_diploma [FIX-AM-17]: keyword match after OCR cleaning for field=%r -> PASS",
             declared_field,
         )
         return True, 1.0
@@ -602,7 +602,7 @@ def match_field_in_diploma(
 
         logger.info(
             "match_field_in_diploma: field=%r queries=%d chunks=%d "
-            "max_score=%.3f threshold=%.2f → %s",
+            "max_score=%.3f threshold=%.2f -> %s",
             declared_field, len(queries), len(chunks), max_score, threshold,
             "PASS" if max_score >= threshold else "FAIL",
         )
@@ -614,9 +614,9 @@ def match_field_in_diploma(
         return True, 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Job domain context (FIX-AM-14 retained + extended)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _JOB_DOMAIN_CONTEXT: dict[str, str] = {
     "software engineer": (
@@ -744,7 +744,7 @@ def check_field_job_compatibility(
     """
     AI domain-relevance check: is the applicant's academic field compatible
     with the job role domain?
-    Returns (True, 0.0) on timeout — defers to rule-based fallback.
+    Returns (True, 0.0) on timeout -- defers to rule-based fallback.
     """
     model = _m()
     if model is None:
@@ -784,7 +784,7 @@ def check_field_job_compatibility(
         max_score  = float(sim_matrix.max())
 
         logger.debug(
-            "check_field_job_compatibility: field=%r job=%r score=%.3f threshold=%.2f → %s",
+            "check_field_job_compatibility: field=%r job=%r score=%.3f threshold=%.2f -> %s",
             declared_field, job_title, max_score, threshold,
             "PASS" if max_score >= threshold else "FAIL",
         )
@@ -796,9 +796,9 @@ def check_field_job_compatibility(
         return True, 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Education level classification
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _LEVEL_TEMPLATES: dict[str, str] = {
     "phd": (
@@ -903,27 +903,27 @@ def education_level_ordinal(level_str: str) -> int:
     return 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Startup diagnostics
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _print_ai_status() -> None:
     lines = [
         "",
-        "── AI Matcher Status ──────────────────────────────────────────────────",
-        "  sentence-transformers : ✓ loading in background (all-MiniLM-L6-v2)",
-        "  Inference mode        : Local CPU/GPU — no internet, no API key",
+        "-- AI Matcher Status --------------------------------------------------",
+        "  sentence-transformers :  loading in background (all-MiniLM-L6-v2)",
+        "  Inference mode        : Local CPU/GPU -- no internet, no API key",
         f"  Model wait timeout    : {_MODEL_WAIT_TIMEOUT}s (then falls back to keyword matching)",
         f"  Encode timeout        : {_ENCODE_TIMEOUT}s per encode call",
         f"  Max CV chunks         : 80",
-        f"  Field match threshold : 0.38 (lowered from 0.50 — FIX-AM-10)",
+        f"  Field match threshold : 0.38 (lowered from 0.50 -- FIX-AM-10)",
         f"  Field alias expansion : ENABLED (FIX-AM-11/13/16)",
         f"  Field keyword pre-check: ENABLED with punctuation norm (FIX-AM-12/18)",
         f"  OCR noise cleaning    : ENABLED (FIX-AM-17)",
         f"  Stem-based queries    : ENABLED (FIX-AM-19)",
         f"  EEE/ECE aliases       : ADDED (FIX-AM-16)",
         "  Install command       : pip install sentence-transformers torch",
-        "───────────────────────────────────────────────────────────────────────",
+        "-----------------------------------------------------------------------",
         "",
     ]
     print("\n".join(lines))

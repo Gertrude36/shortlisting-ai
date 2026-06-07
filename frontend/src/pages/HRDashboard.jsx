@@ -212,7 +212,7 @@ function DeleteJobModal({ job, onConfirm, onCancel, isDeleting }) {
         <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: B.text, margin: '0 0 12px', textAlign: 'center' }}>Delete this position?</h3>
         <p style={{ fontSize: '.95rem', color: B.textLight, lineHeight: 1.7, margin: '0 0 10px', textAlign: 'center' }}>Permanently delete <strong style={{ color: B.text }}>{job?.title}</strong>.</p>
         <div style={{ padding: '12px 16px', background: B.amberLight, border: `2px solid ${B.amber}`, borderRadius: 8, marginBottom: 28, width: '100%' }}>
-          <p style={{ fontSize: '.85rem', color: B.amber, margin: 0, lineHeight: 1.6, textAlign: 'center', fontWeight: 600 }}>⚠ All applications and uploaded documents will also be permanently deleted. This cannot be undone.</p>
+          <p style={{ fontSize: '.85rem', color: B.amber, margin: 0, lineHeight: 1.6, textAlign: 'center', fontWeight: 600 }}>All applications and uploaded documents will also be permanently deleted. This cannot be undone.</p>
         </div>
         <div style={{ display: 'flex', gap: 10, width: '100%' }}>
           <button onClick={onCancel} disabled={isDeleting} style={{ flex: 1, padding: '11px 0', borderRadius: 8, border: `1.5px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
@@ -462,7 +462,7 @@ function SystemUsersOverview() {
       {loading
         ? <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0' }}><div className="spinner" style={{ width: 28, height: 28 }} /></div>
         : error
-          ? <div style={{ padding: '14px 16px', background: B.amberLight, border: `1.5px solid ${B.amber}`, borderRadius: 8, fontSize: '.88rem', color: B.amber, fontWeight: 600 }}>⚠ Could not load user stats.</div>
+          ? <div style={{ padding: '14px 16px', background: B.amberLight, border: `1.5px solid ${B.amber}`, borderRadius: 8, fontSize: '.88rem', color: B.amber, fontWeight: 600 }}>Could not load user stats.</div>
           : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
               {roles.map(r => (

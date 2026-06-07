@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timezone
+import logging
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
@@ -10,8 +11,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from database import Base
 
+logger = logging.getLogger(__name__)
 
-# ── Enumerations ──────────────────────────────────────────────────────────────
+
+# -- Enumerations --------------------------------------------------------------
 
 class UserRole(str, enum.Enum):
     applicant = "applicant"
@@ -23,7 +26,7 @@ class DecisionStatus(str, enum.Enum):
     pending         = "pending"
     shortlisted     = "shortlisted"
     not_shortlisted = "not_shortlisted"
-    manual_review   = "manual_review"   # ✅ FIX MODEL-19
+    manual_review   = "manual_review"
 
 
 class DocumentType(str, enum.Enum):
@@ -34,7 +37,45 @@ class DocumentType(str, enum.Enum):
     experience  = "experience"
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# -- Auto-migration helper -----------------------------------------------------
+
+def _ensure_is_active_column():
+    """
+    Automatically add is_active column to users table if it doesn't exist.
+    This runs when the module is loaded.
+    """
+    try:
+        from sqlalchemy import inspect, text
+        from database import engine
+        
+        inspector = inspect(engine)
+        
+        # Check if users table exists
+        if not inspector.has_table("users"):
+            return
+        
+        # Get existing columns
+        columns = [col['name'] for col in inspector.get_columns("users")]
+        
+        if 'is_active' not in columns:
+            logger.info("[migration] Adding is_active column to users table...")
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+                conn.commit()
+                logger.info("[migration] is_active column added successfully")
+                
+                # Update existing rows
+                conn.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
+                conn.commit()
+                logger.info("[migration] All existing users set to active")
+        else:
+            logger.debug("[migration] is_active column already exists")
+            
+    except Exception as e:
+        logger.warning(f"[migration] Could not add is_active column: {e}")
+
+
+# -- Models --------------------------------------------------------------------
 
 class User(Base):
     __tablename__ = "users"
@@ -54,38 +95,28 @@ class User(Base):
         default=UserRole.applicant,
         server_default="applicant",
     )
+    
+    is_active = Column(Boolean, default=True, server_default="1")
+    
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
 
-    # ✅ FIX MODEL-23: foreign_keys explicitly set to resolve ambiguity.
-    # Application has TWO FKs to users (applicant_id + hr_reviewed_by),
-    # so SQLAlchemy needs to be told which one this relationship uses.
     applications = relationship(
         "Application",
         back_populates="applicant",
         foreign_keys="[Application.applicant_id]",
     )
 
-    # HR officer who reviewed applications — back-ref for hr_reviewed_by FK.
-    # primaryjoin clarifies this is the OTHER FK path.
     reviewed_applications = relationship(
         "Application",
         foreign_keys="[Application.hr_reviewed_by]",
         back_populates="hr_reviewer",
     )
 
-    logs              = relationship(
-        "SystemLog",
-        back_populates="user",
-        foreign_keys="[SystemLog.user_id]",
-    )
-    profile_documents = relationship(
-        "ProfileDocument",
-        back_populates="user",
-        cascade="all, delete-orphan",
-    )
+    logs = relationship("SystemLog", back_populates="user", foreign_keys="[SystemLog.user_id]")
+    profile_documents = relationship("ProfileDocument", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email!r} role={self.role}>"
@@ -105,8 +136,8 @@ class Job(Base):
     preferred_qualifications = Column(Text, nullable=True)
     about_role               = Column(Text, nullable=True)
 
-    required_education_levels = Column(Text, nullable=False, default="Bachelor's",  server_default="Bachelor's")
-    required_fields           = Column(Text, nullable=False, default="",            server_default="")
+    required_education_levels = Column(Text, nullable=False, default="Bachelor's", server_default="Bachelor's")
+    required_fields           = Column(Text, nullable=False, default="", server_default="")
 
     required_min_experience = Column(Integer, default=0,  server_default="0")
     required_max_experience = Column(Integer, default=20, server_default="20")
@@ -119,14 +150,9 @@ class Job(Base):
 
     is_active  = Column(Boolean, default=True, server_default="1")
     created_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    applications = relationship(
-        "Application", back_populates="job", cascade="all, delete-orphan"
-    )
+    applications = relationship("Application", back_populates="job", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Job id={self.id} title={self.title!r}>"
@@ -162,22 +188,15 @@ class Application(Base):
 
     doc_verified = Column(Boolean, default=False, server_default="0")
     doc_advisory = Column(Boolean, default=False, server_default="0")
-
-    # ✅ FIX MODEL-17: OCR confidence flag
     ocr_confidence_flag = Column(Boolean, default=False, server_default="0", nullable=False)
-
-    # ✅ FIX MODEL-18: Average OCR quality score (0–100)
     ocr_quality_score = Column(Float, nullable=True)
 
-    # ✅ FIX MODEL-20/21/22: HR manual review fields
     hr_review_note  = Column(Text,    nullable=True)
     hr_reviewed_by  = Column(Integer, ForeignKey("users.id"), nullable=True)
     hr_reviewed_at  = Column(DateTime(timezone=True), nullable=True)
 
     submitted_at   = Column(DateTime(timezone=True), nullable=True)
     shortlisted_at = Column(DateTime(timezone=True), nullable=True)
-
-    # Cached OCR result JSON
     ocr_result = Column(Text, nullable=True)
 
     __table_args__ = (
@@ -185,30 +204,13 @@ class Application(Base):
         Index("ix_applications_decision",     "decision"),
     )
 
-    # ✅ FIX MODEL-23: explicit foreign_keys on BOTH sides of each relationship.
-    # applicant_id path:
-    applicant = relationship(
-        "User",
-        back_populates="applications",
-        foreign_keys=[applicant_id],
-    )
-    # hr_reviewed_by path:
-    hr_reviewer = relationship(
-        "User",
-        back_populates="reviewed_applications",
-        foreign_keys=[hr_reviewed_by],
-    )
-
+    applicant = relationship("User", back_populates="applications", foreign_keys=[applicant_id])
+    hr_reviewer = relationship("User", back_populates="reviewed_applications", foreign_keys=[hr_reviewed_by])
     job = relationship("Job", back_populates="applications")
-    documents = relationship(
-        "Document", back_populates="application", cascade="all, delete-orphan"
-    )
+    documents = relationship("Document", back_populates="application", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
-        return (
-            f"<Application id={self.id} applicant_id={self.applicant_id} "
-            f"job_id={self.job_id} decision={self.decision}>"
-        )
+        return f"<Application id={self.id} applicant_id={self.applicant_id} job_id={self.job_id} decision={self.decision}>"
 
 
 class Document(Base):
@@ -222,15 +224,8 @@ class Document(Base):
     original_name  = Column(String(255), nullable=True)
     file_path      = Column(String(512), nullable=False)
 
-    uploaded_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=None,
-    )
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # ✅ FIX MODEL-24: Suppress SAWarning when a concurrent DELETE already
-    # removed the row before this session's DELETE executes.
-    # This is safe because the DELETE endpoint checks existence first (404 guard).
     __mapper_args__ = {"confirm_deleted_rows": False}
 
     application = relationship("Application", back_populates="documents")
@@ -250,11 +245,7 @@ class ProfileDocument(Base):
     original_name = Column(String(255), nullable=True)
     file_path     = Column(String(512), nullable=False)
 
-    uploaded_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=None,
-    )
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="profile_documents")
 
@@ -263,7 +254,6 @@ class ProfileDocument(Base):
 
 
 class SystemLog(Base):
-    """Audit trail — one row per user action."""
     __tablename__ = "system_logs"
 
     id         = Column(Integer, primary_key=True, index=True)
@@ -275,23 +265,16 @@ class SystemLog(Base):
     target     = Column(String(255), nullable=True)
     detail     = Column(Text,        nullable=True)
     ip_address = Column(String(64),  nullable=True)
-    status     = Column(
-        String(20), nullable=False,
-        default="success", server_default="success",
-        index=True,
-    )
+    status     = Column(String(20), nullable=False, default="success", server_default="success", index=True)
 
-    created_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        index=True,
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
-    user = relationship(
-        "User",
-        back_populates="logs",
-        foreign_keys=[user_id],
-    )
+    user = relationship("User", back_populates="logs", foreign_keys=[user_id])
 
     def __repr__(self) -> str:
         return f"<SystemLog id={self.id} action={self.action!r} user={self.user_email!r}>"
+
+
+# -- Run auto-migration on module load -----------------------------------------
+# This ensures the is_active column exists when the app starts
+_ensure_is_active_column()

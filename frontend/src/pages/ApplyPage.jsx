@@ -17,7 +17,7 @@ import { Helmet } from 'react-helmet-async'
 import {
   Upload, CheckCircle, XCircle, AlertCircle,
   Loader, ArrowRight, ArrowLeft, ShieldCheck, Info, RefreshCw, User,
-  Eye, Camera, ZoomIn, ExternalLink, ShieldX,
+  Eye, Camera, ZoomIn, ExternalLink, ShieldX, FileText,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Navbar from '../components/Navbar'
@@ -199,7 +199,6 @@ const _ADVISORY_EXACT_PHRASES = [
 function _isAdvisory(msg) {
   if (!msg) return false
   if (msg.trimStart().startsWith('✓')) return false
-  if (msg.trimStart().startsWith('⚠')) return true
   const lower = msg.toLowerCase()
   return _ADVISORY_EXACT_PHRASES.some(phrase => lower.includes(phrase))
 }
@@ -472,7 +471,7 @@ function IdentityRejectionCard({ docType, accountName }) {
 
       {/* Call to action */}
       <div style={{ paddingLeft: 24, padding: '10px 14px', background: '#fff1f2', borderRadius: 6, fontSize: '.8rem', color: '#991b1b', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 7 }}>
-        {docIcon}
+        <FileText size={14} color="#dc2626" />
         <span>Use the button below to upload <strong>your own</strong> {docLabel.toLowerCase()} that clearly shows your name.</span>
       </div>
     </div>

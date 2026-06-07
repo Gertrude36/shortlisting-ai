@@ -211,7 +211,7 @@ function deduplicateItems(items) {
 
 // ── Strip the [HR] tag prefix used internally to route messages ──────────
 function stripHRTag(msg) {
-  return msg.replace(/^\[HR\]\s*/i, '').replace(/^\u26a0\s*\[HR\]\s*/i, '⚠ ').trim()
+  return msg.replace(/^\[HR\]\s*/i, '').replace(/^\u26a0\s*\[HR\]\s*/i, '').trim()
 }
 
 // ── Concrete color configs ────────────────────────────────────
@@ -223,7 +223,7 @@ const SECTION_CONFIG = {
     dotBg:     '#dc2626',
     textColor: '#7f1d1d',
     label:     'Reasons for rejection',
-    icon:      '✕',
+    icon:      '',
   },
   warn: {
     bg:        '#fffbeb',
@@ -232,7 +232,7 @@ const SECTION_CONFIG = {
     dotBg:     '#d97706',
     textColor: '#78350f',
     label:     'Points to note',
-    icon:      '!',
+    icon:      '',
   },
   pass: {
     bg:        '#f0fdf4',
@@ -241,7 +241,7 @@ const SECTION_CONFIG = {
     dotBg:     '#16a34a',
     textColor: '#14532d',
     label:     'Criteria met',
-    icon:      '✓',
+    icon:      '',
   },
   hr_note: {
     bg:        '#eff6ff',
@@ -250,7 +250,7 @@ const SECTION_CONFIG = {
     dotBg:     '#2563eb',
     textColor: '#1e3a5f',
     label:     'HR Notes (internal)',
-    icon:      'ℹ',
+    icon:      '',
   },
   pending: {
     bg:        '#f5f3ff',
@@ -259,7 +259,7 @@ const SECTION_CONFIG = {
     dotBg:     '#7c3aed',
     textColor: '#3b0764',
     label:     'Application status',
-    icon:      '⏳',
+    icon:      '',
   },
 }
 

@@ -143,7 +143,7 @@ export default function ForgotPassword() {
           />
 
           {error && (
-            <p style={styles.errorMsg}>⚠ {error}</p>
+            <p style={styles.errorMsg}>{error}</p>
           )}
 
           <button

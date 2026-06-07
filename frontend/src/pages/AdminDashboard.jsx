@@ -110,7 +110,7 @@ function DeleteUserModal({ user, onConfirm, onCancel, isDeleting }) {
           Permanently delete <strong style={{ color: B.text }}>{user?.full_name}</strong> (<em>{user?.email}</em>) — role: <strong>{user?.role}</strong>.
         </p>
         <div style={{ padding: '12px 16px', background: B.amberLight, border: `2px solid ${B.amber}`, borderRadius: 8, marginBottom: 28, width: '100%' }}>
-          <p style={{ fontSize: '.85rem', color: B.amber, margin: 0, lineHeight: 1.6, textAlign: 'center', fontWeight: 600 }}>⚠ All applications and documents belonging to this account will be permanently deleted.</p>
+          <p style={{ fontSize: '.85rem', color: B.amber, margin: 0, lineHeight: 1.6, textAlign: 'center', fontWeight: 600 }}>All applications and documents belonging to this account will be permanently deleted.</p>
         </div>
         <div style={{ display: 'flex', gap: 10, width: '100%' }}>
           <button onClick={onCancel} disabled={isDeleting} style={{ flex: 1, padding: '11px 0', borderRadius: 8, border: `1.5px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
@@ -155,7 +155,7 @@ function ChangeRoleModal({ user, onConfirm, onCancel, isSaving }) {
           </div>
           {newRole === 'admin' && (
             <div style={{ padding: '10px 14px', background: B.amberLight, border: `1.5px solid ${B.amber}`, borderRadius: 8, marginBottom: 16 }}>
-              <p style={{ fontSize: '.82rem', color: B.amber, margin: 0, fontWeight: 700 }}>⚠ Granting admin access gives this user full system control.</p>
+              <p style={{ fontSize: '.82rem', color: B.amber, margin: 0, fontWeight: 700 }}>Granting admin access gives this user full system control.</p>
             </div>
           )}
           <div style={{ display: 'flex', gap: 10 }}>
@@ -265,8 +265,8 @@ function SendInviteModal({ onClose }) {
     if (!form.email.trim()) { toast.error('Email is required'); return }
     setLoading(true)
     try {
-      await api.post('/auth/request-hr-invite', form)
-      toast.success(`HR invite code sent to ${form.email}`)
+      // HR invite functionality removed - HR accounts must be created by admin
+      toast.error('HR accounts must be created by an administrator using the "Create User" button.')
       onClose()
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to send invite')

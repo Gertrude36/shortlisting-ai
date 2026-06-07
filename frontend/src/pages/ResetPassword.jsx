@@ -238,7 +238,7 @@ export default function ResetPassword() {
               <p style={styles.smallError}>Passwords do not match.</p>
             )}
 
-            {error && <p style={styles.errorMsg}>⚠ {error}</p>}
+            {error && <p style={styles.smallError}>{error}</p>}
 
             <button
               type="submit"

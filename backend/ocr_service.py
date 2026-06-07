@@ -34,16 +34,16 @@ for _candidate in [
         break
 
 if _POPPLER_WIN_PATH:
-    print(f"[OCR] ✅ Found bundled poppler at: {_POPPLER_WIN_PATH}")
+    print(f"[OCR]  Found bundled poppler at: {_POPPLER_WIN_PATH}")
 else:
-    print("[OCR] ℹ️  Bundled poppler not found — will rely on PATH or PyMuPDF fallback.")
+    print("[OCR]   Bundled poppler not found -- will rely on PATH or PyMuPDF fallback.")
 
 try:
     import cv2
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    print("[WARN] opencv-python not installed — advanced preprocessing disabled.")
+    print("[WARN] opencv-python not installed -- advanced preprocessing disabled.")
 
 EASYOCR_AVAILABLE = False
 _easyocr_reader   = None
@@ -53,9 +53,9 @@ if os.getenv("ENABLE_EASYOCR", "false").strip().lower() == "true":
         import easyocr as _easyocr_mod
         _easyocr_reader   = _easyocr_mod.Reader(["en"], gpu=False)
         EASYOCR_AVAILABLE = True
-        print("[OCR] ✅ EasyOCR fallback enabled.")
+        print("[OCR]  EasyOCR fallback enabled.")
     except Exception as _e:
-        print(f"[OCR] ⚠ EasyOCR requested but failed to load: {_e}")
+        print(f"[OCR]  EasyOCR requested but failed to load: {_e}")
 
 
 def _easyocr_fallback(pil_image: Image.Image) -> str:
@@ -101,7 +101,7 @@ def _resolve_ocr_language() -> str:
         if "kin" in available:
             langs.append("kin")
         result = "+".join(langs)
-        logger.info("✓ OCR language string: %s", result)
+        logger.info(" OCR language string: %s", result)
         return result
     except Exception:
         return "eng"
@@ -154,9 +154,9 @@ def _count_readable_chars_ocr(text: str) -> int:
     return sum(1 for c in text if c.isalpha())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Yellow/gold background detection (Rwanda ID hologram)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _detect_yellow_background(bgr: np.ndarray) -> bool:
     if not CV2_AVAILABLE:
@@ -183,9 +183,9 @@ def _yellow_aware_grayscale(bgr: np.ndarray) -> np.ndarray:
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Strict quality assessment
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _assess_image_quality(image_bytes: bytes, is_pdf_page: bool = False) -> dict:
     """
@@ -238,7 +238,7 @@ def _assess_image_quality(image_bytes: bytes, is_pdf_page: bool = False) -> dict
             result["hard_reject"] = True
             result["hard_reject_reason"] = (
                 f"The document image is too dark (brightness: {mean_brightness:.0f}/255). "
-                "Please retake the photo with better lighting — ensure the document "
+                "Please retake the photo with better lighting -- ensure the document "
                 "is well-lit and there are no shadows covering the text."
             )
             return result
@@ -263,10 +263,10 @@ def _assess_image_quality(image_bytes: bytes, is_pdf_page: bool = False) -> dict
             result["hard_reject_reason"] = (
                 f"The document image is too blurry (sharpness score: {blur:.0f}). "
                 "Please retake the photo:\n"
-                "• Hold the camera steady and tap the screen to focus on the document\n"
-                "• Ensure the entire document is flat and within the frame\n"
-                "• Use good lighting and avoid glare or shadows\n"
-                "• Hold the camera directly above the document, not at an angle"
+                "- Hold the camera steady and tap the screen to focus on the document\n"
+                "- Ensure the entire document is flat and within the frame\n"
+                "- Use good lighting and avoid glare or shadows\n"
+                "- Hold the camera directly above the document, not at an angle"
             )
             return result
 
@@ -282,7 +282,7 @@ def _assess_image_quality(image_bytes: bytes, is_pdf_page: bool = False) -> dict
         if blur < _BLUR_THRESHOLD_WARN:
             result["warnings"].append(
                 f"Image sharpness is borderline (score: {blur:.0f}). "
-                "OCR results may be less accurate — a clearer scan is recommended."
+                "OCR results may be less accurate -- a clearer scan is recommended."
             )
         if result["is_dark"] and mean_brightness >= _BRIGHTNESS_TOO_DARK:
             result["warnings"].append(
@@ -291,7 +291,7 @@ def _assess_image_quality(image_bytes: bytes, is_pdf_page: bool = False) -> dict
             )
         if has_yellow_bg and mean_brightness > _BRIGHTNESS_TOO_BRIGHT:
             result["warnings"].append(
-                "Rwanda ID holographic background detected — applying specialised preprocessing."
+                "Rwanda ID holographic background detected -- applying specialised preprocessing."
             )
 
     except Exception as exc:
@@ -469,9 +469,9 @@ def _contrast_score(grey: np.ndarray) -> float:
         return 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Rwanda ID card specific preprocessing (FIX-SVC-31/34)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _preprocess_id_card_image(img: Image.Image) -> "list[Image.Image]":
     if not CV2_AVAILABLE:
@@ -538,9 +538,9 @@ def _preprocess_id_card_image(img: Image.Image) -> "list[Image.Image]":
     return variants
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Multi-scale OCR (FIX-SVC-32)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _ocr_multi_scale(img: Image.Image, fast_mode: bool = False) -> str:
     scales = [1.0, 1.5, 2.0] if not fast_mode else [1.0, 1.5]
@@ -909,7 +909,7 @@ def ocr_image(image: Image.Image, fast_mode: bool = False) -> "tuple[str, int]":
                 # Rwanda laminated IDs legitimately yield very few characters due to
                 # holographic glare. The verifier handles the advisory/sparse path;
                 # we must not discard whatever little text was successfully extracted.
-                # Old threshold was _MIN_ALPHA_CHARS (30) — too strict for Rwanda NIDs.
+                # Old threshold was _MIN_ALPHA_CHARS (30) -- too strict for Rwanda NIDs.
                 _id_card_min_alpha = 10
                 if _count_readable_chars_ocr(best_id) >= _id_card_min_alpha:
                     alpha = _count_readable_chars_ocr(best_id)
@@ -1039,7 +1039,7 @@ def _ocr_pdf_via_pdf2image(file_bytes: bytes, fast_mode: bool = False, dpi: int 
             results.append((text, quality))
         return results
     except Exception as exc:
-        logger.warning("pdf2image OCR failed (%s) — trying PyMuPDF fallback", exc)
+        logger.warning("pdf2image OCR failed (%s) -- trying PyMuPDF fallback", exc)
         return None
 
 
@@ -1094,7 +1094,7 @@ def ocr_pdf(file_bytes: bytes, fast_mode: bool = False) -> "tuple[str, int]":
     if results is None:
         if plumber_text.strip():
             return plumber_text, 50
-        return "[ERROR] PDF OCR not available — install pdf2image+poppler or pymupdf.", 0
+        return "[ERROR] PDF OCR not available -- install pdf2image+poppler or pymupdf.", 0
 
     parts     = [text for text, _ in results]
     qualities = [q for _, q in results]
@@ -1215,7 +1215,7 @@ def ocr_endpoint():
     ocr_enabled = _ocr_enabled()
 
     if "file" not in request.files:
-        return jsonify({"success": False, "error": "No file provided — use key 'file'"}), 400
+        return jsonify({"success": False, "error": "No file provided -- use key 'file'"}), 400
 
     uploaded = request.files["file"]
     if not uploaded.filename:
@@ -1289,7 +1289,7 @@ def ocr_endpoint():
                 # FIX-SVC-40 (retained): Advisory path for sparse ID card results
                 logger.info(
                     "ocr_endpoint [FIX-SVC-40]: id_card image alpha=%d < %d "
-                    "— returning sparse result (advisory, not reject)",
+                    "-- returning sparse result (advisory, not reject)",
                     alpha_chars, min_alpha,
                 )
                 return jsonify({
@@ -1309,7 +1309,7 @@ def ocr_endpoint():
                     "ocr_sparse":        True,
                 })
             elif alpha_chars < 10:
-                # FIX-SVC-41 (retained): Truly empty — hard reject
+                # FIX-SVC-41 (retained): Truly empty -- hard reject
                 return jsonify({
                     "success":           False,
                     "error": (
@@ -1364,7 +1364,7 @@ def ocr_batch():
 
     files = request.files.getlist("files[]")
     if not files:
-        return jsonify({"error": "No files provided — use key 'files[]'"}), 400
+        return jsonify({"error": "No files provided -- use key 'files[]'"}), 400
 
     results = []
     for uploaded in files:
@@ -1512,7 +1512,7 @@ def classify_document():
             "success": True,
             "type": classification["type"],
             "confidence": classification["confidence"],
-            "preview": text[:500] + ("…" if len(text) > 500 else "")
+            "preview": text[:500] + ("..." if len(text) > 500 else "")
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1521,16 +1521,16 @@ def classify_document():
 if __name__ == "__main__":
     port = int(os.environ.get("OCR_PORT", 5050))
     ocr_enabled = _ocr_enabled()
-    print(f"\n✅  OCR Service v7.8.0 on http://localhost:{port}")
+    print(f"\n  OCR Service v7.8.0 on http://localhost:{port}")
     print(f"    OCR enabled             : {'YES' if ocr_enabled else 'NO (ENABLE_OCR=false)'}")
     print(f"    OCR language            : {OCR_LANG}")
-    print(f"    ── New Fixes (v7.8.0) ───────────────────────────────────")
+    print(f"    -- New Fixes (v7.8.0) -----------------------------------")
     print(f"    FIX-SVC-50: yellow-bg bypasses brightness hard-reject")
     print(f"    FIX-SVC-51: id_card pipeline min alpha = 10 (was 30)")
-    print(f"    ── Security Fixes (retained) ────────────────────────────")
-    print(f"    FIX-SVC-40: id_card sparse OCR → advisory (not reject)")
+    print(f"    -- Security Fixes (retained) ----------------------------")
+    print(f"    FIX-SVC-40: id_card sparse OCR -> advisory (not reject)")
     print(f"    FIX-SVC-41: truly blank docs hard-rejected at alpha < 10")
-    print(f"    ── Quality Gate ─────────────────────────────────────────")
+    print(f"    -- Quality Gate -----------------------------------------")
     print(f"    Blur hard-reject (image): score < {_BLUR_THRESHOLD_HARD}")
     print(f"    Blur hard-reject (PDF)  : DISABLED")
     print(f"    Blur warn               : score < {_BLUR_THRESHOLD_WARN}")
@@ -1539,12 +1539,12 @@ if __name__ == "__main__":
     print(f"    Brightness washed out   : mean > {_BRIGHTNESS_TOO_BRIGHT} (skipped for yellow-bg ID)")
     print(f"    Post-OCR alpha min(img) : {_MIN_ALPHA_CHARS} chars")
     print(f"    Post-OCR alpha min(PDF) : {_MIN_ALPHA_CHARS_PDF} chars")
-    print(f"    ── Rwanda ID Fixes ──────────────────────────────────────")
+    print(f"    -- Rwanda ID Fixes --------------------------------------")
     print(f"    Yellow BG detection     : ENABLED (FIX-SVC-34)")
     print(f"    ID-specific preprocessing: ENABLED (FIX-SVC-31)")
     print(f"    Multi-scale OCR         : ENABLED (FIX-SVC-32)")
     print(f"    PSM order               : 6,11,3,4,7 (FIX-SVC-33)")
-    print(f"    ── Libraries ────────────────────────────────────────────")
+    print(f"    -- Libraries --------------------------------------------")
     print(f"    OpenCV                  : {'enabled' if CV2_AVAILABLE else 'disabled'}")
     print(f"    EasyOCR fallback        : {'ENABLED' if EASYOCR_AVAILABLE else 'disabled'}")
     print(f"    pdf2image               : {'enabled' if PDF2IMAGE_AVAILABLE else 'disabled'}")

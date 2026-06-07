@@ -20,11 +20,9 @@ function RequestInviteModal({ onClose }) {
     }
     setLoading(true)
     try {
-      await api.post('/auth/request-hr-invite', {
-        full_name: form.full_name.trim(),
-        email:     form.email.trim().toLowerCase(),
-      })
-      setSent(true)
+      // HR invite functionality removed - HR accounts must be created by admin
+      toast.error('HR accounts must be created by an administrator.')
+      setLoading(false)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Request failed. Please try again.')
     } finally {

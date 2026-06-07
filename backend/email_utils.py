@@ -1,402 +1,359 @@
 """
-backend/email_utils.py
-
-Uses Brevo HTTP API (port 443) — works on Render free tier.
-Free tier: 300 emails/day, sends to ANY email address, no domain needed.
-
-REQUIRED ENVIRONMENT VARIABLES in Render Dashboard:
-  BREVO_API_KEY  = xkeysib-xxxxxxxxxxxxxxxxxxxx
-  MAIL_FROM      = aishortlisting@gmail.com
-  MAIL_FROM_NAME = Shortlisting Solutions
-  FRONTEND_URL   = https://shortlisting-ai.vercel.app
+backend/email_utils.py - COMPLETE FIXED VERSION
+Contains ALL email functions needed by auth.py
 """
+
+from dotenv import load_dotenv
+load_dotenv()
 
 import os
 import json
 import urllib.request
 import urllib.error
+import logging
+from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+
+# -- Config --------------------------------------------------------------------
 BREVO_API_KEY  = os.getenv("BREVO_API_KEY", "")
 MAIL_FROM      = os.getenv("MAIL_FROM", "aishortlisting@gmail.com")
-MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "GI Recruitment Network")
+MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "AI-Powered Shortlisting Platform")
 FRONTEND_URL   = os.getenv("FRONTEND_URL", "http://localhost:5173")
 BREVO_API_URL  = "https://api.brevo.com/v3/smtp/email"
 
 
-# ── Startup validation ────────────────────────────────────────────────────────
-def _validate_config() -> None:
-    if not BREVO_API_KEY:
-        print(
-            "[email_utils] ⚠️  BREVO_API_KEY is not set — emails will NOT be sent.\n"
-            "              1. Sign up free at https://brevo.com\n"
-            "              2. Dashboard → SMTP & API → API keys & MCP → Generate\n"
-            "              3. Render → Environment → Add BREVO_API_KEY"
-        )
-    else:
-        print(f"[email_utils] ✅ BREVO_API_KEY loaded.")
-
-    if not MAIL_FROM:
-        print(
-            "[email_utils] ⚠️  MAIL_FROM is not set.\n"
-            "              Set it to your verified Brevo sender email:\n"
-            "              MAIL_FROM = aishortlisting@gmail.com"
-        )
-    else:
-        print(f"[email_utils] ✅ Sending from '{MAIL_FROM_NAME} <{MAIL_FROM}>'")
-
-    if FRONTEND_URL.startswith("http://localhost"):
-        print(
-            "[email_utils] ⚠️  FRONTEND_URL is localhost — reset links won't work for real users.\n"
-            "              Fix: Render → Environment → FRONTEND_URL = https://shortlisting-ai.vercel.app"
-        )
-    else:
-        print(f"[email_utils] ✅ FRONTEND_URL = {FRONTEND_URL}")
-
-
-_validate_config()
-
-
-# ── Low-level Brevo sender ────────────────────────────────────────────────────
-def _send_brevo_email(
-    to_name: str,
+# -- Send email function -------------------------------------------------------
+def send_email(
     to_email: str,
     subject: str,
     html_content: str,
-    text_content: str,
+    text_content: str = None,
+    to_name: str = None,
 ) -> bool:
-    """
-    Core Brevo HTTP API call. Shared by all email-sending functions.
-    Returns True on success, False on failure. Never raises.
-    """
-    if not BREVO_API_KEY or not MAIL_FROM:
-        print(
-            "[email_utils] ❌ Cannot send — BREVO_API_KEY or MAIL_FROM not set.\n"
-            "              Add them in Render Dashboard → Environment."
-        )
+    """Send email using Brevo API."""
+    
+    if not BREVO_API_KEY:
+        print("[email] ERROR: BREVO_API_KEY is not set!")
         return False
-
-    payload = json.dumps({
-        "sender":      {"name": MAIL_FROM_NAME, "email": MAIL_FROM},
-        "to":          [{"name": to_name, "email": to_email}],
-        "subject":     subject,
+    
+    if not to_name:
+        to_name = to_email.split("@")[0]
+    
+    if not text_content:
+        import re
+        text_content = re.sub(r'<[^>]+>', '', html_content)
+    
+    payload = {
+        "sender": {
+            "name": MAIL_FROM_NAME,
+            "email": MAIL_FROM
+        },
+        "to": [{"name": to_name, "email": to_email}],
+        "subject": subject,
         "htmlContent": html_content,
         "textContent": text_content,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        BREVO_API_URL,
-        data    = payload,
-        headers = {
-            "api-key":      BREVO_API_KEY,
-            "Content-Type": "application/json",
-            "Accept":       "application/json",
+        "replyTo": {
+            "email": MAIL_FROM,
+            "name": MAIL_FROM_NAME
         },
-        method = "POST",
-    )
-
+        "headers": {
+            "X-Priority": "3",
+            "X-Mailer": "AI Shortlisting Platform",
+            "List-Unsubscribe": f"<{FRONTEND_URL}/unsubscribe>",
+        }
+    }
+    
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body   = resp.read().decode("utf-8")
-            data   = json.loads(body)
-            msg_id = data.get("messageId", "unknown")
-            print(f"[email_utils] ✅ Email sent to {to_email} via Brevo (messageId={msg_id}).")
-            return True
-
+        req = urllib.request.Request(
+            BREVO_API_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "accept": "application/json",
+                "api-key": BREVO_API_KEY,
+                "content-type": "application/json",
+            },
+            method="POST",
+        )
+        
+        with urllib.request.urlopen(req, timeout=30) as response:
+            if response.status in (200, 201, 202):
+                print(f"[email] Email sent successfully to {to_email}")
+                return True
+            else:
+                print(f"[email] Failed with status {response.status}")
+                return False
+                
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
-        try:
-            err = json.loads(body)
-            msg = err.get("message") or str(err)
-        except Exception:
-            msg = body
-
-        if e.code == 401:
-            print(
-                "[email_utils] ❌ Brevo 401 — API key invalid.\n"
-                "              Generate a new key: Brevo Dashboard → SMTP & API → API keys & MCP\n"
-                f"              Detail: {msg}"
-            )
-        elif e.code == 400:
-            print(
-                f"[email_utils] ❌ Brevo 400 — Bad request: {msg}\n"
-                "              Most likely: MAIL_FROM email is not verified in Brevo."
-            )
-        elif e.code == 429:
-            print(f"[email_utils] ❌ Brevo 429 — Daily limit reached (300/day on free tier). Detail: {msg}")
-        else:
-            print(f"[email_utils] ❌ Brevo HTTP {e.code}: {msg}")
-
-    except urllib.error.URLError as e:
-        print(f"[email_utils] ❌ Could not reach Brevo API: {e.reason}")
+        error_body = e.read().decode("utf-8", errors="ignore")
+        print(f"[email] HTTPError {e.code}: {error_body[:200]}")
+        return False
     except Exception as e:
-        print(f"[email_utils] ❌ Unexpected error: {type(e).__name__}: {e}")
+        print(f"[email] Error: {e}")
+        return False
 
-    return False
 
+# -- Welcome Email -------------------------------------------------------------
+def send_welcome_email(to_name: str, to_email: str, role: str = "applicant") -> bool:
+    """Send welcome email after registration."""
+    
+    role_label = {
+        "applicant": "Job Applicant",
+        "hr": "HR Recruiter", 
+        "admin": "System Administrator"
+    }.get(role, role.title())
+    
+    dashboard_url = f"{FRONTEND_URL}/dashboard"
+    login_url = f"{FRONTEND_URL}/login"
+    
+    text_content = f"""
+WELCOME TO AI SHORTLISTING PLATFORM
 
-# ── Password Reset Email ──────────────────────────────────────────────────────
-def _build_reset_html(to_name: str, reset_link: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
+Dear {to_name},
+
+Thank you for registering with our AI-powered recruitment platform.
+
+YOUR ACCOUNT DETAILS:
+- Email: {to_email}
+- Role: {role_label}
+- Registration Date: {datetime.now().strftime('%B %d, %Y')}
+
+GET STARTED:
+{login_url}
+
+WHAT'S NEXT?
+1. Sign in to your account using your email and password
+2. Complete your profile with education and work experience
+3. Upload your documents (CV, ID, certificates)
+4. Apply for jobs that match your skills
+5. Track your application status in real-time
+
+Best regards,
+AI Recruitment Team
+"""
+    
+    html_content = f"""<!DOCTYPE html>
+<html>
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Reset your password</title>
+    <meta charset="UTF-8">
+    <title>Welcome to AI Shortlisting Platform</title>
 </head>
-<body style="margin:0;padding:0;background:#f0f4ff;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4ff;padding:40px 16px;">
-    <tr><td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="max-width:520px;background:#ffffff;border-radius:16px;
-                    box-shadow:0 4px 32px rgba(0,0,0,.10);overflow:hidden;">
-        <tr>
-          <td style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 60%,#1d4ed8 100%);
-                     padding:32px 40px;text-align:center;">
-            <div style="display:inline-block;background:rgba(255,255,255,.15);
-                        border:1px solid rgba(255,255,255,.3);border-radius:99px;
-                        padding:5px 18px;font-size:11px;font-weight:700;
-                        letter-spacing:.08em;text-transform:uppercase;color:#ffffff;
-                        margin-bottom:16px;">
-              Password Reset
+<body style="margin:0;padding:0;background-color:#f4f7fb;font-family:Arial,sans-serif;">
+    <div style="max-width:600px;margin:0 auto;padding:20px;">
+        <div style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 100%);border-radius:16px 16px 0 0;padding:32px 24px;text-align:center;">
+            <h1 style="margin:0;color:#ffffff;">Welcome to AI Shortlisting</h1>
+        </div>
+        <div style="background:#ffffff;border-radius:0 0 16px 16px;padding:32px 24px;">
+            <p style="margin:0 0 16px;">Dear <strong>{to_name}</strong>,</p>
+            <p style="margin:0 0 24px;">Thank you for registering with our AI-powered recruitment platform.</p>
+            
+            <div style="background:#f0f9ff;border-left:4px solid #2563eb;border-radius:8px;padding:16px;margin-bottom:24px;">
+                <p style="margin:0 0 8px;"><strong>Your Account Details:</strong></p>
+                <p style="margin:0;">📧 Email: {to_email}<br>👤 Role: {role_label}</p>
             </div>
-            <h1 style="margin:0;font-size:26px;font-weight:800;color:#ffffff;line-height:1.2;">
-              Reset your password
-            </h1>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:36px 40px;">
-            <p style="margin:0 0 8px;font-size:16px;color:#374151;">
-              Hi <strong>{to_name}</strong>,
-            </p>
-            <p style="margin:0 0 24px;font-size:15px;color:#6b7280;line-height:1.7;">
-              We received a request to reset the password for your
-              <strong>Shortlisting AI</strong> account. Click the button below
-              to choose a new password.
-            </p>
-            <table cellpadding="0" cellspacing="0" width="100%">
-              <tr>
-                <td align="center" style="padding:8px 0 32px;">
-                  <a href="{reset_link}"
-                     style="display:inline-block;padding:14px 36px;
-                            background:linear-gradient(135deg,#2563eb,#1d4ed8);
-                            color:#ffffff;font-size:15px;font-weight:700;
-                            text-decoration:none;border-radius:8px;
-                            letter-spacing:.02em;">
-                    Reset My Password
-                  </a>
-                </td>
-              </tr>
-            </table>
-            <div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;
-                        padding:12px 16px;margin-bottom:24px;">
-              <p style="margin:0;font-size:13px;color:#7a6000;">
-                ⏰ <strong>This link expires in 15 minutes.</strong>
-                If it has expired, go back to the login page and request a new one.
-              </p>
-            </div>
-            <p style="margin:0 0 6px;font-size:13px;color:#9ca3af;">
-              Button not working? Copy and paste this link into your browser:
-            </p>
-            <p style="margin:0 0 24px;font-size:12px;word-break:break-all;
-                      color:#2563eb;background:#f0f4ff;padding:10px 12px;
-                      border-radius:6px;border:1px solid #dbeafe;">
-              {reset_link}
-            </p>
-            <p style="margin:0;font-size:13px;color:#9ca3af;line-height:1.6;">
-              If you did not request a password reset, you can safely ignore
-              this email — your password will not change.
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:20px 40px 28px;border-top:1px solid #e5e7eb;text-align:center;">
-            <p style="margin:0;font-size:12px;color:#9ca3af;">
-              © 2025 Shortlisting AI · This is an automated message, please do not reply.
-            </p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
+            
+            <a href="{login_url}" style="display:block;background:#2563eb;color:#ffffff;text-align:center;padding:14px;border-radius:8px;text-decoration:none;margin-bottom:24px;">Sign In to Your Account →</a>
+            
+            <hr style="border:none;border-top:1px solid #e2e8f0;">
+            <p style="margin:0;font-size:12px;color:#718096;text-align:center;">© 2025 AI-Powered Shortlisting Platform</p>
+        </div>
+    </div>
 </body>
 </html>"""
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"Welcome to AI Shortlisting Platform, {to_name}!",
+        html_content=html_content,
+        text_content=text_content,
+        to_name=to_name,
+    )
 
 
-def _build_reset_plain(to_name: str, reset_link: str) -> str:
-    return f"""Hi {to_name},
+# -- Password Reset Email ------------------------------------------------------
+def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
+    """Send password reset email."""
+    
+    text_content = f"""
+PASSWORD RESET REQUEST
 
-We received a request to reset the password for your Shortlisting AI account.
+Dear {to_name},
 
-Click the link below to choose a new password (expires in 15 minutes):
+We received a request to reset your password.
 
+Click this link to reset your password (expires in 15 minutes):
 {reset_link}
 
-If you did not request this, you can safely ignore this email.
+If you didn't request this, please ignore this email.
 
-— The Shortlisting AI Team
+Best regards,
+AI Recruitment Team
 """
-
-
-def send_reset_email(to_name: str, to_email: str, reset_link: str) -> bool:
-    """
-    Send a password-reset email via Brevo HTTP API.
-    Returns True on success, False on failure. Never raises.
-    """
-    success = _send_brevo_email(
-        to_name      = to_name,
-        to_email     = to_email,
-        subject      = "Reset your Shortlisting AI password",
-        html_content = _build_reset_html(to_name, reset_link),
-        text_content = _build_reset_plain(to_name, reset_link),
-    )
-    if not success:
-        _print_dev_fallback(to_name, to_email, reset_link)
-    return success
-
-
-def _print_dev_fallback(to_name: str, to_email: str, reset_link: str) -> None:
-    print("\n" + "═" * 70)
-    print("  PASSWORD RESET — EMAIL FAILED, USE THIS LINK MANUALLY")
-    print(f"  User  : {to_name} <{to_email}>")
-    print(f"  Link  : {reset_link}")
-    print(f"  Expiry: 15 minutes from now")
-    print("═" * 70 + "\n")
-
-
-# ── ✅ NEW: HR Invite Code Email ───────────────────────────────────────────────
-def _build_invite_html(to_name: str, invite_code: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
+    
+    html_content = f"""<!DOCTYPE html>
+<html>
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Your HR Invite Code</title>
+    <meta charset="UTF-8">
+    <title>Reset Your Password</title>
 </head>
-<body style="margin:0;padding:0;background:#f0f4ff;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4ff;padding:40px 16px;">
-    <tr><td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="max-width:520px;background:#ffffff;border-radius:16px;
-                    box-shadow:0 4px 32px rgba(0,0,0,.10);overflow:hidden;">
-        <tr>
-          <td style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 60%,#1d4ed8 100%);
-                     padding:32px 40px;text-align:center;">
-            <div style="font-size:2.5rem;margin-bottom:12px;">🔐</div>
-            <div style="display:inline-block;background:rgba(255,255,255,.15);
-                        border:1px solid rgba(255,255,255,.3);border-radius:99px;
-                        padding:5px 18px;font-size:11px;font-weight:700;
-                        letter-spacing:.08em;text-transform:uppercase;color:#ffffff;
-                        margin-bottom:16px;">
-              HR Access
-            </div>
-            <h1 style="margin:0;font-size:26px;font-weight:800;color:#ffffff;line-height:1.2;">
-              Your HR Invite Code
-            </h1>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:36px 40px;">
-            <p style="margin:0 0 8px;font-size:16px;color:#374151;">
-              Hi <strong>{to_name}</strong>,
-            </p>
-            <p style="margin:0 0 24px;font-size:15px;color:#6b7280;line-height:1.7;">
-              Your request for an <strong>HR account invite code</strong> on
-              <strong>Shortlisting AI</strong> has been approved. Use the code
-              below when registering as <em>HR / Recruiter</em>.
-            </p>
-
-            <!-- Invite code box -->
-            <div style="background:#f0f4ff;border:2px dashed #2563eb;border-radius:12px;
-                        padding:24px;text-align:center;margin-bottom:28px;">
-              <div style="font-size:11px;font-weight:700;letter-spacing:.12em;
-                          text-transform:uppercase;color:#6b7280;margin-bottom:10px;">
-                HR Invite Code
-              </div>
-              <div style="font-size:1.6rem;font-weight:800;color:#1e3a5f;
-                          letter-spacing:.06em;font-family:monospace;">
-                {invite_code}
-              </div>
-            </div>
-
-            <!-- Steps -->
-            <div style="background:#f9fafb;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
-              <div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:12px;">
-                How to use this code:
-              </div>
-              <ol style="margin:0;padding-left:18px;font-size:13px;color:#6b7280;line-height:2;">
-                <li>Go to the <strong>Register</strong> page</li>
-                <li>Select <strong>HR / Recruiter</strong> as your role</li>
-                <li>Enter the invite code above in the HR Invite Code field</li>
-                <li>Complete registration and sign in</li>
-              </ol>
-            </div>
-
-            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;
-                        padding:12px 16px;margin-bottom:24px;">
-              <p style="margin:0;font-size:13px;color:#991b1b;">
-                🔒 <strong>Keep this code private.</strong> Do not share it publicly.
-                It grants full access to candidate data and shortlisting tools.
-              </p>
-            </div>
-
-            <p style="margin:0;font-size:13px;color:#9ca3af;line-height:1.6;">
-              If you did not request this code, please ignore this email.
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:20px 40px 28px;border-top:1px solid #e5e7eb;text-align:center;">
-            <p style="margin:0;font-size:12px;color:#9ca3af;">
-              © 2025 Shortlisting AI · This is an automated message, please do not reply.
-            </p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
+<body style="margin:0;padding:0;background-color:#f4f7fb;font-family:Arial,sans-serif;">
+    <div style="max-width:600px;margin:0 auto;padding:20px;">
+        <div style="background:#e74c3c;border-radius:16px 16px 0 0;padding:32px 24px;text-align:center;">
+            <h1 style="margin:0;color:#ffffff;">Reset Your Password</h1>
+        </div>
+        <div style="background:#ffffff;border-radius:0 0 16px 16px;padding:32px 24px;">
+            <p>Dear <strong>{to_name}</strong>,</p>
+            <p>We received a request to reset your password.</p>
+            
+            <a href="{reset_link}" style="display:block;background:#e74c3c;color:#ffffff;text-align:center;padding:14px;border-radius:8px;text-decoration:none;margin:24px 0;">Reset Password</a>
+            
+            <p style="font-size:12px;color:#718096;">This link expires in 15 minutes.</p>
+            <p style="font-size:12px;color:#718096;">If you didn't request this, please ignore this email.</p>
+        </div>
+    </div>
 </body>
 </html>"""
-
-
-def _build_invite_plain(to_name: str, invite_code: str) -> str:
-    return f"""Hi {to_name},
-
-Your HR invite code for Shortlisting AI is:
-
-  {invite_code}
-
-How to use it:
-1. Go to the Register page
-2. Select HR / Recruiter as your role
-3. Enter the invite code above
-4. Complete registration and sign in
-
-Keep this code private — it grants full HR access.
-
-If you did not request this, please ignore this email.
-
-— The Shortlisting AI Team
-"""
-
-
-def send_hr_invite_email(to_name: str, to_email: str, invite_code: str) -> bool:
-    """
-    Send the HR invite code to the requester's email via Brevo.
-    Returns True on success, False on failure. Never raises.
-    """
-    success = _send_brevo_email(
-        to_name      = to_name,
-        to_email     = to_email,
-        subject      = "Your HR Invite Code — Shortlisting AI",
-        html_content = _build_invite_html(to_name, invite_code),
-        text_content = _build_invite_plain(to_name, invite_code),
+    
+    return send_email(
+        to_email=to_email,
+        subject="Reset Your Password - AI Shortlisting Platform",
+        html_content=html_content,
+        text_content=text_content,
+        to_name=to_name,
     )
-    if not success:
-        print("\n" + "═" * 70)
-        print("  HR INVITE — EMAIL FAILED, CODE FOR MANUAL SHARING:")
-        print(f"  Recipient : {to_name} <{to_email}>")
-        print(f"  Code      : {invite_code}")
-        print("═" * 70 + "\n")
-    return success
+
+
+# -- HR Invite Email -----------------------------------------------------------
+def send_hr_invite_email(to_name: str, to_email: str, invite_code: str) -> bool:
+    """Send HR invite code email."""
+    
+    register_url = f"{FRONTEND_URL}/register"
+    
+    text_content = f"""
+HR INVITE CODE
+
+Dear {to_name},
+
+Your HR invite code is: {invite_code}
+
+How to register:
+1. Go to {register_url}
+2. Select role: HR / Recruiter
+3. Enter the invite code above
+4. Complete your registration
+
+Best regards,
+AI Recruitment Team
+"""
+    
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Your HR Invite Code</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f7fb;font-family:Arial,sans-serif;">
+    <div style="max-width:600px;margin:0 auto;padding:20px;">
+        <div style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 100%);border-radius:16px 16px 0 0;padding:32px 24px;text-align:center;">
+            <h1 style="margin:0;color:#ffffff;">HR Invite Code</h1>
+        </div>
+        <div style="background:#ffffff;border-radius:0 0 16px 16px;padding:32px 24px;">
+            <p>Dear <strong>{to_name}</strong>,</p>
+            <p>Your HR invite code is:</p>
+            <div style="background:#f0f0f0;padding:20px;text-align:center;font-size:32px;font-weight:bold;font-family:monospace;border-radius:8px;margin:20px 0;">{invite_code}</div>
+            <p><strong>How to register:</strong></p>
+            <ol>
+                <li>Go to <a href="{register_url}">{register_url}</a></li>
+                <li>Select role: <strong>HR / Recruiter</strong></li>
+                <li>Enter the invite code above</li>
+                <li>Complete your registration</li>
+            </ol>
+        </div>
+    </div>
+</body>
+</html>"""
+    
+    return send_email(
+        to_email=to_email,
+        subject="Your HR Invite Code - AI Shortlisting Platform",
+        html_content=html_content,
+        text_content=text_content,
+        to_name=to_name,
+    )
+
+
+# -- Shortlisting Result Email -------------------------------------------------
+def send_shortlisting_result_email(
+    to_name: str,
+    to_email: str,
+    job_title: str,
+    decision: str,
+    ai_score: float = None,
+    reason_summary: str = "",
+) -> bool:
+    """Send shortlisting result to applicant."""
+    
+    is_shortlisted = decision == "shortlisted"
+    score_pct = round(ai_score * 100, 1) if ai_score else None
+    
+    if is_shortlisted:
+        subject = f"Congratulations! You've been shortlisted for {job_title}"
+        status_text = "Congratulations! You have been shortlisted!"
+    else:
+        subject = f"Application Update: {job_title}"
+        status_text = "Thank you for your application"
+    
+    text_content = f"""
+APPLICATION RESULT
+
+Dear {to_name},
+
+Job: {job_title}
+Result: {status_text}
+{f'AI Match Score: {score_pct}%' if score_pct else ''}
+
+{reason_summary or 'Evaluation completed by AI shortlisting system.'}
+
+View your application: {FRONTEND_URL}/dashboard
+
+Best regards,
+AI Recruitment Team
+"""
+    
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Application Result</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f7fb;font-family:Arial,sans-serif;">
+    <div style="max-width:600px;margin:0 auto;padding:20px;">
+        <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:16px 16px 0 0;padding:32px 24px;text-align:center;">
+            <h1 style="margin:0;color:#ffffff;">Application Result</h1>
+            <p style="margin:8px 0 0;color:rgba(255,255,255,0.9);">{job_title}</p>
+        </div>
+        <div style="background:#ffffff;border-radius:0 0 16px 16px;padding:32px 24px;">
+            <p>Dear <strong>{to_name}</strong>,</p>
+            <div style="background:{'#16a34a' if is_shortlisted else '#dc2626'};color:white;padding:15px;border-radius:8px;text-align:center;margin:20px 0;">
+                <strong>{status_text}</strong>
+            </div>
+            {f'<div style="background:#f9fafb;padding:15px;text-align:center;border-radius:8px;margin:20px 0;"><strong>AI Match Score:</strong> {score_pct}%</div>' if score_pct else ''}
+            <p><a href="{FRONTEND_URL}/dashboard" style="display:inline-block;background:#667eea;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;">View Dashboard</a></p>
+        </div>
+    </div>
+</body>
+</html>"""
+    
+    return send_email(
+        to_email=to_email,
+        subject=subject,
+        html_content=html_content,
+        text_content=text_content,
+        to_name=to_name,
+    )
+
+
+# -- Test email function -------------------------------------------------------
+def send_test_email(to_email: str, to_name: str = "Test User") -> bool:
+    """Send a test email."""
+    return send_welcome_email(to_name, to_email, "applicant")

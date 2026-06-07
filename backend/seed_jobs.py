@@ -1,6 +1,6 @@
 """
 backend/seed_jobs.py
-────────────────────────────────────────────────────────────────
+----------------------------------------------------------------
 Run this ONCE after starting the backend to populate the jobs table.
 
 Usage:
@@ -14,10 +14,10 @@ import sys
 BASE_URL = "http://localhost:8000"
 
 HR_EMAIL    = "hr@gmail.com"
-HR_PASSWORD = "hr@123"   # Strong password — meets all requirements
+HR_PASSWORD = "hr@123"   # Strong password -- meets all requirements
 HR_NAME     = "HR"
 
-# ── Step 1: Create or login HR account ───────────────────────
+# -- Step 1: Create or login HR account -----------------------
 print("Creating HR account...")
 hr_res = requests.post(f"{BASE_URL}/auth/register", json={
     "full_name": HR_NAME,
@@ -27,7 +27,7 @@ hr_res = requests.post(f"{BASE_URL}/auth/register", json={
 })
 
 if hr_res.status_code in (400, 422):
-    # Account already exists or registration failed — try login
+    # Account already exists or registration failed -- try login
     print(f"  Registration response: {hr_res.json().get('detail', hr_res.text)}")
     print("Logging in with existing account...")
     hr_res = requests.post(f"{BASE_URL}/auth/login", json={
@@ -36,22 +36,22 @@ if hr_res.status_code in (400, 422):
     })
 
 if hr_res.status_code not in (200, 201):
-    print(f"\n✗ Authentication failed ({hr_res.status_code}): {hr_res.text}")
+    print(f"\n Authentication failed ({hr_res.status_code}): {hr_res.text}")
     print("\nTIP: If the HR account was created with a different password,")
     print(f"     update HR_PASSWORD in this file to match, then re-run.")
     sys.exit(1)
 
 token   = hr_res.json()["access_token"]
 headers = {"Authorization": f"Bearer {token}"}
-print(f"✓ HR authenticated as {HR_EMAIL}\n")
+print(f" HR authenticated as {HR_EMAIL}\n")
 
 
-# ── Step 2: Define all jobs with full detailed requirements ──
+# -- Step 2: Define all jobs with full detailed requirements --
 JOBS = [
     {
         "title":       "Software Engineer",
         "description": "Design, develop, and maintain scalable software systems and applications that power our core platform.",
-        "about_role":  "As a Software Engineer you will own the full development lifecycle — from architecture and design through implementation, testing, and production deployment. You will work in an Agile team building high-performance, resilient systems.",
+        "about_role":  "As a Software Engineer you will own the full development lifecycle -- from architecture and design through implementation, testing, and production deployment. You will work in an Agile team building high-performance, resilient systems.",
         "responsibilities": (
             "Design and implement scalable backend and frontend services, "
             "Write clean, well-tested and documented code, "
@@ -64,7 +64,7 @@ JOBS = [
         ),
         "location":       "Kigali, Rwanda",
         "employment_type": "Full-time",
-        "salary_range":   "400,000 – 700,000 RWF / month",
+        "salary_range":   "400,000 - 700,000 RWF / month",
         "required_education_levels": "Bachelor's, Master's",
         "required_fields": "Computer Science, Software Engineering, Information Technology, Computer Engineering",
         "required_min_experience": 2,
@@ -108,7 +108,7 @@ JOBS = [
         ),
         "location":       "Kigali, Rwanda",
         "employment_type": "Full-time",
-        "salary_range":   "350,000 – 600,000 RWF / month",
+        "salary_range":   "350,000 - 600,000 RWF / month",
         "required_education_levels": "Bachelor's, Master's",
         "required_fields": "Statistics, Mathematics, Computer Science, Data Science, Economics, Information Systems",
         "required_min_experience": 1,
@@ -151,7 +151,7 @@ JOBS = [
         ),
         "location":       "Kigali, Rwanda",
         "employment_type": "Full-time",
-        "salary_range":   "300,000 – 550,000 RWF / month",
+        "salary_range":   "300,000 - 550,000 RWF / month",
         "required_education_levels": "Diploma, Bachelor's, Master's",
         "required_fields": "Nursing, Midwifery, Health Sciences, Clinical Medicine",
         "required_min_experience": 1,
@@ -196,7 +196,7 @@ JOBS = [
         ),
         "location":       "Kigali, Rwanda",
         "employment_type": "Full-time",
-        "salary_range":   "350,000 – 600,000 RWF / month",
+        "salary_range":   "350,000 - 600,000 RWF / month",
         "required_education_levels": "Bachelor's, Master's",
         "required_fields": "Accounting, Finance, Business Administration, Economics",
         "required_min_experience": 2,
@@ -227,7 +227,7 @@ JOBS = [
     {
         "title":       "Project Manager",
         "description": "Lead cross-functional teams and deliver high-impact initiatives on time, within scope, and on budget.",
-        "about_role":  "As Project Manager you will own end-to-end project delivery — from initiation and planning through execution, monitoring, and closure. You will manage diverse stakeholders, navigate risks, and maintain transparent communication at all levels.",
+        "about_role":  "As Project Manager you will own end-to-end project delivery -- from initiation and planning through execution, monitoring, and closure. You will manage diverse stakeholders, navigate risks, and maintain transparent communication at all levels.",
         "responsibilities": (
             "Define and document project scope, goals, deliverables, and success metrics, "
             "Develop comprehensive project plans including WBS, timelines, and resource allocation, "
@@ -241,7 +241,7 @@ JOBS = [
         ),
         "location":       "Kigali, Rwanda",
         "employment_type": "Full-time",
-        "salary_range":   "500,000 – 900,000 RWF / month",
+        "salary_range":   "500,000 - 900,000 RWF / month",
         "required_education_levels": "Bachelor's, Master's",
         "required_fields": "Business Administration, Project Management, Engineering, Computer Science, Information Technology",
         "required_min_experience": 3,
@@ -272,20 +272,20 @@ JOBS = [
 ]
 
 
-# ── Step 3: Post each job ────────────────────────────────────
+# -- Step 3: Post each job ------------------------------------
 print("Seeding jobs...")
 success = 0
 for job in JOBS:
     res = requests.post(f"{BASE_URL}/jobs", json=job, headers=headers)
     if res.status_code in (200, 201):
-        print(f"  ✓  {job['title']} posted  (id={res.json()['id']})")
+        print(f"    {job['title']} posted  (id={res.json()['id']})")
         success += 1
     else:
-        print(f"  ✗  {job['title']} FAILED  ({res.status_code}): {res.text[:120]}")
+        print(f"    {job['title']} FAILED  ({res.status_code}): {res.text[:120]}")
 
-print(f"\n{'═'*48}")
+print(f"\n{'='*48}")
 print(f"  {success}/{len(JOBS)} jobs seeded successfully.")
-print(f"  HR login  →  {HR_EMAIL}")
-print(f"  Password  →  {HR_PASSWORD}")
-print(f"  Open      →  http://localhost:5173")
-print(f"{'═'*48}")
+print(f"  HR login  ->  {HR_EMAIL}")
+print(f"  Password  ->  {HR_PASSWORD}")
+print(f"  Open      ->  http://localhost:5173")
+print(f"{'='*48}")
