@@ -41,6 +41,7 @@ import HRJobCreate        from './pages/HRJobCreate'
 import HRReport           from './pages/HRReport'
 import AdminDashboard     from './pages/AdminDashboard'
 import AdminProfile       from './pages/AdminProfile'  // ✅ FIX-APP-2
+import SupportChat        from './pages/SupportChat'
 
 // ── Loading spinner shared between guards ──────────────────────
 function FullPageSpinner() {
@@ -231,6 +232,7 @@ const router = createBrowserRouter(
         { path: '/register',        element: <Register /> },
         { path: '/forgot-password', element: <ForgotPassword /> },
         { path: '/reset-password',  element: <ResetPassword /> },
+        { path: '/support',         element: <SupportChat /> },
 
         // ── Apply — applicants only, HR/Admin shown a clear message ──
         // FIX-APP-1: ApplyGuard handles the role check and feedback

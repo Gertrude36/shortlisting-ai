@@ -183,11 +183,11 @@ function DocSlot({ slot, file, serverDoc, onChange, onPreview, externalError, on
               : <span style={{ fontSize: '.62rem', color: '#6b7280', fontWeight: 600, background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 3, padding: '1px 5px' }}>Optional</span>
             }
             {serverDoc && !file && !showError && (
-              <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved ✓</span>
+              <span style={{ fontSize: '.62rem', color: '#0a7c3e', fontWeight: 700, background: '#d1f5e0', border: '1.5px solid #6dd8a0', borderRadius: 3, padding: '1px 5px' }}>Saved OK</span>
             )}
           </div>
           {hasFile && !showError
-            ? <div style={{ fontSize: '.75rem', color: slot.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {displayName}</div>
+            ? <div style={{ fontSize: '.75rem', color: slot.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>OK {displayName}</div>
             : !showError && <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>{slot.hint}</div>
           }
         </div>
@@ -588,6 +588,7 @@ export default function Navbar() {
           <div className="navbar-actions">
             {!user ? (
               <>
+                <Link to="/support"><button className="btn btn-outline btn-sm"><AlertCircle size={14} /> Support</button></Link>
                 <Link to="/login"><button className="btn btn-outline btn-sm">Sign In</button></Link>
                 <Link to="/register"><button className="btn btn-primary btn-sm">Register</button></Link>
               </>
@@ -603,6 +604,9 @@ export default function Navbar() {
                     <button className="btn btn-outline btn-sm"><Briefcase size={14} /> HR Dashboard</button>
                   </Link>
                 )}
+                <Link to="/support">
+                  <button className="btn btn-outline btn-sm"><AlertCircle size={14} /> Support</button>
+                </Link>
 
                 <div ref={dropdownRef} style={{ position: 'relative' }}>
                   <div style={{ position: 'relative', display: 'inline-flex' }}>

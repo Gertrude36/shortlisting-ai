@@ -401,11 +401,16 @@ function JobModal({ job, onClose, onApply }) {
 
 // ── Main JobCard ──────────────────────────────────────────────
 export default function JobCard({ job, index = 0 }) {
-  const { user }        = useAuth()
-  const navigate        = useNavigate()
-  const [open, setOpen] = useState(false)
+  const { user, profileDocuments } = useAuth()
+  const navigate                    = useNavigate()
+  const [open, setOpen]            = useState(false)
 
   const isExpired = isDeadlineExpired(job.deadline)
+
+  const profileDocs = profileDocuments || []
+  const profileDocTypes = new Set(profileDocs.map(doc => doc.doc_type))
+  const hasRequiredProfileDocs = ['id_card', 'cv', 'diploma'].every(type => profileDocTypes.has(type))
+  const profileComplete = !!(user?.phone && user?.address && user?.national_id)
 
   const handleApply = () => {
     setOpen(false)
@@ -415,7 +420,15 @@ export default function JobCard({ job, index = 0 }) {
       navigate('/login', { state: { from: `/apply/${job.id}` } })
       return
     }
-    if (user.role === 'hr') { toast.error('HR accounts cannot apply for jobs'); return }
+    if (user.role === 'hr' || user.role === 'admin') {
+      toast.error('HR and admin accounts cannot apply for jobs')
+      return
+    }
+    if (!profileComplete || !hasRequiredProfileDocs) {
+      toast.error('Please complete your profile and upload required documents before applying. Open your profile to finish the setup.')
+      window.dispatchEvent(new Event('open-profile-modal'))
+      return
+    }
     navigate(`/apply/${job.id}`)
   }
 

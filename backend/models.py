@@ -47,30 +47,26 @@ def _ensure_is_active_column():
     try:
         from sqlalchemy import inspect, text
         from database import engine
-        
+
         inspector = inspect(engine)
-        
-        # Check if users table exists
+
         if not inspector.has_table("users"):
             return
-        
-        # Get existing columns
+
         columns = [col['name'] for col in inspector.get_columns("users")]
-        
+
         if 'is_active' not in columns:
             logger.info("[migration] Adding is_active column to users table...")
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
                 conn.commit()
                 logger.info("[migration] is_active column added successfully")
-                
-                # Update existing rows
                 conn.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
                 conn.commit()
                 logger.info("[migration] All existing users set to active")
         else:
             logger.debug("[migration] is_active column already exists")
-            
+
     except Exception as e:
         logger.warning(f"[migration] Could not add is_active column: {e}")
 
@@ -95,9 +91,9 @@ class User(Base):
         default=UserRole.applicant,
         server_default="applicant",
     )
-    
+
     is_active = Column(Boolean, default=True, server_default="1")
-    
+
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -197,17 +193,18 @@ class Application(Base):
 
     submitted_at   = Column(DateTime(timezone=True), nullable=True)
     shortlisted_at = Column(DateTime(timezone=True), nullable=True)
-    ocr_result = Column(Text, nullable=True)
+    published_at   = Column(DateTime(timezone=True), nullable=True)
+    ocr_result     = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_applications_submitted_at", "submitted_at"),
         Index("ix_applications_decision",     "decision"),
     )
 
-    applicant = relationship("User", back_populates="applications", foreign_keys=[applicant_id])
-    hr_reviewer = relationship("User", back_populates="reviewed_applications", foreign_keys=[hr_reviewed_by])
-    job = relationship("Job", back_populates="applications")
-    documents = relationship("Document", back_populates="application", cascade="all, delete-orphan")
+    applicant   = relationship("User", back_populates="applications",          foreign_keys=[applicant_id])
+    hr_reviewer = relationship("User", back_populates="reviewed_applications",  foreign_keys=[hr_reviewed_by])
+    job         = relationship("Job",  back_populates="applications")
+    documents   = relationship("Document", back_populates="application", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Application id={self.id} applicant_id={self.applicant_id} job_id={self.job_id} decision={self.decision}>"
@@ -245,6 +242,12 @@ class ProfileDocument(Base):
     original_name = Column(String(255), nullable=True)
     file_path     = Column(String(512), nullable=False)
 
+    # FIX-BUG5: ocr_text was added to the DB via migration (ensure_profile_document_columns)
+    # but was missing from the ORM model definition, causing AttributeError whenever
+    # code did `getattr(prof_doc, "ocr_text", None)` on a freshly-queried instance.
+    # Adding it here makes SQLAlchemy aware of the column so reads/writes work correctly.
+    ocr_text = Column(Text, nullable=True)
+
     uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="profile_documents")
@@ -276,5 +279,4 @@ class SystemLog(Base):
 
 
 # -- Run auto-migration on module load -----------------------------------------
-# This ensures the is_active column exists when the app starts
 _ensure_is_active_column()

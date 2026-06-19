@@ -213,7 +213,7 @@ export default function ResetPassword() {
               <ul style={styles.ruleList}>
                 {ruleStates.map((r) => (
                   <li key={r.key} style={{ ...styles.ruleItem, color: r.ok ? "#2ecc71" : "#e74c3c" }}>
-                    {r.ok ? "✓" : "✗"} {r.label}
+                    {r.ok ? "OK" : "X"} {r.label}
                   </li>
                 ))}
               </ul>

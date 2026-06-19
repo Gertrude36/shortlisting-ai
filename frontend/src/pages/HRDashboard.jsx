@@ -8,7 +8,7 @@ import {
   AlertCircle, Clock, Search,
   Phone, MapPin, Calendar, GraduationCap,
   Briefcase, Award, User, BookOpen, Download,
-  Shield, UserCog, WifiOff, X, ExternalLink,
+  Shield, UserCog, WifiOff, X, ExternalLink, Send,
 } from 'lucide-react'
 import React from 'react'
 import toast          from 'react-hot-toast'
@@ -138,7 +138,7 @@ function ProcessingOverlay({ jobTitle, statusData }) {
 
   const elapsedLabel = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
   const total = statusData?.total || 0
-  const done  = statusData?.done  || 0
+  const done  = statusData?.done_count ?? statusData?.processed ?? 0
   const progressPct = total > 0
     ? Math.min((done / total) * 100, 100)
     : Math.min(((elapsed / 120) * 100), 95)
@@ -387,6 +387,79 @@ function CandidateProfileModal({ candidate, onClose }) {
             )}
           </div>
 
+          {/* OCR Quality & Document Verification */}
+          <div style={{ background: B.bg, borderRadius: 10, padding: '18px 20px', border: `1.5px solid ${B.borderLight}` }}>
+            <div style={{ fontWeight: 800, fontSize: '.78rem', textTransform: 'uppercase', letterSpacing: '.08em', color: B.textMid, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <ShieldCheck size={13} color={B.textLight} /> Document Verification & OCR Quality
+            </div>
+            
+            {/* Document Verification Status */}
+            <div style={{ padding: '10px 0', borderBottom: `1px solid ${B.borderLight}` }}>
+              <div style={{ fontSize: '.7rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>Verification Status</div>
+              <div style={{ fontSize: '.9rem', fontWeight: 600, color: B.text, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {candidate.doc_verified ? (
+                  <><ShieldCheck size={15} color={B.emerald} style={{ color: B.emerald }} /> <span style={{ color: B.emerald, fontWeight: 800 }}>Verified by Admin</span></>
+                ) : (
+                  <><Bot size={15} color={B.sky} style={{ color: B.sky }} /> <span style={{ color: B.sky, fontWeight: 800 }}>AI Verified</span></>
+                )}
+              </div>
+              {candidate.doc_advisory && (
+                <div style={{ fontSize: '.8rem', color: '#dc2626', marginTop: 8, display: 'flex', alignItems: 'center', gap: 5, padding: '8px 10px', background: '#fee2e2', border: `1px solid #fecaca`, borderRadius: 4 }}>
+                  ⚠️ <strong>Advisory:</strong> {candidate.doc_advisory}
+                </div>
+              )}
+            </div>
+
+            {/* OCR Quality Score */}
+            {candidate.ocr_quality_score != null && (
+              <div style={{ padding: '10px 0', borderBottom: `1px solid ${B.borderLight}` }}>
+                <div style={{ fontSize: '.7rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>OCR Quality Score</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ height: 8, borderRadius: 4, background: B.borderLight, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${candidate.ocr_quality_score * 100}%`, background: candidate.ocr_quality_score >= 0.85 ? B.emerald : candidate.ocr_quality_score >= 0.75 ? B.amber : '#dc2626', transition: 'all 0.3s' }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '.95rem', fontWeight: 800, color: candidate.ocr_quality_score >= 0.85 ? B.emerald : candidate.ocr_quality_score >= 0.75 ? B.amber : '#dc2626', minWidth: 50, textAlign: 'right' }}>
+                    {(candidate.ocr_quality_score * 100).toFixed(0)}%
+                  </div>
+                </div>
+                <div style={{ fontSize: '.75rem', color: B.textLight, marginTop: 6 }}>
+                  {candidate.ocr_quality_score >= 0.85 ? '✅ Excellent - High confidence in extracted data' : candidate.ocr_quality_score >= 0.75 ? '⚠️ Good - Generally reliable, minor concerns' : '❌ Low - Data should be manually verified'}
+                </div>
+              </div>
+            )}
+
+            {/* OCR Matches/Mismatches */}
+            {((candidate.ocr_matches || []).length > 0 || (candidate.ocr_mismatches || []).length > 0) && (
+              <div style={{ padding: '10px 0' }}>
+                <div style={{ fontSize: '.7rem', fontWeight: 800, color: B.textLight, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>Field Verification</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {(candidate.ocr_matches || []).length > 0 && (
+                    <div style={{ padding: 8, background: B.emeraldLight, border: `1px solid ${B.emerald}`, borderRadius: 6 }}>
+                      <div style={{ fontSize: '.8rem', fontWeight: 700, color: B.emerald, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        ✅ {candidate.ocr_matches.length} Match{candidate.ocr_matches.length !== 1 ? 'es' : ''}
+                      </div>
+                      <div style={{ fontSize: '.75rem', color: B.text, marginTop: 4 }}>
+                        {candidate.ocr_matches.slice(0, 3).join(', ')}{candidate.ocr_matches.length > 3 ? ` + ${candidate.ocr_matches.length - 3} more` : ''}
+                      </div>
+                    </div>
+                  )}
+                  {(candidate.ocr_mismatches || []).length > 0 && (
+                    <div style={{ padding: 8, background: '#fee2e2', border: `1px solid #fecaca`, borderRadius: 6 }}>
+                      <div style={{ fontSize: '.8rem', fontWeight: 700, color: '#dc2626', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        ❌ {candidate.ocr_mismatches.length} Mismatch{candidate.ocr_mismatches.length !== 1 ? 'es' : ''}
+                      </div>
+                      <div style={{ fontSize: '.75rem', color: B.text, marginTop: 4 }}>
+                        {candidate.ocr_mismatches.slice(0, 3).join(', ')}{candidate.ocr_mismatches.length > 3 ? ` + ${candidate.ocr_mismatches.length - 3} more` : ''}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* AI Reason */}
           {candidate.ai_reason && (
             <div style={{ background: B.bg, borderRadius: 10, padding: '18px 20px', border: `1.5px solid ${B.borderLight}` }}>
@@ -516,7 +589,8 @@ export default function HRDashboard() {
   const [isDeleting,        setIsDeleting]        = useState(false)
   const [viewingProfileFor, setViewingProfileFor] = useState(null)
   const [downloadingDocId,  setDownloadingDocId]  = useState(null)
-  const [isShortlisting, setIsShortlisting] = useState(false)
+  const [isShortlisting,    setIsShortlisting]    = useState(false)
+  const [isPublishing,      setIsPublishing]      = useState(false)
 
   const shortlistingRef = useRef(false)
   const selectedJobRef  = useRef(null)
@@ -646,6 +720,36 @@ export default function HRDashboard() {
       resetShortlistState()
     }
   }, [fetchData, stopPolling])
+
+  const publishResults = useCallback(async (jobId, jobTitle) => {
+    if (isPublishing) return
+    setIsPublishing(true)
+    try {
+      const { data } = await api.post(`/hr/publish-results/${jobId}`)
+      if (data.published_count > 0) {
+        toast.success(
+          `Results published to ${data.published_count} applicant(s): ${data.shortlisted} shortlisted, ${data.not_shortlisted} rejected${data.manual_review > 0 ? `, ${data.manual_review} manual review` : ''}`,
+          { duration: 6000 }
+        )
+      } else {
+        toast('No unpublished results to publish.', { duration: 4000 })
+      }
+      if (data.email_errors && data.email_errors.length > 0) {
+        toast.error(`Email send issues for ${data.email_errors.length} applicant(s). Check system logs.`, { duration: 8000 })
+      }
+      try {
+        await fetchData()
+      } catch (refreshErr) {
+        const refreshDetail = refreshErr.response?.data?.detail || refreshErr.message || 'Failed to refresh dashboard after publishing results.'
+        toast.error(`Published results, but dashboard refresh failed: ${refreshDetail}`, { duration: 8000 })
+      }
+    } catch (err) {
+      const detail = err.response?.data?.detail || err.message
+      toast.error(detail || 'Failed to publish results', { duration: 6000 })
+    } finally {
+      setIsPublishing(false)
+    }
+  }, [isPublishing, fetchData])
 
   const handleTableDownload = async (doc) => {
     setDownloadingDocId(doc.id)
@@ -789,9 +893,9 @@ export default function HRDashboard() {
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 18, marginTop: 6, fontSize: '.9rem' }}>
-                    <span style={{ color: B.emerald, fontWeight: 700 }}>✓ {jobShortlisted} shortlisted</span>
-                    <span style={{ color: B.red, fontWeight: 700 }}>✗ {jobRejected} rejected</span>
-                    {jobUnprocessed > 0 && <span style={{ color: B.amber, fontWeight: 700 }}>⚡ {jobUnprocessed} awaiting evaluation</span>}
+                    <span style={{ color: B.emerald, fontWeight: 700 }}>{jobShortlisted} shortlisted</span>
+                    <span style={{ color: B.red, fontWeight: 700 }}>{jobRejected} rejected</span>
+                    {jobUnprocessed > 0 && <span style={{ color: B.amber, fontWeight: 700 }}>{jobUnprocessed} awaiting evaluation</span>}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -820,6 +924,25 @@ export default function HRDashboard() {
                         {jobUnprocessed}
                       </span>
                     )}
+                  </button>
+                  <button
+                    onClick={() => publishResults(selectedJob.id, selectedJob.title)}
+                    disabled={isPublishing || jobCandidates.length === 0 || !jobCandidates.some(c => c.decision !== 'pending')}
+                    title={jobCandidates.every(c => c.decision === 'pending') ? 'Run Automate Shortlisting first' : 'Notify applicants of shortlisting results'}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 7,
+                      padding: '8px 14px', borderRadius: 8,
+                      background: isPublishing || jobCandidates.length === 0 || !jobCandidates.some(c => c.decision !== 'pending') ? B.textLight : B.emerald,
+                      color: '#fff', fontWeight: 700, fontSize: '.85rem', border: 'none',
+                      cursor: (isPublishing || jobCandidates.length === 0 || !jobCandidates.some(c => c.decision !== 'pending')) ? 'not-allowed' : 'pointer',
+                      opacity: (isPublishing || jobCandidates.length === 0 || !jobCandidates.some(c => c.decision !== 'pending')) ? 0.6 : 1,
+                      transition: 'all .15s',
+                    }}
+                  >
+                    {isPublishing
+                      ? <><div className="spinner" style={{ width: 13, height: 13, borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' }} /> Publishing…</>
+                      : <><Send size={14} /> Publish Results</>
+                    }
                   </button>
                   <button onClick={() => setDeleteTarget(selectedJob)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px', borderRadius: 8, background: B.redLight, border: `1.5px solid ${B.red}`, color: B.red, fontSize: '.9rem', fontWeight: 800, cursor: 'pointer', transition: 'all .15s' }}
                     onMouseEnter={e => { e.currentTarget.style.background = B.red; e.currentTarget.style.color = '#fff' }}
@@ -893,6 +1016,16 @@ export default function HRDashboard() {
                                 {c.doc_verified
                                   ? <span style={{ color: B.emerald, fontSize: '.85rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}><ShieldCheck size={13} /> Verified</span>
                                   : <span style={{ color: B.sky, fontSize: '.85rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}><Bot size={12} /> AI verified</span>}
+                                {c.ocr_quality_score != null && c.ocr_quality_score < 0.75 && (
+                                  <span title={`OCR Quality: ${(c.ocr_quality_score * 100).toFixed(0)}%`} style={{ color: '#ea580c', fontSize: '.75rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 3 }}>
+                                    ⚠️ Low OCR Quality: {(c.ocr_quality_score * 100).toFixed(0)}%
+                                  </span>
+                                )}
+                                {(c.ocr_mismatches || []).length > 0 && (
+                                  <span title={`${c.ocr_mismatches.length} document mismatches detected`} style={{ color: '#dc2626', fontSize: '.75rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 3 }}>
+                                    ❌ {c.ocr_mismatches.length} Mismatch{c.ocr_mismatches.length !== 1 ? 'es' : ''}
+                                  </span>
+                                )}
                                 {(c.documents || []).slice(0, 3).map(doc => (
                                   <button key={doc.id} onClick={() => handleTableDownload(doc)} disabled={downloadingDocId === doc.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 4, background: B.blueXLight, border: `1px solid ${B.blue}`, color: B.blueDark, fontSize: '.7rem', fontWeight: 700, cursor: downloadingDocId === doc.id ? 'wait' : 'pointer', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                     <Download size={10} />

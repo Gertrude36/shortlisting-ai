@@ -149,13 +149,14 @@ export default function Login() {
                   background: 'var(--c-green-lt)',
                   border: '2px solid rgba(10,124,62,.25)',
                   borderRadius: 8,
-                  padding: '12px 16px',
+                  padding: '16px 18px',
                   marginBottom: 28,
-                  fontSize: '.9rem',
+                  fontSize: '.95rem',
                   color: 'var(--c-green)',
-                  display: 'flex', alignItems: 'center', gap: 8,
+                  lineHeight: 1.6,
                 }}>
-                  ✓ {successMessage}
+                  <strong style={{ display: 'block', marginBottom: 6 }}>Registration complete!</strong>
+                  {successMessage}
                 </div>
               )}
 

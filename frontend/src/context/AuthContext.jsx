@@ -48,6 +48,11 @@ export function AuthProvider({ children }) {
   const [user,             setUser]             = useState(null)
   const [profileDocuments, setProfileDocuments] = useState([])
   const [loading,          setLoading]          = useState(true)
+  const [profilePrompted,  setProfilePrompted]  = useState(false)
+
+  const profileComplete = user?.role !== 'applicant'
+    ? true
+    : !!(user?.phone && user?.address && user?.national_id)
 
   // ── Fetch profile documents ────────────────────────────────────────────────
   // FIX-CTX-7: Guard against non-applicant roles. HR / admin calling this
@@ -91,6 +96,7 @@ export function AuthProvider({ children }) {
         headers: { Authorization: `Bearer ${token}` },
       })
 
+      const nationalId = data.national_id ?? safeLS('national_id')
       const userObj = {
         token,
         role:        data.role,
@@ -100,19 +106,29 @@ export function AuthProvider({ children }) {
         email:       data.email,
         phone:       data.phone   || '',
         address:     data.address || '',
-        national_id: safeLS('national_id'),
+        national_id: nationalId,
       }
 
       setUser(userObj)
-      setLS('role',     data.role)
-      setLS('userId',   data.id)
-      setLS('fullName', data.full_name)
-      setLS('phone',    data.phone   || '')
-      setLS('address',  data.address || '')
+      setLS('role',        data.role)
+      setLS('userId',      data.id)
+      setLS('fullName',    data.full_name)
+      setLS('phone',       data.phone   || '')
+      setLS('address',     data.address || '')
+      setLS('national_id', nationalId)
 
       // Only fetch documents for applicants — HR/admin have no document portfolio
       if (data.role === 'applicant') {
         await refreshDocuments('applicant')
+      }
+
+      const profileCompleteAfterVerify = data.role !== 'applicant'
+        ? true
+        : !!(data.phone && data.address && nationalId)
+
+      if (data.role === 'applicant' && !profileCompleteAfterVerify && !profilePrompted) {
+        window.dispatchEvent(new Event('open-profile-modal'))
+        setProfilePrompted(true)
       }
 
     } catch (error) {
@@ -191,15 +207,14 @@ export function AuthProvider({ children }) {
   }
 
   /**
-   * updateProfile — persists phone + address to the DB.
-   * national_id goes to localStorage only (not a DB column).
-   *
-   * ✅ FIX-CTX-3: Only sends { phone, address } to PUT /profile.
+   * updateProfile — persists phone, address, and national_id to the backend.
+   * national_id is also mirrored in localStorage for client-side profile completeness.
    */
   const updateProfile = useCallback(async (fields = {}) => {
     const dbPatch = {}
-    if (fields.phone   !== undefined) dbPatch.phone   = fields.phone
-    if (fields.address !== undefined) dbPatch.address = fields.address
+    if (fields.phone       !== undefined) dbPatch.phone       = fields.phone
+    if (fields.address     !== undefined) dbPatch.address     = fields.address
+    if (fields.national_id !== undefined) dbPatch.national_id = fields.national_id
 
     if (fields.national_id !== undefined) {
       setLS('national_id', fields.national_id)

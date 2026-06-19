@@ -164,8 +164,8 @@ function translate(raw, variant = 'fail') {
     .replace(/\{[^}]*\}/gs, '')
     .replace(/[a-f0-9]{20,}\.(pdf|png|jpg|jpeg)/gi, '')
     .replace(/match scores?:\s*\{[^}]*\}/gi, '')
-    .replace(/✓\s*type confirmed/gi, '')
-    .replace(/:\s*✓\s*/g, ': ')
+    .replace(/type confirmed/gi, '')
+    .replace(/:\s*/g, ': ')
     .replace(/\|\s*/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()
@@ -177,7 +177,7 @@ function expandItem(raw) {
   const results = []
   for (const seg of segments) {
     if (/^[a-f0-9]{20,}\.(pdf|png|jpg|jpeg)/i.test(seg)) continue
-    if (/✓\s*type confirmed/i.test(seg) && seg.length < 60)  continue
+    if (/type confirmed/i.test(seg) && seg.length < 60)  continue
     if (/^\s*x\s*$/i.test(seg))                               continue
     results.push(seg)
   }
@@ -479,10 +479,10 @@ export default function ReasonBreakdown({ reason, candidate, isHR: isHRProp }) {
   // ── Fallback: pipe-separated string format ────────────────
   const parts     = reason.split(' | ').map(p => p.trim()).filter(Boolean)
   const isPassStr = p =>
-    p.startsWith('✓') ||
+    p.startsWith('OK') ||
     (/(\d+(\.\d+)?)%/.test(p) && parseFloat(p.match(/(\d+(\.\d+)?)%/)?.[1] || 0) >= 30)
-  const passItems = parts.filter(p =>  isPassStr(p)).map(p => p.replace(/^[✓✗•]\s*/, ''))
-  const failItems = parts.filter(p => !isPassStr(p)).map(p => p.replace(/^[✓✗•]\s*/, ''))
+  const passItems = parts.filter(p =>  isPassStr(p)).map(p => p.replace(/^[•]\s*/, ''))
+  const failItems = parts.filter(p => !isPassStr(p)).map(p => p.replace(/^[•]\s*/, ''))
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

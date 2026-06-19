@@ -6,7 +6,7 @@ import {
   ShieldCheck, ShieldX, ScrollText, BarChart2, Settings,
   UserCog, Briefcase, Activity, Bot, Database, Server,
   AlertCircle, CheckCircle, Clock, Search, ChevronDown,
-  Send, Eye, EyeOff, Shield, ExternalLink, TrendingUp,
+  Shield, ExternalLink, TrendingUp,
   FileText, Award, RotateCcw, MessageSquare, Star, ThumbsUp,
   ThumbsDown, Smile, Frown, Meh, Filter
 } from 'lucide-react'
@@ -171,16 +171,14 @@ function ChangeRoleModal({ user, onConfirm, onCancel, isSaving }) {
 }
 
 function AddUserModal({ onClose, onCreated }) {
-  const [form, setForm]       = useState({ full_name: '', email: '', password: '', role: 'applicant' })
+  const [form, setForm]       = useState({ full_name: '', email: '', role: 'applicant' })
   const [loading, setLoading] = useState(false)
   const [errors, setErrors]   = useState({})
-  const [showPw, setShowPw]   = useState(false)
 
   const validate = () => {
     const e = {}
     if (!form.full_name.trim() || form.full_name.trim().length < 2) e.full_name = 'Full name must be at least 2 characters'
     if (!form.email.trim()) e.email = 'Email is required'
-    if (!form.password || form.password.length < 8) e.password = 'Password must be at least 8 characters'
     return e
   }
 
@@ -189,7 +187,11 @@ function AddUserModal({ onClose, onCreated }) {
     if (Object.keys(errs).length > 0) { setErrors(errs); return }
     setLoading(true)
     try {
-      const { data } = await api.post('/admin/users', form)
+      const { data } = await api.post('/admin/users', {
+        full_name: form.full_name,
+        email: form.email,
+        role: form.role,
+      })
       toast.success(`Account created for ${data.full_name} (${data.role})`)
       onCreated(data); onClose()
     } catch (err) {
@@ -225,15 +227,8 @@ function AddUserModal({ onClose, onCreated }) {
               {errors[f.key] && <p style={{ fontSize: '.78rem', color: '#ef4444', margin: '4px 0 0', fontWeight: 600 }}>{errors[f.key]}</p>}
             </div>
           ))}
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: 'block', fontSize: '.88rem', fontWeight: 700, color: B.textMid, marginBottom: 6 }}>Password</label>
-            <div style={{ position: 'relative' }}>
-              <input type={showPw ? 'text' : 'password'} value={form.password} onChange={e => { setForm(p => ({ ...p, password: e.target.value })); setErrors(p => ({ ...p, password: undefined })) }} style={{ width: '100%', padding: '10px 40px 10px 12px', border: `1.5px solid ${errors.password ? '#ef4444' : B.border}`, borderRadius: 8, fontSize: '.9rem', color: B.text, boxSizing: 'border-box' }} placeholder="Min 8 chars" />
-              <button onClick={() => setShowPw(p => !p)} type="button" style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: B.textLight }}>
-                {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
-              </button>
-            </div>
-            {errors.password && <p style={{ fontSize: '.78rem', color: '#ef4444', margin: '4px 0 0', fontWeight: 600 }}>{errors.password}</p>}
+          <div style={{ marginBottom: 14, padding: '12px 14px', background: '#f7f9fc', border: '1px solid #dbeafe', borderRadius: 10 }}>
+            <div style={{ fontSize: '.88rem', color: B.textMid }}>A secure password will be generated automatically and emailed to the new user.</div>
           </div>
           <div style={{ marginBottom: 24 }}>
             <label style={{ display: 'block', fontSize: '.88rem', fontWeight: 700, color: B.textMid, marginBottom: 8 }}>Account Role</label>
@@ -258,53 +253,6 @@ function AddUserModal({ onClose, onCreated }) {
   )
 }
 
-function SendInviteModal({ onClose }) {
-  const [form, setForm]       = useState({ full_name: '', email: '' })
-  const [loading, setLoading] = useState(false)
-  const handleSend = async () => {
-    if (!form.email.trim()) { toast.error('Email is required'); return }
-    setLoading(true)
-    try {
-      // HR invite functionality removed - HR accounts must be created by admin
-      toast.error('HR accounts must be created by an administrator using the "Create User" button.')
-      onClose()
-    } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to send invite')
-    } finally { setLoading(false) }
-  }
-  return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(10,12,20,.70)', backdropFilter: 'blur(5px)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px' }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: B.white, borderRadius: 14, width: '100%', maxWidth: 440, boxShadow: '0 28px 72px rgba(10,15,40,.25)', overflow: 'hidden' }}>
-        <div style={{ padding: '22px 28px', background: `linear-gradient(135deg, ${B.emerald} 0%, ${B.sky} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ width: 38, height: 38, borderRadius: 8, background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Send size={18} color="#fff" /></div>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: '1.05rem', color: '#fff' }}>Send HR Invite</div>
-              <div style={{ fontSize: '.8rem', color: '#d1fae5' }}>Email invite code to a new HR officer</div>
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: 6, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#fff' }}><X size={14} /></button>
-        </div>
-        <div style={{ padding: '24px 28px' }}>
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: 'block', fontSize: '.88rem', fontWeight: 700, color: B.textMid, marginBottom: 6 }}>Recipient Name</label>
-            <input type="text" value={form.full_name} onChange={e => setForm(p => ({ ...p, full_name: e.target.value }))} style={{ width: '100%', padding: '10px 12px', border: `1.5px solid ${B.border}`, borderRadius: 8, fontSize: '.9rem', color: B.text, boxSizing: 'border-box' }} placeholder="HR Officer name (optional)" />
-          </div>
-          <div style={{ marginBottom: 24 }}>
-            <label style={{ display: 'block', fontSize: '.88rem', fontWeight: 700, color: B.textMid, marginBottom: 6 }}>Recipient Email <span style={{ color: B.red }}>*</span></label>
-            <input type="email" value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} style={{ width: '100%', padding: '10px 12px', border: `1.5px solid ${B.border}`, borderRadius: 8, fontSize: '.9rem', color: B.text, boxSizing: 'border-box' }} placeholder="hr@company.com" />
-          </div>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={onClose} disabled={loading} style={{ flex: 1, padding: '11px 0', borderRadius: 8, border: `1.5px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
-            <button onClick={handleSend} disabled={loading} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, padding: '11px 0', borderRadius: 8, background: loading ? B.emeraldLight : B.emerald, border: 'none', color: loading ? B.emerald : '#fff', fontWeight: 800, cursor: loading ? 'not-allowed' : 'pointer' }}>
-              {loading ? <><div className="spinner" style={{ width: 14, height: 14, borderColor: 'rgba(0,0,0,.15)', borderTopColor: B.emerald }} /> Sending…</> : <><Send size={14} /> Send Invite</>}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 /* ══════════════════════════════════════════════════════════════
    USERS TAB
@@ -313,7 +261,6 @@ function UsersTab({ currentUserId }) {
   const [users,        setUsers]        = useState([])
   const [loading,      setLoading]      = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
-  const [showInvite,   setShowInvite]   = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [roleTarget,   setRoleTarget]   = useState(null)
   const [isDeleting,   setIsDeleting]   = useState(false)
@@ -366,7 +313,6 @@ function UsersTab({ currentUserId }) {
   return (
     <>
       {showAddModal && <AddUserModal onClose={() => setShowAddModal(false)} onCreated={u => setUsers(prev => [u, ...prev])} />}
-      {showInvite   && <SendInviteModal onClose={() => setShowInvite(false)} />}
       {deleteTarget && <DeleteUserModal user={deleteTarget} onConfirm={handleDeleteUser} onCancel={() => setDeleteTarget(null)} isDeleting={isDeleting} />}
       {roleTarget   && <ChangeRoleModal user={roleTarget} onConfirm={handleChangeRole} onCancel={() => setRoleTarget(null)} isSaving={isSavingRole} />}
 
@@ -399,9 +345,6 @@ function UsersTab({ currentUserId }) {
           <button onClick={fetchUsers} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 14px', borderRadius: 8, border: `1.5px solid ${B.border}`, background: B.white, color: B.textMid, fontWeight: 700, fontSize: '.85rem', cursor: 'pointer' }}><RefreshCw size={13} /> Refresh</button>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => setShowInvite(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8, background: B.emeraldLight, border: `1.5px solid ${B.emerald}`, color: B.emerald, fontWeight: 700, fontSize: '.85rem', cursor: 'pointer' }}>
-            <Send size={14} /> Send HR Invite
-          </button>
           <button onClick={() => setShowAddModal(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8, background: B.blue, border: 'none', color: '#fff', fontWeight: 700, fontSize: '.85rem', cursor: 'pointer' }}>
             <UserPlus size={14} /> Add Account
           </button>

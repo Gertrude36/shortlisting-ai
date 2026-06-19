@@ -80,7 +80,6 @@ function RequestInviteModal({ onClose }) {
         {/* Body */}
         <div style={{ padding: '28px' }}>
           {sent ? (
-            /* Success state */
             <div style={{ textAlign: 'center', padding: '10px 0' }}>
               <div style={{ fontSize: '3rem', marginBottom: 16 }}>📬</div>
               <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#111827', marginBottom: 8 }}>
@@ -103,7 +102,6 @@ function RequestInviteModal({ onClose }) {
               </button>
             </div>
           ) : (
-            /* Form state */
             <>
               <p style={{ fontSize: '.9rem', color: '#6b7280', lineHeight: 1.7, marginBottom: 22 }}>
                 Enter your name and email below. We'll send your HR invite code immediately
@@ -179,16 +177,16 @@ function RequestInviteModal({ onClose }) {
 /* ── Main Register page ── */
 export default function Register() {
   const navigate = useNavigate()
-  const [form, setForm] = useState({
-    full_name: '', email: '', password: '', confirm: '',
-    role: 'applicant', hr_code: '',
-  })
-  const [loading,           setLoading]           = useState(false)
-  const [showPass,          setShowPass]           = useState(false)
-  const [showCode,          setShowCode]           = useState(false)
-  const [showInviteModal,   setShowInviteModal]    = useState(false)
 
-  const isHR = form.role === 'hr'
+  // ── Password fields removed: only name, email, and role needed ──
+  const [form, setForm] = useState({
+    full_name: '',
+    email:     '',
+    role:      'applicant',
+  })
+  const [loading,         setLoading]         = useState(false)
+  const [showInviteModal, setShowInviteModal]  = useState(false)
+  const [plainPassword,   setPlainPassword]    = useState('')
 
   const handleChange = e => setForm(prev => ({ ...prev, [e.target.name]: e.target.value }))
 
@@ -199,26 +197,9 @@ export default function Register() {
     if (!form.email.trim()) {
       toast.error('Please enter your email address'); return false
     }
-    if (form.password.length < 8) {
-      toast.error('Password must be at least 8 characters'); return false
-    }
-    if (!/[A-Z]/.test(form.password)) {
-      toast.error('Password must contain at least one uppercase letter'); return false
-    }
-    if (!/[a-z]/.test(form.password)) {
-      toast.error('Password must contain at least one lowercase letter'); return false
-    }
-    if (!/\d/.test(form.password)) {
-      toast.error('Password must contain at least one number'); return false
-    }
-    if (!/[^A-Za-z0-9]/.test(form.password)) {
-      toast.error('Password must contain at least one special character'); return false
-    }
-    if (form.password !== form.confirm) {
-      toast.error('Passwords do not match'); return false
-    }
-    if (isHR && !form.hr_code.trim()) {
-      toast.error('Please enter the HR invite code'); return false
+    // Basic email format check
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
+      toast.error('Please enter a valid email address'); return false
     }
     return true
   }
@@ -228,19 +209,32 @@ export default function Register() {
     if (!validate()) return
     setLoading(true)
     try {
-      await api.post('/auth/register', {
+      const { data } = await api.post('/auth/register', {
         full_name: form.full_name.trim(),
         email:     form.email.trim().toLowerCase(),
-        password:  form.password,
         role:      form.role,
-        hr_code:   isHR ? form.hr_code.trim() : undefined,
+        // password is intentionally omitted — backend generates it automatically
       })
-      toast.success('Account created! Please log in.', { duration: 5000 })
+      const emailAddress = form.email.trim().toLowerCase()
+      if (data.plain_password) {
+        setPlainPassword(data.plain_password)
+        toast.success(
+          `✅ Account created! Use the temporary password ${data.plain_password} to sign in now.`,
+          { duration: 10000 }
+        )
+      } else {
+        toast.success(
+          '✅ Account created! A secure login password was emailed to you. Check your inbox or spam folder.',
+          { duration: 7000 }
+        )
+      }
       navigate('/login', {
         replace: true,
         state: {
-          email:   form.email.trim().toLowerCase(),
-          message: 'Registration successful. Please sign in.',
+          email:   emailAddress,
+          message: data.plain_password
+            ? `Registration complete! Your temporary password is ${data.plain_password}. Use it to sign in now, or reset it after login.`
+            : 'Registration complete! A secure password was sent to your email. Check your inbox or spam folder, then sign in below.',
         },
       })
     } catch (err) {
@@ -263,7 +257,7 @@ export default function Register() {
 
         <div style={{ flex: 1, display: 'flex', alignItems: 'stretch', minHeight: 'calc(100vh - 68px)' }}>
 
-          {/* ── Left hero panel ── */}
+          {/* ── Left hero panel (unchanged) ── */}
           <div style={{
             flex: '0 0 38%',
             background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 60%, #1d4ed8 100%)',
@@ -293,7 +287,7 @@ export default function Register() {
               <div style={{ width: 44, height: 3, background: 'linear-gradient(90deg, #60a5fa, #34d399)', marginBottom: 24, borderRadius: 2 }} />
 
               <p style={{ fontSize: '1rem', color: '#bfdbfe', lineHeight: 1.8, maxWidth: 320, marginBottom: 40 }}>
-                Register as a job applicant to apply for open positions. HR professionals need an invite code from the administrator.
+                Register as a job applicant to apply for open positions. A secure password will be sent to your email automatically.
               </p>
 
               <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
@@ -323,6 +317,27 @@ export default function Register() {
                 <Link to="/login" style={{ color: '#2563eb', fontWeight: 700 }}>Sign in</Link>
               </p>
 
+              {/* ── Auto-password notice banner ── */}
+              <div style={{
+                display: 'flex', alignItems: 'flex-start', gap: 12,
+                background: '#eff6ff',
+                border: '1px solid #bfdbfe',
+                borderRadius: 10,
+                padding: '14px 16px',
+                marginBottom: 28,
+              }}>
+                <span style={{ fontSize: '1.2rem', flexShrink: 0, marginTop: 1 }}>📧</span>
+                <div>
+                  <p style={{ margin: 0, fontSize: '.85rem', fontWeight: 700, color: '#1e40af' }}>
+                    Password sent automatically
+                  </p>
+                  <p style={{ margin: '3px 0 0', fontSize: '.8rem', color: '#3b82f6', lineHeight: 1.5 }}>
+                    After registering, a secure login password will be emailed to you.
+                    You can change it anytime from your profile.
+                  </p>
+                </div>
+              </div>
+
               <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
                 {/* Full Name */}
@@ -349,6 +364,9 @@ export default function Register() {
                     placeholder="e.g nicole35@gmail.com" required
                     style={{ color: '#111827', fontSize: '.95rem' }}
                   />
+                  <div style={{ fontSize: '.78rem', color: '#6b7280', marginTop: 5, lineHeight: 1.5 }}>
+                    Your password will be sent to this address — make sure it's correct.
+                  </div>
                 </div>
 
                 {/* Role selector */}
@@ -362,135 +380,7 @@ export default function Register() {
                     style={{ color: '#111827', fontSize: '.95rem' }}
                   >
                     <option value="applicant">Job Applicant</option>
-                    <option value="hr">HR / Recruiter</option>
                   </select>
-                </div>
-
-                {/* HR invite code — only shown when HR is selected */}
-                {isHR && (
-                  <div style={{
-                    background: '#fefce8', border: '1.5px solid #fde68a',
-                    borderRadius: 10, padding: '16px 18px',
-                    display: 'flex', flexDirection: 'column', gap: 10,
-                  }}>
-                    {/* Warning banner */}
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                      <span style={{ fontSize: '1.2rem', lineHeight: 1 }}>🔐</span>
-                      <div>
-                        <div style={{ fontSize: '.88rem', fontWeight: 700, color: '#92400e', marginBottom: 2 }}>
-                          HR Account — Invite Code Required
-                        </div>
-                        <div style={{ fontSize: '.8rem', color: '#a16207', lineHeight: 1.5 }}>
-                          HR accounts have full access to candidate data and shortlisting tools.
-                          An invite code from your system administrator is required.
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Code input */}
-                    <div>
-                      <label style={{ display: 'block', fontSize: '.88rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>
-                        HR Invite Code
-                      </label>
-                      <div style={{ position: 'relative' }}>
-                        <input
-                          className="form-input"
-                          type={showCode ? 'text' : 'password'}
-                          name="hr_code"
-                          value={form.hr_code}
-                          onChange={handleChange}
-                          placeholder="Enter your invite code"
-                          autoComplete="off"
-                          style={{
-                            color: '#111827', fontSize: '.95rem',
-                            paddingRight: 60, borderColor: '#fbbf24', background: '#fffbeb',
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowCode(v => !v)}
-                          style={{
-                            position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
-                            background: 'none', border: 'none', cursor: 'pointer',
-                            fontSize: '.8rem', fontWeight: 700, color: '#d97706', letterSpacing: '.04em',
-                          }}
-                        >
-                          {showCode ? 'Hide' : 'Show'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* NEW: Request invite code by email button */}
-                    <button
-                      type="button"
-                      onClick={() => setShowInviteModal(true)}
-                      style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                        padding: '9px 14px', borderRadius: 7,
-                        background: '#fffbeb', border: '1.5px solid #fbbf24',
-                        color: '#92400e', fontSize: '.82rem', fontWeight: 700,
-                        cursor: 'pointer', transition: 'all .15s',
-                        width: '100%',
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.background = '#fef3c7' }}
-                      onMouseLeave={e => { e.currentTarget.style.background = '#fffbeb' }}
-                    >
-                      Don't have a code? Request it by email
-                    </button>
-                  </div>
-                )}
-
-                {/* Password */}
-                <div>
-                  <label style={{ display: 'block', fontSize: '.9rem', fontWeight: 700, color: '#374151', marginBottom: 7 }}>
-                    Password
-                  </label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      className="form-input"
-                      type={showPass ? 'text' : 'password'}
-                      name="password" value={form.password} onChange={handleChange}
-                      placeholder="Min 8 chars, uppercase, number, special"
-                      autoComplete="new-password" required
-                      style={{ paddingRight: 56, color: '#111827', fontSize: '.95rem' }}
-                    />
-                    <button
-                      type="button" onClick={() => setShowPass(v => !v)}
-                      style={{
-                        position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
-                        background: 'none', border: 'none', cursor: 'pointer',
-                        fontSize: '.8rem', fontWeight: 700, color: '#2563eb', letterSpacing: '.04em',
-                      }}
-                    >
-                      {showPass ? 'Hide' : 'Show'}
-                    </button>
-                  </div>
-                  <div style={{ fontSize: '.78rem', color: '#6b7280', marginTop: 5, lineHeight: 1.5 }}>
-                    Must contain: uppercase, lowercase, number, special character
-                  </div>
-                </div>
-
-                {/* Confirm Password */}
-                <div>
-                  <label style={{ display: 'block', fontSize: '.9rem', fontWeight: 700, color: '#374151', marginBottom: 7 }}>
-                    Confirm Password
-                  </label>
-                  <input
-                    className="form-input"
-                    type={showPass ? 'text' : 'password'}
-                    name="confirm" value={form.confirm} onChange={handleChange}
-                    placeholder="Re-enter your password"
-                    autoComplete="new-password" required
-                    style={{
-                      color: '#111827', fontSize: '.95rem',
-                      borderColor: form.confirm && form.confirm !== form.password ? 'var(--c-red)' : undefined,
-                    }}
-                  />
-                  {form.confirm && form.confirm !== form.password && (
-                    <div style={{ fontSize: '.78rem', color: 'var(--c-red)', marginTop: 4 }}>
-                      Passwords do not match
-                    </div>
-                  )}
                 </div>
 
                 <button
@@ -501,7 +391,7 @@ export default function Register() {
                 >
                   {loading
                     ? <><div className="spinner" style={{ width: 16, height: 16, borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' }} /> Creating account…</>
-                    : isHR ? 'Create HR Account' : 'Create Account'
+                    : 'Create Account & Send Password'
                   }
                 </button>
               </form>

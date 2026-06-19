@@ -53,21 +53,36 @@ from schemas import (
 )
 from auth import (
     hash_password, verify_password, create_access_token,
-    create_reset_token, verify_reset_token,
+    create_reset_token, verify_reset_token, generate_secure_password,
     get_current_user, require_hr, require_applicant,
     require_admin, require_hr_or_admin,
 )
-from email_utils import send_reset_email, send_welcome_email
+
+# FIX-EMAIL-1: Import all email functions cleanly from email_utils.
+# _send_brevo_email is now a proper export (was missing before → ImportError
+# inside finalize_application crashed the whole request).
+from email_utils import (
+    send_reset_email,
+    send_welcome_email,
+    send_generated_password_email,
+    send_support_request_email,
+    send_shortlisting_result_email,
+    send_hr_invite_email,
+    send_application_submission_email,
+    send_test_email,
+    _send_brevo_email,
+    FRONTEND_URL,
+)
 
 
 # -----------------------------------------------------------------------------
 # Timeout / feature flags
 # -----------------------------------------------------------------------------
 
-CANDIDATE_TIMEOUT_SECONDS    = 90
-OCR_TIMEOUT_SECONDS          = 10
-OCR_CANDIDATE_BUDGET_SECONDS = 25
-UPLOAD_OCR_TIMEOUT_SECONDS   = int(os.getenv("UPLOAD_OCR_TIMEOUT", "60"))
+CANDIDATE_TIMEOUT_SECONDS    = 60
+OCR_TIMEOUT_SECONDS          = 30
+OCR_CANDIDATE_BUDGET_SECONDS = 120
+UPLOAD_OCR_TIMEOUT_SECONDS   = int(os.getenv("UPLOAD_OCR_TIMEOUT", "30"))
 
 OCR_ENABLED     = os.getenv("ENABLE_OCR", "true").lower() == "true"
 OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", "http://localhost:5050")
@@ -288,9 +303,34 @@ def _run_pre_submission_check(
     field_of_study:  str = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
-    # Basic checks only during upload for speed and stability
-    # Full AI checks happen during shortlisting
-    return True, f" {declared_type.replace('_', ' ').title()} received. Full verification will complete during shortlisting."
+    if not _ocr_is_enabled():
+        return True, f" {declared_type.replace('_',' ').title()} received."
+    if _pre_submission_check is None:
+        return True, f" {declared_type.replace('_',' ').title()} received (verifier loading)."
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(
+                _pre_submission_check,
+                file_path, declared_type, applicant_name,
+                field_of_study, education_level, False,
+            )
+            result = fut.result(timeout=UPLOAD_OCR_TIMEOUT_SECONDS)
+            accepted, message = (result[0], result[1]) if isinstance(result,(tuple,list)) and len(result)>=2 else (True, f" {declared_type.replace('_',' ').title()} received.")
+
+        if accepted:
+            return True, message
+        rejection_type = _classify_rejection(message)
+        print(f"[upload_verify] Rejection type='{rejection_type}': {message}")
+        # Hard rejects — never override
+        if rejection_type in ("identity_fraud", "hard_reject", "quality", "id_rejected", "type_mismatch"):
+            return False, message
+        # Soft issues — accept with note, re-check during shortlisting
+        return True, f" {declared_type.replace('_',' ').title()} received. Details will be verified during evaluation."
+    except concurrent.futures.TimeoutError:
+        return True, f" {declared_type.replace('_',' ').title()} received and accepted."
+    except Exception as exc:
+        print(f"[upload_verify]   pre_submission_check error: {exc!r}")
+        return True, f" {declared_type.replace('_',' ').title()} received."
 
 
 def _run_pre_submission_check_with_cached_text(
@@ -301,59 +341,9 @@ def _run_pre_submission_check_with_cached_text(
     field_of_study:  str = "",
     education_level: str = "",
 ) -> tuple[bool, str]:
-    # Always run the full AI check regardless of cached text.
-    # Cached OCR text was computed before AI vision was integrated and
-    # cannot be trusted for identity verification.
     return _run_pre_submission_check(
         file_path, declared_type, applicant_name, field_of_study, education_level,
     )
-    if _pre_submission_check is None:
-        return _quick_check_with_text(
-            cached_ocr_text, declared_type, applicant_name, field_of_study, education_level,
-        )
-    try:
-        import document_verifier as _dv
-        import ocr_utils as _ou
-        original_extract = getattr(_ou, "extract_document_text", None)
-        text_to_return   = cached_ocr_text
-        def _cached_extractor(path: str, fast_mode: bool = False, declared_type: str = "") -> str:
-            return text_to_return
-        _ou.extract_document_text = _cached_extractor
-        _dv_original = getattr(_dv, "extract_document_text", None)
-        if hasattr(_dv, "extract_document_text"):
-            _dv.extract_document_text = _cached_extractor
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(
-                    _pre_submission_check,
-                    file_path, declared_type, applicant_name,
-                    field_of_study, education_level,
-                    False,
-                )
-                accepted, message = fut.result(timeout=30)
-                if not accepted:
-                    rejection_type = _classify_rejection(message)
-                    if rejection_type == "name_mismatch_soft":
-                        return True, f" '{declared_type}' attached - name will be re-checked later."
-                    elif rejection_type == "type_mismatch":
-                        return True, f" '{declared_type}' attached. Document type will be verified during shortlisting."
-                    elif rejection_type in ("field_mismatch", "edu_mismatch"):
-                        return True, f" '{declared_type}' attached. Field and education level will be verified during shortlisting."
-                    else:
-                        return False, message
-                return True, message
-        finally:
-            if original_extract is not None:
-                _ou.extract_document_text = original_extract
-            if _dv_original is not None and hasattr(_dv, "extract_document_text"):
-                _dv.extract_document_text = _dv_original
-    except concurrent.futures.TimeoutError:
-        return True, f" '{declared_type}' attached from profile (verification in background)."
-    except Exception as exc:
-        print(f"[attach_verify]   Cached-text check error: {exc!r}")
-        return _run_pre_submission_check(
-            file_path, declared_type, applicant_name, field_of_study, education_level,
-        )
 
 
 def _quick_check_with_text(
@@ -408,6 +398,90 @@ def _ocr_profile_doc_and_cache(profile_doc_id: int) -> None:
         db.close()
 
 
+def _enrich_app_profile_from_documents(app_obj: Application, docs: list, doc_texts: dict[str, str], user: User) -> None:
+    """
+    FIX-EXTRACTION-1: Enrich application profile with structured data extracted from documents.
+    This ensures that document-extracted skills, education, etc. are available for scoring.
+    """
+    try:
+        from document_extractor import extract_multiple_documents
+        
+        if not docs:
+            return
+            
+        docs_for_extract = [
+            {"file_path": d.file_path, "document_type_hint": _doc_type_value(d)}
+            for d in docs if d.file_path and os.path.exists(d.file_path)
+        ]
+        
+        if not docs_for_extract:
+            return
+        
+        print(f"[enrich_profile] app={app_obj.id} attempting structured extraction from {len(docs_for_extract)} documents")
+        
+        extracted = extract_multiple_documents(docs_for_extract, applicant_name=user.full_name)
+        merged = extracted.get("merged_profile", {}) or {}
+        
+        print(f"[enrich_profile] app={app_obj.id} merged_profile keys={list(merged.keys())}")
+        
+        # Education enrichment
+        edu = merged.get("education") or []
+        if edu:
+            first = edu[0] if isinstance(edu, list) else {}
+            extracted_degree = str(first.get("degree") or "").strip()
+            extracted_field = str(first.get("field") or "").strip()
+            
+            if extracted_degree and not app_obj.education_level:
+                app_obj.education_level = extracted_degree
+                print(f"[enrich_profile] app={app_obj.id} SET education_level={app_obj.education_level}")
+            elif extracted_degree and "advanced" in extracted_degree.lower():
+                if not (str(app_obj.education_level or "").lower().find("advanced") >= 0):
+                    app_obj.education_level = extracted_degree
+                    print(f"[enrich_profile] app={app_obj.id} PROMOTE education_level to {app_obj.education_level}")
+            
+            if extracted_field and not app_obj.field_of_study:
+                app_obj.field_of_study = extracted_field
+                print(f"[enrich_profile] app={app_obj.id} SET field_of_study={app_obj.field_of_study}")
+            
+            if (not app_obj.graduation_year or app_obj.graduation_year == 0) and first.get("year"):
+                try:
+                    app_obj.graduation_year = int(str(first.get("year")).strip())
+                    print(f"[enrich_profile] app={app_obj.id} SET graduation_year={app_obj.graduation_year}")
+                except Exception:
+                    pass
+        
+        # Skills enrichment
+        if not app_obj.skills and merged.get("skills"):
+            sk = merged.get("skills")
+            if isinstance(sk, list):
+                app_obj.skills = ", ".join([s for s in sk if s])
+            else:
+                app_obj.skills = str(sk)
+            print(f"[enrich_profile] app={app_obj.id} SET skills={app_obj.skills}")
+        
+        # Certifications enrichment
+        if not app_obj.certifications and merged.get("certifications"):
+            certs = merged.get("certifications")
+            if isinstance(certs, list):
+                app_obj.certifications = ", ".join([c for c in certs if c])
+            else:
+                app_obj.certifications = str(certs)
+            print(f"[enrich_profile] app={app_obj.id} SET certifications={app_obj.certifications}")
+        
+        # Experience enrichment
+        if not app_obj.experience_years and merged.get("experience"):
+            exp = merged.get("experience") or []
+            if exp:
+                # Calculate total years from experience list
+                total_years = len(exp)  # Simple count, or could be more sophisticated
+                if total_years > 0:
+                    app_obj.experience_years = total_years
+                    print(f"[enrich_profile] app={app_obj.id} SET experience_years={app_obj.experience_years} (from {len(exp)} roles)")
+        
+    except Exception as e:
+        print(f"[enrich_profile] app={app_obj.id} error: {e!r}")
+
+
 def _extract_all_doc_texts(
     docs: list,
     budget_seconds: float = OCR_CANDIDATE_BUDGET_SECONDS,
@@ -444,7 +518,6 @@ def _extract_all_doc_texts(
 
 
 def _normalize_text(t: str) -> str:
-    import unicodedata
     t = unicodedata.normalize("NFKD", str(t))
     t = "".join(c for c in t if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", t).lower().strip()
@@ -532,17 +605,22 @@ def _post_submit_ocr_verify(application_id: int) -> None:
         return
     _set_app_ocr_status(application_id, running=True, done=False, result=None)
     db = SessionLocal()
+    print(f"[DEBUG] _post_submit_ocr_verify STARTED for application_id={application_id}")
     try:
         app_obj = db.query(Application).filter(Application.id == application_id).first()
         if not app_obj:
+            print(f"[DEBUG] _post_submit_ocr_verify: application {application_id} not found")
             _set_app_ocr_status(application_id, running=False, done=True, result={"error": "application not found"})
             return
         user = db.query(User).filter(User.id == app_obj.applicant_id).first()
         if not user:
+            print(f"[DEBUG] _post_submit_ocr_verify: user {app_obj.applicant_id} not found")
             _set_app_ocr_status(application_id, running=False, done=True, result={"error": "user not found"})
             return
         docs      = db.query(Document).filter(Document.application_id == application_id).all()
+        print(f"[DEBUG] _post_submit_ocr_verify: found {len(docs)} documents for app {application_id}")
         doc_texts = _extract_all_doc_texts(docs, budget_seconds=OCR_CANDIDATE_BUDGET_SECONDS)
+        print(f"[DEBUG] _post_submit_ocr_verify: OCR extraction complete. Doc texts: {[(k, len(v)) for k, v in doc_texts.items()]}")
         VERIFIABLE = {"id_card", "cv", "diploma", "certificate"}
         doc_types  = [_doc_type_value(d) for d in docs]
         doc_paths  = [d.file_path for d in docs]
@@ -596,6 +674,63 @@ def _post_submit_ocr_verify(application_id: int) -> None:
         if profile_updated:
             db.add(user)
         storable_texts = {k: v for k, v in doc_texts.items() if v and v.strip()}
+        # Attempt structured extraction from uploaded documents to populate
+        # missing application profile fields (education, field, skills, certs).
+        try:
+            from document_extractor import extract_multiple_documents
+            docs_for_extract = [
+                {"file_path": d.file_path, "document_type_hint": _doc_type_value(d)}
+                for d in docs if d.file_path and os.path.exists(d.file_path)
+            ]
+            print(f"[DEBUG] _post_submit_ocr_verify: attempting structured extraction from {len(docs_for_extract)} documents")
+            if docs_for_extract:
+                extracted = extract_multiple_documents(docs_for_extract, applicant_name=user.full_name)
+                merged = extracted.get("merged_profile", {}) or {}
+                print(f"[DEBUG] _post_submit_ocr_verify: merged_profile keys={list(merged.keys())}")
+                # education: list of {institution, degree, field, year}
+                edu = merged.get("education") or []
+                print(f"[DEBUG] _post_submit_ocr_verify: extracted {len(edu)} education records")
+                if edu:
+                    first = edu[0] if isinstance(edu, list) else {}
+                    print(f"[DEBUG] _post_submit_ocr_verify: first education={first}")
+                    extracted_degree = str(first.get("degree") or "").strip()
+                    extracted_field = str(first.get("field") or "").strip()
+                    # Prefer filling missing values
+                    if extracted_degree and not app_obj.education_level:
+                        app_obj.education_level = extracted_degree
+                        print(f"[DEBUG] _post_submit_ocr_verify: SET education_level={app_obj.education_level}")
+                    # If declared level exists but extracted indicates an Advanced Diploma,
+                    # promote the stored value to reflect the stronger credential.
+                    elif extracted_degree and "advanced" in extracted_degree.lower():
+                        if not (str(app_obj.education_level or "").lower().find("advanced") >= 0):
+                            app_obj.education_level = extracted_degree
+                            print(f"[DEBUG] _post_submit_ocr_verify: PROMOTE education_level to {app_obj.education_level}")
+                    if extracted_field and not app_obj.field_of_study:
+                        app_obj.field_of_study = extracted_field
+                        print(f"[DEBUG] _post_submit_ocr_verify: SET field_of_study={app_obj.field_of_study}")
+                    if (not app_obj.graduation_year or app_obj.graduation_year == 0) and first.get("year"):
+                        try:
+                            app_obj.graduation_year = int(str(first.get("year")).strip())
+                            print(f"[DEBUG] _post_submit_ocr_verify: SET graduation_year={app_obj.graduation_year}")
+                        except Exception as e:
+                            print(f"[DEBUG] _post_submit_ocr_verify: failed to parse graduation_year: {e}")
+                # skills and certifications
+                if not app_obj.skills and merged.get("skills"):
+                    sk = merged.get("skills")
+                    if isinstance(sk, list):
+                        app_obj.skills = ", ".join([s for s in sk if s])
+                    else:
+                        app_obj.skills = str(sk)
+                    print(f"[DEBUG] _post_submit_ocr_verify: SET skills={app_obj.skills}")
+                if not app_obj.certifications and merged.get("certifications"):
+                    certs = merged.get("certifications")
+                    if isinstance(certs, list):
+                        app_obj.certifications = ", ".join([c for c in certs if c])
+                    else:
+                        app_obj.certifications = str(certs)
+                    print(f"[DEBUG] _post_submit_ocr_verify: SET certifications={app_obj.certifications}")
+        except Exception as e:
+            print(f"[DEBUG] _post_submit_ocr_verify: document_extractor error: {e!r}")
         ocr_result = {
             "ocr_done": True, "verified": verified, "advisory": advisory,
             "verify_summary": verify_summary, "matches": matches,
@@ -613,6 +748,7 @@ def _post_submit_ocr_verify(application_id: int) -> None:
         app_obj.doc_advisory = advisory
         db.add(app_obj)
         db.commit()
+        print(f"[DEBUG] _post_submit_ocr_verify COMPLETED: app={application_id} education_level={app_obj.education_level} field_of_study={app_obj.field_of_study}")
         _set_app_ocr_status(application_id, running=False, done=True, result=ocr_result)
         print(f"[ocr_verify]  app={application_id} verified={verified} advisory={advisory} matches={len(matches)} mismatches={len(mismatches)}")
     except Exception as exc:
@@ -633,17 +769,35 @@ _STEP_RUNNING_AI  = "running_ai"
 _STEP_SAVING      = "saving"
 _STEP_DONE        = "done"
 
+# FIX-DECISION-1: Valid decision strings that DecisionStatus enum accepts.
+# shortlisting_engine.py can return "hard_reject" which is NOT in the enum,
+# causing a crash. Map it to "not_shortlisted" before persisting.
+_VALID_DECISIONS = {"shortlisted", "not_shortlisted", "manual_review", "pending"}
+
+def _safe_decision(decision_str: str) -> str:
+    """Normalize any decision string to a valid DecisionStatus value."""
+    if decision_str in _VALID_DECISIONS:
+        return decision_str
+    # "hard_reject" and any other unknown values → not_shortlisted
+    return "not_shortlisted"
+
 
 def _process_one_candidate(application_id: int, job_id: int) -> dict:
+    print(f"[shortlist_worker] STARTING for app={application_id} job={job_id}", flush=True)
+    import sys
+    sys.stderr.flush()
     if SessionLocal is None:
+        print(f"[shortlist_worker] SessionLocal unavailable!", flush=True)
         return {"application_id": application_id, "error": "SessionLocal unavailable"}
     db = SessionLocal()
     try:
         app_obj = db.query(Application).filter(Application.id == application_id).first()
         if not app_obj:
+            print(f"[shortlist_worker] app={application_id} not found", flush=True)
             return {"application_id": application_id, "error": "Application not found"}
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
+            print(f"[shortlist_worker] job={job_id} not found", flush=True)
             return {"application_id": application_id, "error": "Job not found"}
 
         doc_texts: dict[str, str] = {}
@@ -668,47 +822,152 @@ def _process_one_candidate(application_id: int, job_id: int) -> dict:
                 doc_texts = {}
                 ocr_already_done = False
 
-        if not doc_texts:
-            docs      = db.query(Document).filter(Document.application_id == application_id).all()
-            doc_texts = _extract_all_doc_texts(docs, budget_seconds=OCR_CANDIDATE_BUDGET_SECONDS)
+        docs = db.query(Document).filter(Document.application_id == application_id).all()
+        user = db.query(User).filter(User.id == app_obj.applicant_id).first()
+        print(f"[shortlist_worker] app={application_id} found {len(docs)} documents", flush=True)
 
+        if not doc_texts:
+            print(f"[shortlist_worker] app={application_id} running fresh OCR extraction...", flush=True)
+            doc_texts = _extract_all_doc_texts(docs, budget_seconds=OCR_CANDIDATE_BUDGET_SECONDS)
+            print(f"[shortlist_worker] app={application_id} ran fresh OCR, got {len(doc_texts)} doc texts", flush=True)
+
+        # FIX-EXTRACTION-1: Enrich application profile with structured document extraction
+        # This ensures skills, education, field_of_study extracted from documents are used in scoring
+        print(f"[shortlist_worker] app={application_id} enriching profile from documents...", flush=True)
+        _enrich_app_profile_from_documents(app_obj, docs, doc_texts, user)
+        print(f"[shortlist_worker] app={application_id} profile enrichment complete: education_level={app_obj.education_level} field_of_study={app_obj.field_of_study} skills={app_obj.skills[:50] if app_obj.skills else 'None'}...", flush=True)
+
+        # Ensure any missing applicant profile fields are populated from OCR'd documents
+        # FIX: Use OCR texts we already have instead of expensive AI extraction
+        try:
+            missing_profile = (
+                not app_obj.education_level
+                or not app_obj.field_of_study
+                or not app_obj.skills
+                or not app_obj.certifications
+            )
+            if missing_profile and doc_texts:
+                print(f"[shortlist_worker] app={application_id} populating profile from OCR texts ({len(doc_texts)} docs)...", flush=True)
+                # Extract profile info from OCR texts using simple heuristics
+                all_ocr_text = " ".join(doc_texts.values()).lower()
+                
+                # Try to find education level keywords
+                if not app_obj.education_level:
+                    if "bachelor" in all_ocr_text or "b.sc" in all_ocr_text or "b.s" in all_ocr_text:
+                        app_obj.education_level = "Bachelor"
+                    elif "master" in all_ocr_text or "m.sc" in all_ocr_text or "m.s" in all_ocr_text:
+                        app_obj.education_level = "Master"
+                    elif "phd" in all_ocr_text or "doctorate" in all_ocr_text:
+                        app_obj.education_level = "PhD"
+                    elif "diploma" in all_ocr_text or "hnd" in all_ocr_text:
+                        app_obj.education_level = "Diploma"
+                    elif "certificate" in all_ocr_text:
+                        app_obj.education_level = "Certificate"
+                
+                # Try to find field of study keywords
+                if not app_obj.field_of_study:
+                    fields = ["computer science", "information technology", "software engineering", "engineering", 
+                             "business", "finance", "accounting", "management", "marketing", "communications"]
+                    for field in fields:
+                        if field in all_ocr_text:
+                            app_obj.field_of_study = field.title()
+                            break
+                
+                # Extract skills and certifications from document types and keywords
+                if not app_obj.skills:
+                    skills_found = []
+                    skill_keywords = ["python", "java", "javascript", "c++", "sql", "html", "css", "react", "angular", 
+                                     "node", "django", "flask", "kubernetes", "docker", "git", "linux", "windows",
+                                     "aws", "azure", "gcp", "machine learning", "data analysis", "excel", "powerpoint"]
+                    for skill in skill_keywords:
+                        if skill in all_ocr_text:
+                            skills_found.append(skill.title())
+                    if skills_found:
+                        app_obj.skills = ", ".join(skills_found[:10])  # Limit to 10 skills
+                
+                # Extract certifications
+                if not app_obj.certifications:
+                    certs_found = []
+                    cert_keywords = ["aws", "azure", "gcp", "ccna", "cissp", "cpa", "pmp", "scrum", "comptia", "certified"]
+                    for cert in cert_keywords:
+                        if cert in all_ocr_text:
+                            certs_found.append(cert.upper())
+                    if certs_found:
+                        app_obj.certifications = ", ".join(certs_found[:5])  # Limit to 5 certs
+                
+                if db.is_active:
+                    db.add(app_obj)
+                    db.commit()
+                    print(f"[shortlist_worker] app={application_id} populated profile fields from OCR texts", flush=True)
+        except Exception as exc:
+            print(f"[shortlist_worker] app={application_id} profile extraction error: {exc!r}", flush=True)
+
+
+
+        # FIX-MAIN-1: Build real document_paths so doc_check_ran=True inside predict()
+        VERIFIABLE_TYPES = {"id_card", "cv", "diploma", "certificate", "experience"}
+        document_paths: list[str] = []
+        declared_types: list[str] = []
+        for doc in docs:
+            dtype = _doc_type_value(doc)
+            if dtype in VERIFIABLE_TYPES and os.path.exists(doc.file_path):
+                document_paths.append(doc.file_path)
+                declared_types.append(dtype)
+
+        print(f"[shortlist_worker] app={application_id} calling predict with {len(document_paths)} documents...", flush=True)
+        # FIX: Previously the worker skipped running full document verification
+        # (SKIP_DOC_VERIFICATION_IN_WORKER=True) to avoid external API timeouts.
+        # That caused document-based mismatches to be ignored and allowed false
+        # shortlists. Enable verification here so `predict()` receives real
+        # `document_paths` and `declared_types` (external timeouts should be
+        # handled inside `verify_documents`). If runtime issues occur we can
+        # reintroduce a configurable env var to toggle this.
+        SKIP_DOC_VERIFICATION_IN_WORKER = False
+        
         if ocr_already_done:
             decision, score, reason_json, doc_result = _call_predict(
                 app_obj, job,
                 doc_texts=doc_texts if doc_texts else None,
-                document_paths=None,
-                declared_types=None,
+                document_paths=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (document_paths if document_paths else None),
+                declared_types=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (declared_types if declared_types else None),
                 ocr_quality_score=stored_ocr_quality,
             )
         else:
-            VERIFIABLE = {"id_card", "cv", "diploma", "certificate"}
-            docs_all   = db.query(Document).filter(Document.application_id == application_id).all()
-            doc_types  = [_doc_type_value(d) for d in docs_all]
-            doc_paths  = [d.file_path for d in docs_all]
-            v_paths    = [p for p, t in zip(doc_paths, doc_types) if t in VERIFIABLE]
-            v_types    = [t for t in doc_types if t in VERIFIABLE]
             decision, score, reason_json, doc_result = _call_predict(
                 app_obj, job,
                 doc_texts=doc_texts if doc_texts else None,
-                document_paths=v_paths if v_paths else None,
-                declared_types=v_types if v_types else None,
+                document_paths=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (document_paths if document_paths else None),
+                declared_types=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (declared_types if declared_types else None),
                 ocr_quality_score=stored_ocr_quality,
             )
+            if not doc_result.get("verified"):
+                doc_result["verified"] = bool(getattr(app_obj, "doc_verified", False))
+            print(f"[shortlist_worker] app={application_id} using upload-time doc_verified={doc_result['verified']}")
+        print(f"[shortlist_worker] app={application_id} predict completed with decision={decision}", flush=True)
+        # FIX-DECISION-1: Normalize decision before setting enum to avoid ValueError crash
+        safe_dec = _safe_decision(decision)
+        if safe_dec != decision:
+            print(f"[shortlist_worker] app={application_id} decision '{decision}' mapped to '{safe_dec}'")
 
-        app_obj.decision       = DecisionStatus(decision)
+        app_obj.decision       = DecisionStatus(safe_dec)
         app_obj.ai_score       = round(score, 4) if score is not None else None
         app_obj.ai_reason      = reason_json
-        app_obj.doc_verified   = doc_result.get("verified", False)
+        doc_verified_final = doc_result.get("verified", False) or bool(getattr(app_obj, "doc_verified", False))
+        app_obj.doc_verified   = doc_verified_final
         app_obj.doc_advisory   = doc_result.get("advisory", False)
         app_obj.shortlisted_at = datetime.now(timezone.utc)
         db.add(app_obj)
         db.commit()
 
         score_str = f"{score:.3f}" if score is not None else "N/A"
-        print(f"[shortlist_worker] app={application_id} -> {decision} score={score_str}")
+        print(f"[shortlist_worker] app={application_id} -> {safe_dec} score={score_str}")
+
+        # NOTE: Email sending now deferred to publish endpoint -- results are NOT auto-published.
+        # HR must manually publish results from the dashboard, which will then trigger email notifications.
+
         return {
             "application_id": application_id,
-            "decision":       decision,
+            "decision":       safe_dec,
             "score":          score,
             "doc_verified":   doc_result.get("verified", False),
             "doc_advisory":   doc_result.get("advisory", False),
@@ -738,7 +997,9 @@ def _process_one_candidate_with_badges(
 
 
 def _run_shortlist_all(job_id: int) -> None:
+    print(f"[shortlist_all] STARTING for job={job_id}")
     if SessionLocal is None:
+        print(f"[shortlist_all] SessionLocal unavailable!")
         _set_job_status(job_id, running=False, done=True, error="SessionLocal unavailable")
         return
     try:
@@ -754,6 +1015,7 @@ def _run_shortlist_all(job_id: int) -> None:
                 .all()
             )
             app_id_name_pairs = [(row[0], row[1]) for row in rows]
+            print(f"[shortlist_all] Found {len(app_id_name_pairs)} applications to process")
         finally:
             db.close()
     except Exception as exc:
@@ -777,29 +1039,41 @@ def _run_shortlist_all(job_id: int) -> None:
         results=[],
     )
     results = []
-    shortlisted_count   = 0
+    shortlisted_count     = 0
     not_shortlisted_count = 0
-    error_count         = 0
+    error_count           = 0
 
-    # Process up to 3 candidates in parallel  -  3x faster for typical job batches.
-    # Each worker opens its own DB session so there are no shared-state conflicts.
-    PARALLEL_WORKERS = 3
+    # FIX-STABILITY-1: Reduced to 2 parallel workers (was 3).
+    # Each worker opens its own DB connection + fires an OpenRouter API call.
+    # More workers = more simultaneous I/O = more timeout-induced crashes.
+    PARALLEL_WORKERS = 2
 
     def _worker(args):
         idx, app_id, cname = args
+        print(f"[shortlist_worker_dispatch] Starting worker for app={app_id} candidate={cname}", flush=True)
         _set_job_status(job_id, current_step=_STEP_RUNNING_AI,
                         current_candidate_name=cname or f"Candidate #{idx+1}")
-        return _process_one_candidate(app_id, job_id)
+        result = _process_one_candidate(app_id, job_id)
+        print(f"[shortlist_worker_dispatch] Worker completed for app={app_id} result={result}", flush=True)
+        return result
 
     import concurrent.futures as _cf
+    print(f"[shortlist_all] Creating ThreadPoolExecutor with {PARALLEL_WORKERS} workers", flush=True)
     with _cf.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS,
                                 thread_name_prefix="shortlist_par") as pool:
+        print(f"[shortlist_all] Submitting {len(app_id_name_pairs)} tasks to pool", flush=True)
         future_map = {
             pool.submit(_worker, (i, app_id, name)): (i, name)
             for i, (app_id, name) in enumerate(app_id_name_pairs)
         }
+        print(f"[shortlist_all] Waiting for futures...", flush=True)
         for future in _cf.as_completed(future_map):
-            result = future.result()
+            try:
+                result = future.result()
+                print(f"[shortlist_all] Future completed: {result}", flush=True)
+            except Exception as exc:
+                print(f"[shortlist_all] Future failed: {exc!r}", flush=True)
+                result = {"error": str(exc)}
             results.append(result)
             if "error" in result:
                 error_count += 1
@@ -832,19 +1106,22 @@ def _run_shortlist_all(job_id: int) -> None:
         current_candidate_name="",
         results=results,
     )
-    print(f"[shortlist_all]  job={job_id} processed={total} shortlisted={shortlisted_count} rejected={not_shortlisted_count} errors={error_count}")
+    print(f"[shortlist_all]  job={job_id} processed={total} shortlisted={shortlisted_count} rejected={not_shortlisted_count} errors={error_count}", flush=True)
 
 
 # -----------------------------------------------------------------------------
 # Readiness / thread pools
+# FIX-STABILITY-2: Reduced pool sizes to prevent resource exhaustion on
+# free-tier / low-RAM hosting (Render free = 512 MB).
 # -----------------------------------------------------------------------------
 
 _APP_READY      = False
 _SERVER_BORN_AT = datetime.now(timezone.utc).isoformat()
 
-_ML_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2,  thread_name_prefix="ml_worker")
-_CANDIDATE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=6,  thread_name_prefix="candidate_worker")
-_OCR_POOL       = concurrent.futures.ThreadPoolExecutor(max_workers=4,  thread_name_prefix="ocr_worker")
+# FIX-STABILITY-2: Reduced worker counts
+_ML_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1,  thread_name_prefix="ml_worker")
+_CANDIDATE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=3,  thread_name_prefix="candidate_worker")
+_OCR_POOL       = concurrent.futures.ThreadPoolExecutor(max_workers=2,  thread_name_prefix="ocr_worker")
 
 
 # -----------------------------------------------------------------------------
@@ -906,6 +1183,7 @@ def ensure_user_profile_columns():
                     try:
                         conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {coltype}"))
                         conn.commit()
+                        print(f"[migration]  Added 'users.{col}'")
                     except Exception:
                         try: conn.rollback()
                         except Exception: pass
@@ -1231,7 +1509,7 @@ class _CORSFallbackMiddleware(BaseHTTPMiddleware):
 # -----------------------------------------------------------------------------
 
 _app = FastAPI(
-    title="Applicant Shortlisting API", version="9.4.0",
+    title="Applicant Shortlisting API", version="9.5.0",
     description="AI-powered applicant shortlisting", lifespan=lifespan,
 )
 _app.add_middleware(
@@ -1402,10 +1680,22 @@ def _validate_password_strength(password: str) -> list[str]:
 
 
 def _doc_type_value(doc) -> str:
+    if doc is None:
+        return ""
+    if isinstance(doc, str):
+        return doc
+    if isinstance(doc, DocumentType):
+        return doc.value
+
+    doc_type = getattr(doc, 'doc_type', doc)
+    if isinstance(doc_type, str):
+        return doc_type
+    if isinstance(doc_type, DocumentType):
+        return doc_type.value
     try:
-        return doc.doc_type.value
-    except AttributeError:
-        return str(doc.doc_type)
+        return str(doc_type)
+    except Exception:
+        return str(doc)
 
 
 def _decision_value(app_obj) -> str:
@@ -1517,22 +1807,39 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     email = payload.email.lower().strip()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
-    user = User(full_name=payload.full_name.strip(), email=email, hashed_password=hash_password(payload.password), role=UserRole(payload.role))
+
+    plain_password = generate_secure_password()
+    hashed_password = hash_password(plain_password)
+    user = User(
+        full_name=payload.full_name.strip(),
+        email=email,
+        hashed_password=hashed_password,
+        role=UserRole(payload.role),
+    )
     db.add(user); db.commit(); db.refresh(user)
     _log(db, "REGISTER", user=user, detail=f"New {payload.role} account registered", ip=ip)
     token = create_access_token({"sub": str(user.id), "role": user.role.value})
-    
-    # Send welcome email (non-blocking)
-    try:
-        print(f"[register] Attempting to send welcome email to {email}")
-        sent = send_welcome_email(payload.full_name, email, payload.role)
-        print(f"[register] Welcome email sent: {sent}")
-    except Exception as e:
-        print(f"[register] Failed to send welcome email: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    return TokenResponse(access_token=token, role=user.role.value, user_id=user.id, full_name=user.full_name)
+
+    # Send the auto-generated password email (non-blocking background thread)
+    def _send_password_email():
+        try:
+            send_generated_password_email(user.full_name, user.email, plain_password, payload.role)
+            print(f"[register] Generated-password email sent to {email}")
+        except Exception as exc:
+            print(f"[register] Generated-password email failed: {exc!r}")
+    threading.Thread(target=_send_password_email, daemon=True).start()
+
+    response = {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": user.role.value,
+        "user_id": user.id,
+        "full_name": user.full_name,
+    }
+    if os.getenv("DEV_RETURN_PLAIN_PASSWORD", "false").lower() == "true":
+        response["plain_password"] = plain_password
+
+    return response
 
 
 @_app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
@@ -1548,9 +1855,44 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     return TokenResponse(access_token=token, role=user.role.value, user_id=user.id, full_name=user.full_name)
 
 
+# FIX-AUTH-ME: Wrapped in try/except to return a clean 500 with a message
+# instead of crashing when optional profile columns (phone/address/national_id)
+# don't exist yet on an older DB.  The migration should add them at startup,
+# but if for any reason they are missing this won't kill the endpoint.
 @_app.get("/auth/me", tags=["auth"])
-def me(current_user: User = Depends(get_current_user)):
-    return {"id": current_user.id, "full_name": current_user.full_name, "email": current_user.email, "role": current_user.role.value, "phone": current_user.phone or "", "address": current_user.address or "", "national_id": current_user.national_id or ""}
+def me(current_user: Optional[User] = Depends(get_current_user)):
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        phone       = getattr(current_user, "phone",       None) or ""
+        address     = getattr(current_user, "address",     None) or ""
+        national_id = getattr(current_user, "national_id", None) or ""
+        return {
+            "id":          current_user.id,
+            "full_name":   current_user.full_name,
+            "email":       current_user.email,
+            "role":        current_user.role.value,
+            "phone":       phone,
+            "address":     address,
+            "national_id": national_id,
+        }
+    except Exception as exc:
+        user_id = current_user.id if current_user else "unknown"
+        print(f"[/auth/me] Unexpected error for user {user_id}: {exc!r}")
+        return {
+            "id":          current_user.id,
+            "full_name":   current_user.full_name,
+            "email":       current_user.email,
+            "role":        current_user.role.value,
+            "phone":       "",
+            "address":     "",
+            "national_id": "",
+        }
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -1601,7 +1943,10 @@ def reset_password(payload: ResetPasswordRequest, request: Request, db: Session 
 
 @_app.get("/jobs", response_model=List[JobResponse], tags=["jobs"])
 def list_jobs(db: Session = Depends(get_db)):
-    now = datetime.now(timezone.utc)
+    # SQLite stores naive UTC datetimes.  When comparing, we need to ensure
+    # consistency: either both naive or both aware.
+    # For deadline filtering, use a naive UTC now so the comparison works.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     return db.query(Job).filter(Job.is_active == True, or_(Job.deadline.is_(None), Job.deadline > now)).all()
 
 
@@ -1646,14 +1991,41 @@ def submit_application(payload: ApplicationCreate, request: Request, db: Session
     job = db.query(Job).filter(Job.id == payload.job_id, Job.is_active == True).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or no longer active")
+
+    missing_profile = [
+        field for field in ("phone", "address", "national_id")
+        if not getattr(current_user, field, None)
+    ]
+    if missing_profile:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please complete your profile before applying. "
+                f"Missing: {', '.join(missing_profile)}"
+            )
+        )
+
+    profile_doc_types = {
+        _doc_type_value(pd)
+        for pd in db.query(ProfileDocument).filter(ProfileDocument.user_id == current_user.id).all()
+        if _doc_type_value(pd) in REQUIRED_DOC_TYPES
+    }
+    missing_docs = sorted(REQUIRED_DOC_TYPES - profile_doc_types)
+    if missing_docs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please upload your required profile documents before applying. "
+                f"Missing: {', '.join(missing_docs)}"
+            )
+        )
+
+    # Check if already applied (with submitted application)
     existing = db.query(Application).filter(Application.applicant_id == current_user.id, Application.job_id == payload.job_id, Application.submitted_at.isnot(None)).first()
     if existing:
-        existing_docs  = db.query(Document).filter(Document.application_id == existing.id).all()
-        uploaded_types = {_doc_type_value(d) for d in existing_docs}
-        missing        = sorted(REQUIRED_DOC_TYPES - uploaded_types)
-        if not missing:
-            raise HTTPException(status_code=400, detail="You have already applied for this job")
-        return existing
+        raise HTTPException(status_code=400, detail="You have already applied for this job")
+    
+    # Clean up any old drafts for this job
     old_draft = db.query(Application).filter(Application.applicant_id == current_user.id, Application.job_id == payload.job_id, Application.submitted_at.is_(None)).first()
     if old_draft:
         for doc in db.query(Document).filter(Document.application_id == old_draft.id).all():
@@ -1662,14 +2034,91 @@ def submit_application(payload: ApplicationCreate, request: Request, db: Session
             except OSError: pass
             db.delete(doc)
         db.delete(old_draft); db.commit()
+    
+    # Pre-fill application with user profile data and safely fill any missing optional fields.
     app_data = payload.model_dump()
     if not app_data.get("phone") and current_user.phone:
         app_data["phone"] = current_user.phone
     if not app_data.get("address") and current_user.address:
         app_data["address"] = current_user.address
-    app_obj = Application(applicant_id=current_user.id, submitted_at=None, **app_data)
+    app_data["gender"]          = app_data.get("gender")          or ""
+    app_data["education_level"] = app_data.get("education_level") or ""
+    app_data["field_of_study"]  = app_data.get("field_of_study")  or ""
+    app_data["graduation_year"] = app_data.get("graduation_year") if app_data.get("graduation_year") is not None else 0
+    app_data["skills"]          = app_data.get("skills")          or ""
+    app_data["certifications"]  = app_data.get("certifications")  or None
+    app_data["date_of_birth"]   = app_data.get("date_of_birth")   or None
+
+    # Create application with submitted_at set immediately (not a draft)
+    app_obj = Application(
+        applicant_id=current_user.id,
+        submitted_at=datetime.now(timezone.utc),
+        **app_data
+    )
     db.add(app_obj); db.commit(); db.refresh(app_obj)
-    _log(db, "APPLICATION_STARTED", user=current_user, target=f"application:{app_obj.id}", detail=f"Started application for '{job.title}'", ip=_ip(request))
+    
+    # Automatically attach any profile documents the user has uploaded
+    attached = 0
+    try:
+        prof_docs = db.query(ProfileDocument).filter(ProfileDocument.user_id == current_user.id).all()
+        for pd in prof_docs:
+            try:
+                doc_type_str = _doc_type_value(pd)
+            except Exception:
+                continue
+            if doc_type_str not in ALLOWED_DOC_TYPES:
+                continue
+            if not pd.file_path or not os.path.exists(pd.file_path):
+                continue
+
+            _, ext = os.path.splitext(pd.filename or pd.original_name or pd.file_path or '')
+            ext = ext.lower() if ext else os.path.splitext(pd.file_path)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                continue
+
+            new_filename  = f"{uuid.uuid4().hex}{ext}"
+            new_file_path = os.path.join(UPLOAD_DIR, new_filename)
+            try:
+                shutil.copy2(pd.file_path, new_file_path)
+            except Exception:
+                continue
+
+            doc = Document(
+                application_id=app_obj.id,
+                doc_type=pd.doc_type,
+                filename=new_filename,
+                original_name=pd.original_name or pd.filename,
+                file_path=new_file_path,
+            )
+            db.add(doc)
+            attached += 1
+        if attached:
+            db.commit()
+            db.refresh(app_obj)
+            try:
+                docs = db.query(Document).filter(Document.application_id == app_obj.id).all()
+                app_obj.documents = docs
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"[auto_attach] Failed to attach profile documents: {exc!r}")
+    
+    # Send submission confirmation email
+    try:
+        send_application_submission_email(
+            current_user.full_name or current_user.email.split("@")[0],
+            current_user.email,
+            job.title,
+        )
+        print(f"[submit_application] Submission email sent to {current_user.email}")
+    except Exception as exc:
+        print(f"[submit_application] Failed to send submission email (non-fatal): {exc!r}")
+    
+    # Trigger OCR verification
+    _set_app_ocr_status(app_obj.id, running=True, done=False, result=None)
+    _OCR_POOL.submit(_post_submit_ocr_verify, app_obj.id)
+    
+    _log(db, "APPLICATION_SUBMITTED", user=current_user, target=f"application:{app_obj.id}", detail=f"Submitted application for '{job.title}' with {attached} profile documents auto-attached", ip=_ip(request))
     return app_obj
 
 
@@ -1740,6 +2189,21 @@ def finalize_application(application_id: int, request: Request, db: Session = De
     _set_app_ocr_status(application_id, running=True, done=False, result=None)
     _OCR_POOL.submit(_post_submit_ocr_verify, application_id)
     has_exp = "experience" in uploaded_types
+
+    # FIX-EMAIL-3: Send submission email using the properly-imported _send_brevo_email.
+    # (Previously imported _send_brevo_email inside the function body which failed
+    # because it didn't exist in email_utils — now it's imported at module level.)
+    try:
+        job_title = job.title if job else "Position"
+        send_application_submission_email(
+            current_user.full_name or current_user.email.split("@")[0],
+            current_user.email,
+            job_title,
+        )
+        print(f"[finalize_application] Submission email sent to {current_user.email}")
+    except Exception as exc:
+        print(f"[finalize_application] Failed to send submission email (non-fatal): {exc!r}")
+
     return {
         "success": True, "application_id": application_id, "ocr_running": True,
         "message": " Application submitted successfully!" + (" Experience document included." if has_exp else ""),
@@ -1779,9 +2243,9 @@ class ProfileUpdateRequest(BaseModel):
 
 
 def _build_profile_response(current_user: User) -> dict:
-    phone       = current_user.phone       or ""
-    address     = current_user.address     or ""
-    national_id = current_user.national_id or ""
+    phone       = getattr(current_user, "phone",       None) or ""
+    address     = getattr(current_user, "address",     None) or ""
+    national_id = getattr(current_user, "national_id", None) or ""
     missing     = []
     if not national_id: missing.append("National ID")
     if not address:     missing.append("Location / Address")
@@ -2024,9 +2488,6 @@ async def _upload_document_inner(application_id, request, doc_type, file, db, cu
         Document.doc_type == doc_type_str,
     ).first()
     if existing_doc:
-        # Auto-replace: delete the old file and record so the new upload proceeds.
-        # This handles the case where the frontend lost track of an existing doc
-        # (e.g. after a backend restart mid-session).
         try:
             if os.path.exists(existing_doc.file_path):
                 os.remove(existing_doc.file_path)
@@ -2190,6 +2651,23 @@ def get_all_candidates(job_id: Optional[int] = None, db: Session = Depends(get_d
                 ocr_result = {k: v for k, v in ocr_data.items() if k != "doc_texts"}
         except Exception:
             pass
+        # Compute basic skill-match summary: compare job.required_skills vs app.skills
+        def _norm(s: str) -> str:
+            import re
+            return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+        declared_skills = [s.strip() for s in (app.skills or "").split(",") if s and s.strip()]
+        required_skills = [s.strip() for s in (job.required_skills or "").split(",") if s and s.strip()]
+        declared_norm = {_norm(s): s for s in declared_skills}
+        required_norm = {_norm(s): s for s in required_skills}
+        matched = []
+        missing = []
+        for rnorm, rraw in required_norm.items():
+            if any(rnorm in dnorm or dnorm in rnorm for dnorm in declared_norm.keys()):
+                matched.append(rraw)
+            else:
+                missing.append(rraw)
+
         rows.append({
             "application_id":  app.id,
             "applicant_id":    user.id,
@@ -2212,31 +2690,29 @@ def get_all_candidates(job_id: Optional[int] = None, db: Session = Depends(get_d
             "doc_verified":    app.doc_verified,
             "doc_advisory":    getattr(app, "doc_advisory", False),
             "submitted_at":    app.submitted_at,
+            "published_at":    app.published_at,
+            "ocr_quality_score": app.ocr_quality_score,
+            "ocr_confidence_flag": app.ocr_confidence_flag,
             "ocr_matches":     ocr_result.get("matches",    []),
             "ocr_mismatches":  ocr_result.get("mismatches", []),
             "ocr_warnings":    ocr_result.get("warnings",   []),
             "ocr_done":        ocr_result.get("ocr_done",   False),
             "documents": [{"id": d.id, "doc_type": _doc_type_value(d), "original_name": d.original_name or d.filename, "uploaded_at": d.uploaded_at, "download_url": f"/hr/documents/{d.id}/download"} for d in docs],
+            # Helpful breakdown fields for HR UI / debugging
+            "cv_declared_skills": declared_skills,
+            "job_skill_matches": {
+                "required_count": len(required_skills),
+                "matched_count":  len(matched),
+                "matched":        matched,
+                "missing":        missing,
+                "match_percent":  round((len(matched) / max(1, len(required_skills))) * 100, 1) if required_skills else None,
+            },
         })
     return _rank_candidates(rows)
 
 
 # ===============================================================
 # HR -- Shortlisting
-#
-# FIX-SHORTLIST-1: /hr/shortlist-all now returns `processing: true` so the
-#   frontend's automateShortlist() knows to start polling. Without this the
-#   frontend saw processing=undefined (falsy) and stopped immediately.
-#
-# FIX-SHORTLIST-2: Added /hr/shortlist-status/{job_id} endpoint -- this is
-#   the URL the frontend actually polls (HRDashboard.jsx line:
-#   api.get(`/hr/shortlist-status/${jobId}`)). The old endpoint was only
-#   /hr/job-status/{job_id} which was never called by the frontend.
-#
-# FIX-SHORTLIST-3: The status response uses `processing` (not `running`) to
-#   match what the frontend checks: `if (!status.processing)` to detect done.
-#   Also exposes `done`, `total`, `shortlisted`, `not_shortlisted`, `errors`
-#   fields that HRDashboard.jsx reads from the poll response.
 # ===============================================================
 
 @_app.post("/hr/shortlist-all/{job_id}", tags=["hr"])
@@ -2263,7 +2739,6 @@ def shortlist_all(
 
     if not acquired:
         current_status = _get_job_status(job_id)
-        #  FIX-SHORTLIST-1: return processing=True so frontend knows it's running
         return {
             "message":    "Shortlisting is already running for this job.",
             "job_id":     job_id,
@@ -2278,7 +2753,7 @@ def shortlist_all(
             return {
                 "message":    "Shortlisting is already running for this job.",
                 "job_id":     job_id,
-                "processing": True,  #  FIX-SHORTLIST-1
+                "processing": True,
                 "total":      current_status.get("total", total),
                 "status_url": f"/hr/shortlist-status/{job_id}",
             }
@@ -2309,7 +2784,6 @@ def shortlist_all(
 
     _ML_THREAD_POOL.submit(_run_shortlist_all, job_id)
 
-    #  FIX-SHORTLIST-1: Include `processing: true` so frontend starts polling
     return {
         "message":    f"AI shortlisting started for '{job.title}' ({total} applicant(s)).",
         "job_id":     job_id,
@@ -2325,26 +2799,10 @@ def get_shortlist_status(
     db: Session = Depends(get_db),
     hr: User = Depends(require_hr_or_admin),
 ):
-    """
-     FIX-SHORTLIST-2 + FIX-SHORTLIST-3: This is the endpoint the frontend
-    polls. HRDashboard.jsx calls api.get(`/hr/shortlist-status/${jobId}`) and
-    checks `!status.processing` to detect completion.
-
-    Response fields the frontend reads:
-      - processing (bool): True while running, False when done
-      - done       (bool): True when finished
-      - total      (int):  total candidates
-      - done_count / done (int): how many processed so far
-      - shortlisted      (int): shortlisted count
-      - not_shortlisted  (int): rejected count
-      - errors           (int): error count
-    """
     mem_status = _get_job_status(job_id)
-
     is_running = mem_status.get("running", False)
     is_done    = mem_status.get("done", False)
 
-    # Query live DB counts for accurate numbers
     apps = db.query(Application).filter(
         Application.job_id == job_id,
         Application.submitted_at.isnot(None),
@@ -2355,11 +2813,10 @@ def get_shortlist_status(
     db_manual_review = sum(1 for a in apps if _decision_value(a) == "manual_review")
     db_pending       = sum(1 for a in apps if _decision_value(a) == "pending")
 
-    total     = mem_status.get("total", db_total)
+    total      = mem_status.get("total", db_total)
     done_count = mem_status.get("done_count", mem_status.get("processed", 0))
 
     return {
-        #  FIX-SHORTLIST-3: `processing` field is what frontend checks
         "processing":       is_running and not is_done,
         "done":             is_done,
         "running":          is_running,
@@ -2372,7 +2829,6 @@ def get_shortlist_status(
         "current_step":     mem_status.get("current_step", ""),
         "current_candidate_name": mem_status.get("current_candidate_name", ""),
         "error":            mem_status.get("error"),
-        # Live DB summary
         "db_summary": {
             "total":           db_total,
             "shortlisted":     db_shortlisted,
@@ -2494,6 +2950,128 @@ def manual_decision(
         "reviewed_at":    app_obj.hr_reviewed_at.isoformat(),
         "note":           payload.note,
         "message":        f" Manual decision recorded: {payload.decision}",
+    }
+
+
+@_app.post("/hr/publish-results/{job_id}", tags=["hr"])
+def publish_shortlisting_results(
+    job_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    hr: User = Depends(require_hr_or_admin),
+):
+    """
+    Publish shortlisting results for a job.
+    
+    This endpoint:
+    1. Finds all applications with shortlisting decisions that haven't been published yet
+    2. Sends notification emails to all applicants
+    3. Marks results as published_at (current timestamp)
+    
+    Returns: summary of published results
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Find unpublished applications with decisions
+    apps_to_publish = db.query(Application, User).join(
+        User, Application.applicant_id == User.id
+    ).filter(
+        Application.job_id == job_id,
+        Application.submitted_at.isnot(None),
+        Application.shortlisted_at.isnot(None),  # Must have gone through shortlisting
+        Application.published_at.is_(None),       # Not yet published
+    ).all()
+    
+    if not apps_to_publish:
+        return {
+            "job_id": job_id,
+            "job_title": job.title,
+            "message": "No unpublished results found",
+            "published_count": 0,
+            "shortlisted": 0,
+            "not_shortlisted": 0,
+            "manual_review": 0,
+        }
+    
+    published_count = 0
+    shortlisted_count = 0
+    not_shortlisted_count = 0
+    manual_review_count = 0
+    email_errors = []
+    
+    now = datetime.now(timezone.utc)
+    
+    for app, user in apps_to_publish:
+        if not user or not user.email:
+            continue
+        
+        decision = _decision_value(app)
+        job_title = job.title
+        score = app.ai_score
+        reason_summary = ""
+        
+        # Extract reason summary
+        try:
+            if app.ai_reason:
+                reason_data = json.loads(app.ai_reason or "{}")
+                reason_summary = reason_data.get("summary", "")
+                if not reason_summary:
+                    fails = reason_data.get("criteria_failed", [])
+                    reason_summary = fails[0] if fails else ""
+        except Exception:
+            pass
+        
+        # Send result email
+        try:
+            send_shortlisting_result_email(
+                user.full_name or user.email.split("@")[0],
+                user.email,
+                job_title,
+                decision,
+                score,
+                reason_summary,
+            )
+            print(f"[publish_results] Result email sent to {user.email} ({decision})")
+        except Exception as e:
+            print(f"[publish_results] Email send failed for {user.email}: {e!r}")
+            email_errors.append(f"{user.email}: {str(e)}")
+        
+        # Mark as published
+        app.published_at = now
+        db.add(app)
+        published_count += 1
+        
+        # Count by decision
+        if decision == "shortlisted":
+            shortlisted_count += 1
+        elif decision == "not_shortlisted":
+            not_shortlisted_count += 1
+        elif decision == "manual_review":
+            manual_review_count += 1
+    
+    db.commit()
+    
+    # Log the publication event
+    _log(
+        db,
+        "SHORTLISTING_RESULTS_PUBLISHED",
+        user=hr,
+        target=f"job:{job_id}",
+        detail=f"Published shortlisting results: {published_count} applicants (shortlisted={shortlisted_count}, rejected={not_shortlisted_count}, manual_review={manual_review_count})",
+        ip=_ip(request),
+    )
+    
+    return {
+        "job_id": job_id,
+        "job_title": job.title,
+        "message": f"Shortlisting results published for {published_count} applicants",
+        "published_count": published_count,
+        "shortlisted": shortlisted_count,
+        "not_shortlisted": not_shortlisted_count,
+        "manual_review": manual_review_count,
+        "email_errors": email_errors if email_errors else None,
     }
 
 
@@ -2681,8 +3259,10 @@ def get_candidate_profile(application_id: int, db: Session = Depends(get_db), hr
         "application_id": application_id,
         "applicant": {
             "id": user.id if user else None, "full_name": user.full_name if user else "",
-            "email": user.email if user else "", "phone": (user.phone or "") if user else "",
-            "address": (user.address or "") if user else "", "national_id": (user.national_id or "") if user else "",
+            "email": user.email if user else "",
+            "phone": (getattr(user, "phone", None) or "") if user else "",
+            "address": (getattr(user, "address", None) or "") if user else "",
+            "national_id": (getattr(user, "national_id", None) or "") if user else "",
         },
         "job": {"id": job.id if job else None, "title": job.title if job else ""},
         "application": {
@@ -2800,11 +3380,36 @@ def submit_feedback(payload: FeedbackRequest, request: Request, db: Session = De
 
 
 @_app.get("/admin/feedback", tags=["admin"])
-def get_feedback(limit: int = 50, offset: int = 0, db: Session = Depends(get_db), admin: User = Depends(require_hr_or_admin)):
+def get_feedback(
+    limit: int = 50,
+    offset: int = 0,
+    category: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_hr_or_admin),
+):
     try:
-        rows  = db.execute(text("SELECT * FROM system_feedback ORDER BY created_at DESC LIMIT :lim OFFSET :off"), {"lim": min(limit, 200), "off": offset}).fetchall()
-        total = db.execute(text("SELECT COUNT(*) FROM system_feedback")).scalar() or 0
-        return {"total": total, "offset": offset, "limit": limit, "feedback": [dict(row._mapping) for row in rows]}
+        if category:
+            rows = db.execute(
+                text("SELECT * FROM system_feedback WHERE category = :category ORDER BY created_at DESC LIMIT :lim OFFSET :off"),
+                {"category": category, "lim": min(limit, 200), "off": offset},
+            ).fetchall()
+            total = db.execute(
+                text("SELECT COUNT(*) FROM system_feedback WHERE category = :category"),
+                {"category": category},
+            ).scalar() or 0
+        else:
+            rows = db.execute(
+                text("SELECT * FROM system_feedback ORDER BY created_at DESC LIMIT :lim OFFSET :off"),
+                {"lim": min(limit, 200), "off": offset},
+            ).fetchall()
+            total = db.execute(text("SELECT COUNT(*) FROM system_feedback")).scalar() or 0
+
+        return {
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "feedback": [dict(row._mapping) for row in rows],
+        }
     except Exception as exc:
         print(f"[feedback]   Failed to retrieve feedback: {exc!r}")
         return {"total": 0, "offset": offset, "limit": limit, "feedback": []}
@@ -2925,8 +3530,28 @@ def admin_create_user(payload: RegisterRequest, request: Request, db: Session = 
     email = payload.email.lower().strip()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
-    user = User(full_name=payload.full_name.strip(), email=email, hashed_password=hash_password(payload.password), role=UserRole(payload.role))
+
+    plain_password = generate_secure_password(length=12)
+    user = User(
+        full_name=payload.full_name.strip(),
+        email=email,
+        hashed_password=hash_password(plain_password),
+        role=UserRole(payload.role),
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+    )
     db.add(user); db.commit(); db.refresh(user)
+
+    try:
+        send_generated_password_email(
+            to_name=user.full_name,
+            to_email=user.email,
+            plain_password=plain_password,
+            role=payload.role,
+        )
+    except Exception as exc:
+        print(f"[admin_create_user] Failed to send generated-password email: {exc!r}")
+
     _log(db, "ADMIN_USER_CREATED", user=admin, target=f"user:{user.id}", detail=f"Created {user.role.value} account for {user.email}", ip=_ip(request))
     return {"id": user.id, "full_name": user.full_name, "email": user.email, "role": user.role.value, "created_at": user.created_at.isoformat() if user.created_at else None}
 
@@ -3006,9 +3631,365 @@ def public_feedback(payload: PublicFeedbackRequest, request: Request, db: Sessio
     return {"message": " Thank you for your feedback!", "category": payload.category, "rating": payload.rating}
 
 
+class SupportRequest(BaseModel):
+    subject: str
+    message: str
+    email: Optional[EmailStr] = None
+    name: Optional[str] = None
+
+
+@_app.post("/support", tags=["support"])
+def submit_support_request(
+    payload: SupportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    trimmed_subject = payload.subject.strip()
+    trimmed_message = payload.message.strip()
+    if not trimmed_subject:
+        raise HTTPException(status_code=400, detail="Subject cannot be empty.")
+    if len(trimmed_message) < 15:
+        raise HTTPException(status_code=400, detail="Message must be at least 15 characters.")
+
+    user_name = current_user.full_name if current_user else (payload.name or "Anonymous")
+    user_email = (current_user.email if current_user else payload.email or "").strip()
+    if not user_email or not user_email.strip():
+        raise HTTPException(status_code=400, detail="An email address is required to receive a reply.")
+
+    support_content = f"Subject: {trimmed_subject}\n\n{trimmed_message}"
+    try:
+        db.execute(
+            text("INSERT INTO system_feedback (admin_id, admin_email, category, message, rating) VALUES (:uid, :email, :cat, :msg, NULL)"),
+            {
+                "uid": current_user.id if current_user else None,
+                "email": user_email,
+                "cat": "support",
+                "msg": f"From: {user_name} <{user_email}>\n\n{support_content}",
+            },
+        )
+        db.commit()
+    except Exception as exc:
+        print(f"[support]   Failed to save support request: {exc!r}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Failed to submit support request. Please try again later.")
+
+    _log(
+        db,
+        "SUPPORT_REQUEST_SUBMITTED",
+        user=current_user,
+        detail=trimmed_subject,
+        ip=_ip(request),
+    )
+    send_support_request_email(user_name, user_email, trimmed_subject, trimmed_message)
+    return {"message": "Your support request has been submitted. Our team will respond shortly."}
+
+
+class ChatRequest(BaseModel):
+    question: str
+
+
+@_app.post("/support/chat", tags=["support"])
+def support_chatbot(
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """AI-powered chatbot that answers support questions instantly."""
+    question = payload.question.strip()
+    if not question or len(question) < 3:
+        raise HTTPException(status_code=400, detail="Question must be at least 3 characters.")
+
+    answer = None
+    try:
+        from openrouter_client import chat_completion
+        
+        system_prompt = """You are a helpful AI assistant for an AI-powered job shortlisting platform. 
+Only answer questions that are directly related to the platform system and its features. You may answer questions about:
+- Registration and account creation
+- Login and password reset
+- Job applications and applying for positions
+- Document uploads and profile management
+- Shortlisting results and feedback
+- General platform usage
+
+If a question is not related to the system, politely refuse and say: 'I can only answer questions about the platform. Please ask about registration, login, applications, document uploads, shortlisting, or other platform functionality, or contact support for other issues.'"""
+
+        answer = chat_completion(
+            messages=[{"role": "user", "content": question}],
+            system_prompt=system_prompt,
+            max_tokens=500,
+            temperature=0.5,
+        )
+    except Exception as exc:
+        print(f"[chatbot]  OpenRouter error: {exc!r}")
+        # Fallback: provide helpful response based on keywords
+        question_lower = question.lower()
+        if any(word in question_lower for word in ['login', 'password', 'forgot']):
+            answer = "To log in:\n1. Go to the login page\n2. Enter your email and password\n3. Click 'Sign In'\n\nForgot your password? Click 'Forgot Password' on the login page to reset it. You'll receive an email with a reset link."
+        elif any(word in question_lower for word in ['register', 'sign up', 'create account']):
+            answer = "To register:\n1. Click 'Register' on the homepage\n2. Fill in your details (name, email, role, etc.)\n3. Create a secure password\n4. Check your email for a confirmation link\n5. You'll receive an auto-generated password via email\n\nYour account will be ready to use immediately!"
+        elif any(word in question_lower for word in ['apply', 'application', 'job']):
+            answer = "To apply for a job:\n1. Go to 'My Applications'\n2. Browse available positions\n3. Click 'Apply Now' on a job\n4. Upload your documents (CV, certificates, etc.)\n5. Your profile documents auto-attach to the application\n6. Submit and wait for results\n\nYou'll receive email updates on your application status."
+        elif any(word in question_lower for word in ['document', 'upload', 'profile']):
+            answer = "To manage your documents:\n1. Go to 'My Profile'\n2. Click 'Upload Document' or 'Manage Documents'\n3. Add your CV, certificates, and other files\n4. These documents automatically attach to your applications\n\nMake sure to keep them updated!"
+        else:
+            answer = "I can only answer questions about the platform. Please ask about registration, login, applications, document uploads, shortlisting, or other system features. For anything else, contact support."
+    
+    # Store conversation
+    try:
+        db.execute(
+            text("INSERT INTO system_feedback (admin_id, admin_email, category, message, rating) VALUES (:uid, :email, :cat, :msg, NULL)"),
+            {
+                "uid": current_user.id if current_user else None,
+                "email": current_user.email if current_user else "chatbot_user",
+                "cat": "chatbot",
+                "msg": f"Q: {question}\n\nA: {answer}",
+            },
+        )
+        db.commit()
+    except Exception as exc:
+        print(f"[chatbot]  Failed to store conversation: {exc!r}")
+    
+    return {"answer": answer}
+
+
+# ===============================================================
+# Test email endpoint
+# FIX-EMAIL-4: send_test_email is now a top-level import from email_utils
+# (previously it was defined locally at the bottom of this file and then
+# referenced before definition in the route handler, causing a NameError).
+# ===============================================================
+
+@_app.post("/test-email", tags=["test"])
+def test_email_endpoint(to_email: str = "admin@example.com"):
+    """Send a test email to verify Brevo connectivity."""
+    success = send_test_email(to_email, "Test User")
+    return {"success": success, "email": to_email}
+
+
+# ===============================================================
+# Debug endpoints for OCR diagnostics
+# ===============================================================
+
+@_app.get("/debug/ocr-extract", tags=["debug"])
+def debug_ocr_extract(file: str = None, application_id: int = None, db: Session = Depends(get_db)):
+    """
+    Test OCR extraction on a specific file or application.
+    Usage:
+      ?file=/path/to/document.pdf
+      ?application_id=123
+    Returns library availability and extracted text.
+    """
+    result = {
+        "file": file,
+        "application_id": application_id,
+        "library_status": {},
+        "extraction_results": {},
+        "error": None,
+    }
+    
+    # Check library availability
+    try:
+        import pytesseract
+        result["library_status"]["pytesseract"] = "available"
+    except ImportError:
+        result["library_status"]["pytesseract"] = "missing"
+    
+    try:
+        import pdfplumber
+        result["library_status"]["pdfplumber"] = "available"
+    except ImportError:
+        result["library_status"]["pdfplumber"] = "missing"
+    
+    try:
+        import fitz
+        result["library_status"]["PyMuPDF (fitz)"] = "available"
+    except ImportError:
+        result["library_status"]["PyMuPDF (fitz)"] = "missing"
+    
+    try:
+        import pdf2image
+        result["library_status"]["pdf2image"] = "available"
+    except ImportError:
+        result["library_status"]["pdf2image"] = "missing"
+    
+    try:
+        import cv2
+        result["library_status"]["OpenCV (cv2)"] = "available"
+    except ImportError:
+        result["library_status"]["OpenCV (cv2)"] = "missing"
+    
+    # Check Tesseract binary
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        result["library_status"]["Tesseract binary"] = "available"
+    except Exception as e:
+        result["library_status"]["Tesseract binary"] = f"missing ({str(e)[:50]})"
+    
+    # Extract from file or application
+    try:
+        if application_id:
+            # Extract from all documents in the application
+            app = db.query(Application).filter(Application.id == application_id).first()
+            if not app:
+                result["error"] = "Application not found"
+                return result
+            
+            docs = db.query(Document).filter(Document.application_id == application_id).all()
+            if not docs:
+                result["error"] = "No documents found for this application"
+                return result
+            
+            from ocr_utils import extract_document_text
+            
+            for doc in docs:
+                if not os.path.exists(doc.file_path):
+                    result["extraction_results"][doc.file_path] = {
+                        "text_length": 0,
+                        "error": "File not found",
+                    }
+                    continue
+                
+                text = extract_document_text(doc.file_path)
+                result["extraction_results"][doc.file_path] = {
+                    "text_length": len(text),
+                    "text_preview": text[:500] if text else "(empty)",
+                    "document_type": _doc_type_value(doc),
+                }
+            # Attempt structured parsing across application documents
+            try:
+                docs_for_extract = [
+                    {"file_path": d.file_path, "document_type_hint": _doc_type_value(d)}
+                    for d in docs if d.file_path and os.path.exists(d.file_path)
+                ]
+                if docs_for_extract:
+                    from document_extractor import extract_multiple_documents
+                    parsed = extract_multiple_documents(docs_for_extract, applicant_name=(app.full_name if app else None))
+                    result["structured_parse"] = parsed.get("merged_profile") if isinstance(parsed, dict) else parsed
+            except Exception as e:
+                result.setdefault("structured_parse_errors", []).append(str(e))
+        
+        elif file:
+            # Extract from single file - try multiple path resolutions
+            resolved_file = None
+            cwd = os.getcwd()
+            backend_root = os.path.dirname(os.path.abspath(__file__))
+            normalized = os.path.normpath(file)
+            tried_paths = []
+
+            candidates = []
+            if os.path.isabs(normalized):
+                candidates.append(normalized)
+            else:
+                candidates.extend([
+                    normalized,
+                    os.path.abspath(normalized),
+                    os.path.join(cwd, normalized),
+                    os.path.join(backend_root, normalized),
+                    os.path.join(os.path.dirname(backend_root), normalized),
+                ])
+
+            backend_prefix = "backend" + os.sep
+            if normalized.startswith(backend_prefix):
+                stripped = normalized[len(backend_prefix):]
+                candidates.extend([
+                    stripped,
+                    os.path.abspath(stripped),
+                    os.path.join(cwd, stripped),
+                    os.path.join(backend_root, stripped),
+                ])
+            elif normalized.startswith("backend/"):
+                stripped = normalized[len("backend/") :]
+                candidates.extend([
+                    stripped,
+                    os.path.abspath(stripped),
+                    os.path.join(cwd, stripped),
+                    os.path.join(backend_root, stripped),
+                ])
+            elif "/backend/" in normalized.replace('\\', '/'):
+                stripped = normalized.replace('\\', '/').split('/backend/', 1)[1]
+                candidates.extend([
+                    stripped,
+                    os.path.abspath(stripped),
+                    os.path.join(cwd, stripped),
+                    os.path.join(backend_root, stripped),
+                ])
+
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                if os.path.exists(candidate):
+                    resolved_file = candidate
+                    break
+                tried_paths.append(candidate)
+
+            if not resolved_file:
+                result["error"] = (
+                    f"File not found in any location: {file}. cwd={cwd}. "
+                    f"backend_root={backend_root}. Tried: {tried_paths}"
+                )
+                return result
+
+            from ocr_utils import extract_document_text
+
+            text = extract_document_text(resolved_file)
+            result["extraction_results"][file] = {
+                "file_resolved_to": resolved_file,
+                "text_length": len(text),
+                "text_preview": text[:500] if text else "(empty)",
+            }
+            # Attempt structured parsing for this single file
+            try:
+                from document_extractor import extract_multiple_documents
+                parsed = extract_multiple_documents([
+                    {"file_path": resolved_file, "document_type_hint": None}
+                ], applicant_name=None)
+                result["structured_parse"] = parsed.get("merged_profile") if isinstance(parsed, dict) else parsed
+            except Exception as e:
+                result.setdefault("structured_parse_errors", []).append(str(e))
+        else:
+            result["error"] = "Must provide either 'file' or 'application_id' query parameter"
+    
+    except Exception as e:
+        result["error"] = f"Extraction error: {str(e)}"
+        import traceback
+        result["error_traceback"] = traceback.format_exc()
+    
+    return result
+
+
 # -----------------------------------------------------------------------------
 # Entry point
 # -----------------------------------------------------------------------------
+
+
+@_app.post("/debug/ocr-reextract", tags=["debug"])
+def debug_ocr_reextract(application_id: int, db: Session = Depends(get_db)):
+    """Run the OCR + structured extraction flow for an application and persist results.
+    Useful for forcing a re-run and verifying that extracted fields are saved to the Application record.
+    """
+    if SessionLocal is None:
+        raise HTTPException(status_code=500, detail="SessionLocal unavailable")
+    try:
+        # Call the existing worker function which performs extraction and saves results.
+        _post_submit_ocr_verify(application_id)
+        app_obj = db.query(Application).filter(Application.id == application_id).first()
+        if not app_obj:
+            raise HTTPException(status_code=404, detail="Application not found")
+        try:
+            ocr_data = json.loads(app_obj.ocr_result) if getattr(app_obj, "ocr_result", None) else None
+        except Exception:
+            ocr_data = None
+        return {"ok": True, "application_id": application_id, "education_level": app_obj.education_level, "field_of_study": app_obj.field_of_study, "ocr_result": ocr_data}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 if __name__ == "__main__":
     import uvicorn

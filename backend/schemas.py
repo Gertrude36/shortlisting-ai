@@ -13,7 +13,11 @@ from pydantic import BaseModel, EmailStr, field_validator
 class RegisterRequest(BaseModel):
     full_name: str
     email:     EmailStr
-    password:  str
+    # FIX: password is now Optional — backend auto-generates it.
+    # If a client sends a password field it is accepted but ignored by auth.py.
+    # The strong-password validator only runs when a value is actually provided,
+    # which prevents the 422 "password: Field required" error.
+    password:  Optional[str] = None
     role:      str = "applicant"
     hr_code:   Optional[str] = None
 
@@ -27,7 +31,10 @@ class RegisterRequest(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def strong_password(cls, v: str) -> str:
+    def strong_password(cls, v: Optional[str]) -> Optional[str]:
+        # FIX: skip validation when no password is provided (auto-generated flow)
+        if v is None:
+            return v
         errors = []
         if len(v) < 8:
             errors.append("at least 8 characters")
@@ -62,12 +69,13 @@ class TokenResponse(BaseModel):
     role:         str
     user_id:      int
     full_name:    str
+    plain_password: Optional[str] = None
 
 
 class ResetPasswordRequest(BaseModel):
     token:       str
     new_password: str
-    
+
     @field_validator("new_password")
     @classmethod
     def strong_password(cls, v: str) -> str:
@@ -184,24 +192,28 @@ class ApplicationCreate(BaseModel):
     address:         Optional[str] = None
     phone:           Optional[str] = None
     date_of_birth:   Optional[str] = None
-    gender:          str
-    education_level: str
-    field_of_study:  str
-    graduation_year: int
+    gender:          Optional[str] = None
+    education_level: Optional[str] = None
+    field_of_study:  Optional[str] = None
+    graduation_year: Optional[int] = None
     experience_years: int = 0
-    skills:          str
+    skills:          Optional[str] = None
     certifications:  Optional[str] = None
 
     @field_validator("experience_years")
     @classmethod
     def non_negative(cls, v: int) -> int:
+        if v is None:
+            return 0
         if v < 0:
             raise ValueError("experience_years must be >= 0")
         return v
-    
+
     @field_validator("graduation_year")
     @classmethod
-    def valid_year(cls, v: int) -> int:
+    def valid_year(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
         current_year = datetime.now().year
         if v < 1950 or v > current_year + 5:
             raise ValueError(f"Graduation year must be between 1950 and {current_year + 5}")

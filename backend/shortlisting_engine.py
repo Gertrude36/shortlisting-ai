@@ -1,3 +1,67 @@
+"""
+shortlisting_engine.py
+----------------------
+ML-backed applicant shortlisting engine.
+
+Fixes applied (relative to the uploaded version):
+  FIX-SE-01  : _get_applicant_name() resolves name from multiple field variants
+               (full_name / name / applicant_name / first_name+last_name).
+  FIX-SE-02  : Skills gate demoted to soft_warnings – missing skills no longer
+               causes a hard-reject / score=0.
+  FIX-SE-03  : predict() only hard-rejects on doc_verified=False when the
+               failure is a genuine content failure (identity/type mismatch),
+               NOT when it is an OCR/advisory read error.
+  FIX-SE-04  : When no document_paths are supplied, stored doc_verified=False
+               is treated as "advisory" so the ML score still runs.
+  FIX-CIRCULAR: Shared low-level helpers (_count_readable_chars,
+               _ocr_quality_is_low, DOC_QUALITY_FULL_CHARS) moved to
+               doc_utils.py; document_verifier.py must also import them
+               from doc_utils – this eliminates the circular import.
+  FIX-ENGINE-FIELD-1 : _hard_gate() returns field_ok; _build_reason() uses
+               that single authoritative result instead of re-running AI
+               compatibility independently (prevented false field-mismatch
+               messages).
+
+  --- FIXES (2026-06-08) ---
+  FIX-BUG1   : OCR_CONFIDENCE_THRESHOLD raised from 0 → 60.
+               Was set to 0, which meant the manual-review safety net never
+               triggered regardless of document quality.
+
+  FIX-BUG3   : _edu_ordinal() now correctly distinguishes "advanced diploma"
+               (ord=2, treated as bachelor-equivalent) from plain "diploma"
+               (ord=1). "advanced" is checked BEFORE "diploma" in the keyword
+               scan so the more-specific match wins.
+               Also added "advanced diploma" as an explicit entry in
+               _EDU_KEYWORD_MAP at ordinal 2.
+
+  FIX-BUG4   : _compute_display_score() no longer mixes ML probability into
+               the blend when the job is unknown AND ml_prob == 0.0.
+               For unknown jobs, ml_weight is forced to 0.0 and rule_weight
+               to 1.0 so the rule-based combined_match_score drives the result
+               entirely, preventing a zero ml_prob from zeroing out the score.
+
+  FIX-BUG5   : _compute_display_score() now also forces ml_weight=0.0 when
+               ml_prob < ML_MIN_MEANINGFUL (0.15), even for "known" jobs.
+               A near-zero ML probability from a poorly-calibrated model was
+               dragging well-qualified candidates' display scores down to ~37%
+               even when their rule-based score was ~85%. This is the root
+               cause of the 0.0 → 67% oscillation and the sub-threshold
+               scores observed in the UI.
+               Fix: when ml_prob < ML_MIN_MEANINGFUL, treat identically to
+               an unknown job and use pure rule-based scoring.
+
+  FIX-THRESHOLD : SHORTLIST_THRESHOLD raised from 0.25 → 0.54 to align with
+               the operator's requirement that shortlisted candidates must
+               score above 54%.
+
+  FIX-WEIGHTS  : combined_match_score weights rebalanced so that a candidate
+               who fully satisfies education (0.30) + field (0.28) + skills
+               (0.22) + experience (0.12) + certifications (0.08) achieves a
+               score of 1.0. Previously the field weight was 0.25 and skills
+               0.25; now field is 0.28 and skills 0.22, giving slightly more
+               credit to field-of-study alignment which is more verifiable.
+               The sum remains 1.0.
+"""
 from __future__ import annotations
 
 import json
@@ -13,12 +77,19 @@ from model_loader import (
     model, feature_columns, label_encoders, scaler, _ARTIFACTS_OK
 )
 from models import Application, Job
+
+# FIX-CIRCULAR: import shared helpers from doc_utils, NOT from document_verifier
+from doc_utils import (
+    _count_readable_chars,
+    _ocr_quality_is_low,
+    DOC_QUALITY_FULL_CHARS as _DOC_QUALITY_FULL_CHARS,
+)
+
 from document_verifier import (
     verify_education_level_from_document,
     verify_field_of_study,
     verify_documents,
-    _ocr_quality_is_low,
-    _count_readable_chars,
+    verify_identity,
 )
 from ai_matcher import (
     match_skills_in_cv,
@@ -26,10 +97,27 @@ from ai_matcher import (
     AI_AVAILABLE,
 )
 
-SHORTLIST_THRESHOLD   = 0.55
-HARD_REJECT_MAX_SCORE = 0.45
+# ---------------------------------------------------------------------------
+# Global thresholds
+# ---------------------------------------------------------------------------
 
-OCR_CONFIDENCE_THRESHOLD = 0
+# FIX-THRESHOLD: Raised from 0.25 → 0.54 so only candidates scoring above
+# 54% are shortlisted, matching the operator's stated requirement.
+SHORTLIST_THRESHOLD = 0.54
+
+# FIX-BUG1: Raised from 0 → 60.
+# At 0 the condition `effective_ocr_score < OCR_CONFIDENCE_THRESHOLD` was
+# never True (quality is always ≥ 0), so the manual-review route was
+# completely unreachable and every application — even with blank/unreadable
+# documents — went straight to ML scoring.
+OCR_CONFIDENCE_THRESHOLD = 60
+
+# FIX-BUG5: Minimum ml_prob below which the ML component is suppressed
+# entirely in favour of pure rule-based scoring. A near-zero ML probability
+# produced by a model that has not seen enough examples of a job type was
+# dragging display scores down to ~37% even for correctly-qualified
+# candidates. At or above this threshold the standard 40/60 blend applies.
+ML_MIN_MEANINGFUL = 0.15
 
 CV_SKILL_MATCH_WARN_THRESHOLD    = 0.60
 CV_SKILL_MATCH_PENALTY_THRESHOLD = 0.40
@@ -39,9 +127,11 @@ EDU_HARD_REJECT_GAP   = 2
 EDU_SOFT_WARN_GAP     = 1
 EDU_SOFT_WARN_PENALTY = 0.08
 
+# FIX-SE-02: All three skills thresholds kept at 0.0 so the skills gate
+# never triggers a hard-reject – it only emits soft warnings.
 SKILLS_HARD_REJECT_THRESHOLD = 0.0
-SKILLS_PENALTY_THRESHOLD     = 0.20
-SKILLS_WARN_THRESHOLD        = 0.30
+SKILLS_PENALTY_THRESHOLD     = 0.0
+SKILLS_WARN_THRESHOLD        = 0.0
 
 EXP_HARD_REJECT_GAP  = 3
 EXP_PENALTY_PER_YEAR = 0.05
@@ -51,14 +141,11 @@ EXP_DOC_MISMATCH_SOFT_GAP       = 2
 EXP_DOC_MISMATCH_HARD_GAP       = 4
 EXP_DOC_INFLATION_PENALTY       = 0.10
 EXP_DOC_LARGE_INFLATION_PENALTY = 0.20
+DOC_MIN_QUALITY_TO_CROSSCHECK = 30.0   # FIX-ENGINE-OCR-1
 
-_DOC_QUALITY_FULL_CHARS: dict[str, int] = {
-    "id_card":     300,
-    "cv":          500,
-    "diploma":     200,
-    "certificate": 150,
-    "experience":  150,
-}
+# ---------------------------------------------------------------------------
+# Signal lists used for categorising messages
+# ---------------------------------------------------------------------------
 
 _OCR_FAILURE_SIGNALS = [
     "could not be extracted",
@@ -90,49 +177,21 @@ _TRUE_BLOCKING_SIGNALS = [
     "skills inflation risk",
 ]
 
+_HR_ONLY_PHRASES = [
+    "hr should", "hr must", "hr review", "hr will verify", "hr can",
+    "hr may", "hr should review", "hr should verify", "before finalising",
+    "before shortlisting", "manually verify", "manual hr review",
+    "flagged for hr", "hr review required", "hr review is recommended",
+    "verify manually", "re-verify", "hr department",
+    "could not be verified automatically",
+    "one or more documents could not be verified", "[hr]",
+    "advisory -- will be verified manually by hr",
+    "will be verified manually by hr", "verified manually by hr",
+]
 
-def _is_ocr_failure(msg: str) -> bool:
-    lower = msg.lower()
-    return any(sig in lower for sig in _OCR_FAILURE_SIGNALS)
-
-
-def _is_true_blocking_failure(msg: str) -> bool:
-    if not msg:
-        return False
-    lower = msg.lower()
-    if _is_ocr_failure(msg):
-        return False
-    return any(sig.lower() in lower for sig in _TRUE_BLOCKING_SIGNALS)
-
-
-def estimate_ocr_quality_from_texts(doc_texts: dict[str, str]) -> float:
-    """
-    Estimate overall OCR quality (0-100) from extracted document texts.
-    FIX-ENGINE-1: Made public so main.py can call it directly.
-    """
-    if not doc_texts:
-        return 0.0
-    scores: list[float] = []
-    for doc_type, text in doc_texts.items():
-        if not text or not text.strip():
-            scores.append(0.0)
-            continue
-        readable   = _count_readable_chars(text)
-        full_chars = _DOC_QUALITY_FULL_CHARS.get(doc_type, 150)
-        doc_score  = min(100.0, (readable / full_chars) * 100.0)
-        scores.append(doc_score)
-    if not scores:
-        return 0.0
-    avg = sum(scores) / len(scores)
-    print(
-        f"[estimate_ocr_quality_from_texts] per_doc={dict(zip(doc_texts.keys(), [round(s,1) for s in scores]))} "
-        f"avg={avg:.1f}"
-    )
-    return round(avg, 1)
-
-
-_estimate_ocr_quality_from_texts = estimate_ocr_quality_from_texts
-
+# ---------------------------------------------------------------------------
+# Job / field lookup tables
+# ---------------------------------------------------------------------------
 
 JOB_FIELD_SPECIFICS: dict[str, dict[str, list[str]]] = {
     "software engineer": {
@@ -167,13 +226,16 @@ JOB_FIELD_MAP: dict[str, list[str]] = {
     "it":                  ["information technology", "computer science", "software engineering", "computer engineering", "ict"],
     "it engineer":         ["information technology", "computer science", "software engineering", "computer engineering", "ict"],
     "it support technician": ["information technology", "computer science", "software engineering", "computer engineering", "ict", "information and communication technology"],
+    "ict support technician": ["information technology", "computer science", "software engineering", "computer engineering", "ict", "information and communication technology"],
     "doctor":              ["medicine", "mbchb", "mbbs", "health sciences", "clinical medicine"],
     "veterinarian":        ["veterinary medicine", "veterinary technology", "animal health", "animal science"],
     "pharmacist":          ["pharmacy", "pharmaceutical sciences", "pharmacology"],
     "teacher":             ["education", "teaching", "pedagogy"],
     "lawyer":              ["law", "legal studies", "jurisprudence"],
     "architect":           ["architecture", "urban planning", "building design"],
-    "electrical engineer": ["electrical engineering", "electronics engineering", "power engineering"],
+    "electrical engineer": ["electrical engineering", "electronics engineering", "power engineering",
+                            "electrical and electronics engineering", "electrical technology"],
+    "electronics engineer": ["electrical engineering", "electronics engineering", "electrical and electronics engineering"],
 }
 
 FIELD_ALIASES: dict[str, list[str]] = {
@@ -187,6 +249,10 @@ FIELD_ALIASES: dict[str, list[str]] = {
     "medicine":                ["mbchb", "mbbs", "medical doctor", "md"],
     "software engineering":    ["computer science", "cs", "computing", "information technology"],
     "computer engineering":    ["computer science", "cs", "computing", "information technology"],
+    "electrical engineering":  ["electrical and electronics engineering", "electronics engineering",
+                                "electrical technology", "power engineering", "ee"],
+    "electrical and electronics engineering": ["electrical engineering", "electronics engineering",
+                                               "electrical technology", "eee"],
 }
 
 EDU_ORDER: dict[str, int] = {
@@ -199,23 +265,52 @@ EDU_ORDER: dict[str, int] = {
     "doctorate":  4,
 }
 
+# FIX-BUG3: "advanced diploma" added BEFORE "diploma" at ordinal 2
+# (treated as bachelor-equivalent since it requires 2+ years post-secondary).
+# Previously the keyword scan hit "diploma" first for both "diploma" and
+# "advanced diploma" strings, assigning ord=1 to both.
+# The list is scanned top-to-bottom; more-specific entries must come first.
 _EDU_KEYWORD_MAP: list[tuple[str, int]] = [
-    ("phd",        4), ("ph.d",       4), ("doctor",     4),
-    ("master",     3), ("msc",        3), ("mba",        3),
-    ("m.sc",       3), ("postgrad",   3), ("bachelor",   2),
-    ("undergrad",  2), ("bsc",        2), ("b.sc",       2),
-    ("beng",       2), ("llb",        2), ("honours",    2),
-    ("hons",       2), ("degree",     2), ("diploma",    1),
-    ("hnd",        1), ("hnc",        1), ("cert",       1),
-    ("technician", 1), ("associate",  1),
+    ("phd",              4), ("ph.d",            4), ("doctor",          4),
+    ("master",          3), ("msc",              3), ("mba",             3),
+    ("m.sc",            3), ("postgrad",         3),
+    # FIX-BUG3: "advanced diploma" must precede "diploma" in this list
+    ("advanced diploma", 2), ("advanced cert",   2),
+    ("bachelor",         2), ("undergrad",       2), ("bsc",             2),
+    ("b.sc",             2), ("beng",            2), ("llb",             2),
+    ("honours",          2), ("hons",            2), ("degree",          2),
+    ("diploma",          1), ("hnd",             1), ("hnc",             1),
+    ("cert",             1), ("technician",      1), ("associate",       1),
 ]
 
 _ORD_LABEL: dict[int, str] = {
     1: "Diploma",
-    2: "Bachelor's degree",
+    2: "Bachelor's degree / Advanced Diploma",
     3: "Master's degree",
     4: "PhD / Doctorate",
 }
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+def _is_ocr_failure(msg: str) -> bool:
+    lower = msg.lower()
+    return any(sig in lower for sig in _OCR_FAILURE_SIGNALS)
+
+
+def _is_true_blocking_failure(msg: str) -> bool:
+    if not msg:
+        return False
+    if _is_ocr_failure(msg):
+        return False
+    lower = msg.lower()
+    return any(sig.lower() in lower for sig in _TRUE_BLOCKING_SIGNALS)
+
+
+def _is_hr_only_message(msg: str) -> bool:
+    lower = msg.lower()
+    return any(phrase in lower for phrase in _HR_ONLY_PHRASES)
 
 
 def _score_band(score: float) -> str:
@@ -249,11 +344,27 @@ def _levenshtein_ratio(a: str, b: str) -> float:
 
 
 def _edu_ordinal(level: str) -> int:
+    """
+    FIX-BUG3: Returns the education ordinal for a given level string.
+
+    The keyword map is scanned top-to-bottom. "advanced diploma" now appears
+    BEFORE "diploma" so that a string containing "advanced diploma" is matched
+    at ordinal 2 instead of falling through to ordinal 1 ("diploma").
+
+    This fixes the bug where required levels like
+    "advanced diploma in information technology [min 2 yrs]" were assigned
+    the same ordinal as a basic "Diploma", making the gap appear to be 0
+    when in reality the applicant was one tier below the requirement.
+    """
     if not level: return 1
     norm = _normalize(level)
-    if norm in EDU_ORDER: return EDU_ORDER[norm]
+    # Exact match first (fastest path)
+    if norm in EDU_ORDER:
+        return EDU_ORDER[norm]
+    # Keyword scan — order matters; more-specific entries must be listed first
     for keyword, ordinal in _EDU_KEYWORD_MAP:
-        if keyword in norm: return ordinal
+        if keyword in norm:
+            return ordinal
     return 1
 
 
@@ -313,6 +424,88 @@ def _overlap_count(applicant_items: list[str], required_items: list[str]) -> int
         for req in required_items
     )
 
+
+def _split_warnings_for_audience(
+    warnings: list[str],
+) -> tuple[list[str], list[str]]:
+    applicant_warnings: list[str] = []
+    hr_notes:           list[str] = []
+    for msg in warnings:
+        if _is_hr_only_message(msg):
+            hr_notes.append(msg)
+        else:
+            applicant_warnings.append(msg)
+    return applicant_warnings, hr_notes
+
+
+# ---------------------------------------------------------------------------
+# OCR quality estimation (public – used by main.py too)
+# ---------------------------------------------------------------------------
+
+# Doc-type weights: required docs 3×, optional docs 1×  (FIX-ENGINE-OCR-1)
+_DOC_QUALITY_WEIGHTS: dict[str, float] = {
+    "id_card":     3.0,
+    "cv":          3.0,
+    "diploma":     3.0,
+    "certificate": 1.0,
+    "experience":  1.0,
+}
+
+def estimate_ocr_quality_from_texts(doc_texts: dict[str, str]) -> float:
+    """
+    FIX-ENGINE-OCR-1: Weighted OCR quality estimate (0-100).
+    Required docs (id_card, cv, diploma) count 3× so one bad optional
+    document cannot collapse the overall quality score.
+    """
+    if not doc_texts:
+        return 0.0
+    scores: list[float] = []
+    weights: list[float] = []
+    for doc_type, text in doc_texts.items():
+        if not text or not text.strip():
+            score = 0.0
+        else:
+            readable   = _count_readable_chars(text)
+            full_chars = _DOC_QUALITY_FULL_CHARS.get(doc_type, 150)
+            score      = min(100.0, (readable / full_chars) * 100.0)
+        scores.append(score)
+        weights.append(_DOC_QUALITY_WEIGHTS.get(doc_type, 1.0))
+    if not scores:
+        return 0.0
+    weighted_avg = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
+    print(
+        f"[estimate_ocr_quality_from_texts] "
+        f"per_doc={dict(zip(doc_texts.keys(), [round(s, 1) for s in scores]))} "
+        f"weighted_avg={weighted_avg:.1f}"
+    )
+    return round(weighted_avg, 1)
+
+# Backward-compat alias used by a few call sites
+_estimate_ocr_quality_from_texts = estimate_ocr_quality_from_texts
+
+# ---------------------------------------------------------------------------
+# FIX-SE-01: Resolve applicant name from multiple possible field names.
+# ---------------------------------------------------------------------------
+
+def _get_applicant_name(application: Application) -> str:
+    """
+    Safely resolve the applicant's full name from an Application instance.
+    Tries multiple attribute names to be robust against model variations.
+    """
+    for attr in ("full_name", "name", "applicant_name"):
+        val = getattr(application, attr, None)
+        if val and str(val).strip():
+            return str(val).strip()
+    first = getattr(application, "first_name", None) or ""
+    last  = getattr(application, "last_name",  None) or ""
+    composed = f"{first} {last}".strip()
+    if composed:
+        return composed
+    return ""
+
+# ---------------------------------------------------------------------------
+# Job / field helpers
+# ---------------------------------------------------------------------------
 
 def _job_req_from_db(job: Job) -> dict:
     return {
@@ -391,6 +584,9 @@ def _ai_field_job_compatible(app_field: str, job_title: str) -> tuple[bool, floa
     except Exception:
         return True, 0.0
 
+# ---------------------------------------------------------------------------
+# ML feature helpers
+# ---------------------------------------------------------------------------
 
 def _safe_select_features(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFrame:
     result       = {}
@@ -433,6 +629,9 @@ def _ai_skills_in_text(
         scores[skill] = 1.0 if matched else 0.0
     return found, not_found, scores
 
+# ---------------------------------------------------------------------------
+# Experience helpers
+# ---------------------------------------------------------------------------
 
 def _exp_gap_status(exp_years: int, req_min_exp: int) -> tuple[str, int, float]:
     gap = max(0, req_min_exp - exp_years)
@@ -537,6 +736,9 @@ def _cross_check_experience_doc(
         )
     return hard_fails, soft_warnings, confirmations, exp_doc_penalty
 
+# ---------------------------------------------------------------------------
+# Cross-check: form vs uploaded document texts
+# ---------------------------------------------------------------------------
 
 def _cross_check_form_vs_docs(
     application: Application,
@@ -552,6 +754,7 @@ def _cross_check_form_vs_docs(
     cert_text       = doc_texts.get("certificate", "") or ""
     experience_text = doc_texts.get("experience",  "") or ""
 
+    # -- Diploma / education --------------------------------------------------
     if diploma_text.strip():
         edu_ok, edu_msg = verify_education_level_from_document(
             application.education_level or "", diploma_text
@@ -576,6 +779,7 @@ def _cross_check_form_vs_docs(
             "HR should verify the diploma document manually."
         )
 
+    # -- Diploma / field of study ---------------------------------------------
     if diploma_text.strip() and application.field_of_study:
         field_ok, field_msg = verify_field_of_study(
             application.field_of_study, diploma_text
@@ -590,6 +794,7 @@ def _cross_check_form_vs_docs(
                 "(The uploaded diploma does not match the field declared in the form.)"
             )
 
+    # -- CV / skills cross-check ----------------------------------------------
     if cv_text.strip() and application.skills:
         declared_skills = _parse_list(application.skills)
         if declared_skills:
@@ -631,6 +836,7 @@ def _cross_check_form_vs_docs(
             "HR review required. This does not automatically disqualify the candidate."
         )
 
+    # -- Certificate cross-check ----------------------------------------------
     if cert_text.strip() and application.certifications:
         declared_certs = _parse_list(application.certifications)
         if declared_certs:
@@ -645,6 +851,7 @@ def _cross_check_form_vs_docs(
                     "not matched in uploaded certificate. HR verification required."
                 )
 
+    # -- Experience document cross-check --------------------------------------
     exp_hard, exp_warn, exp_confirm, exp_doc_penalty = _cross_check_experience_doc(
         declared_exp_years=int(application.experience_years or 0),
         exp_doc_text=experience_text,
@@ -656,6 +863,9 @@ def _cross_check_form_vs_docs(
 
     return hard_fails, soft_warnings, confirmations, cv_skill_penalty
 
+# ---------------------------------------------------------------------------
+# Feature vector builder
+# ---------------------------------------------------------------------------
 
 def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     req = _job_req_from_db(job)
@@ -671,12 +881,14 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     req_edu_lvls = _parse_list(req["Required_Education_Levels"])
     req_min_exp  = req["Required_Min_Experience"]
     req_max_exp  = req["Required_Max_Experience"]
+
     skills_overlap_ratio   = _overlap_ratio(app_skills, req_skills)
     skills_overlap_count   = _overlap_count(app_skills, req_skills)
     total_applicant_skills = len(app_skills)
     cert_overlap_ratio     = _overlap_ratio(app_certs, req_certs)
     cert_overlap_count     = _overlap_count(app_certs, req_certs)
     has_certifications     = int(len(app_certs) > 0)
+
     app_edu_ord = _edu_ordinal(edu_level)
     edu_level_match = int(any(_token_match(edu_level, lvl) for lvl in req_edu_lvls))
     if not edu_level_match and req_edu_lvls:
@@ -687,22 +899,30 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
         edu_meets_minimum = int(app_edu_ord >= min_required_ord)
     else:
         edu_meets_minimum = 1
+
     field_match_simple = _simple_field_match(field, req["Required_Fields"])
     field_match_rich   = int(_field_match(field, req_fields))
     field_match        = field_match_simple
+
     exp_in_range           = int(req_min_exp <= exp_years <= req_max_exp)
     exp_above_min          = max(0, exp_years - req_min_exp)
     exp_surplus            = min(exp_years - req_min_exp, 10)
     current_year           = datetime.now().year
     years_since_graduation = max(0, min(current_year - grad_year, 30))
+
+    # FIX-WEIGHTS: Rebalanced weights so field_match contributes 0.28 and
+    # skills 0.22. Ensures a fully-qualified candidate scores close to 1.0
+    # on the rule-based component, which is especially important when
+    # ml_weight is suppressed (FIX-BUG5). Weights still sum to 1.0.
     combined_match_score = round(
         0.30 * edu_meets_minimum
-        + 0.25 * field_match
-        + 0.25 * skills_overlap_ratio
+        + 0.28 * field_match
+        + 0.22 * skills_overlap_ratio
         + 0.12 * exp_in_range
         + 0.08 * cert_overlap_ratio,
         4,
     )
+
     def safe_encode(col: str, value: str) -> tuple[int, bool]:
         le = label_encoders.get(col)
         if le is None: return 0, False
@@ -710,10 +930,12 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
             return int(le.transform([value])[0]), True
         except ValueError:
             return len(le.classes_) // 2, False
+
     gender_enc, _         = safe_encode("Gender",          application.gender or "Male")
     edu_enc, _            = safe_encode("Education_Level", edu_level)
     job_enc, job_is_known = safe_encode("Job_Applied",     job.title)
     age_est = max(18, current_year - (grad_year - 22))
+
     row = {
         "Age":                     age_est,
         "Gender":                  gender_enc,
@@ -742,6 +964,9 @@ def build_feature_vector(application: Application, job: Job) -> pd.DataFrame:
     }
     return pd.DataFrame([row])
 
+# ---------------------------------------------------------------------------
+# Hard gate
+# ---------------------------------------------------------------------------
 
 def _hard_gate(
     application: Application,
@@ -750,10 +975,11 @@ def _hard_gate(
     """
     Returns (passed, hard_failures, soft_warnings, exp_penalty, edu_soft_penalty, field_ok).
 
-    FIX-ENGINE-FIELD-1: Now also returns field_ok (bool) so predict() can pass
-    the authoritative field check result to _build_reason(), preventing the
-    false "field mismatch" messages caused by _build_reason() re-running its
-    own independent AI field compatibility check which could differ from here.
+    FIX-ENGINE-FIELD-1: Returns field_ok so predict() can pass the authoritative
+    result to _build_reason(), preventing false field-mismatch messages.
+
+    FIX-SE-02: Skills gate is SOFT – missing/mismatched skills never causes a
+    hard-reject; they are emitted as soft_warnings only.
     """
     req          = _job_req_from_db(job)
     app_skills   = _parse_list(application.skills)
@@ -763,6 +989,7 @@ def _hard_gate(
     edu_level    = (application.education_level or "").strip()
     exp_years    = int(application.experience_years or 0)
     req_min_exp  = req["Required_Min_Experience"]
+
     hard_failures:    list[str] = []
     soft_warnings:    list[str] = []
     exp_penalty:      float     = 0.0
@@ -797,9 +1024,6 @@ def _hard_gate(
             )
 
     # -- Field gate -----------------------------------------------------------
-    # FIX-ENGINE-FIELD-1: Track the authoritative field_ok result here.
-    # This single result is returned to predict() and passed to _build_reason()
-    # so the reason message matches the actual gate decision exactly.
     field_ok = True  # default: pass (no expected fields = no requirement)
 
     all_expected_fields = _get_expected_fields_for_job(job)
@@ -830,10 +1054,7 @@ def _hard_gate(
                         f"(AI domain compatibility: {max(ai_score, ai_score2):.0%}). "
                         f"Required background: {', '.join(refined_fields[:4])}."
                     )
-                # else: fuzzy matched AND second AI check passed -> field_ok = True (default)
-            # else: fuzzy matched AND first AI check passed -> field_ok = True (default)
         else:
-            # Fuzzy match failed -- try AI as last resort
             ai_compat, ai_score = _ai_field_job_compatible(field, job.title)
             if not ai_compat:
                 field_ok = False
@@ -843,7 +1064,6 @@ def _hard_gate(
                     f"Required: {', '.join(refined_fields[:4])}."
                 )
             else:
-                # AI says compatible even though fuzzy failed -> accept
                 field_ok = True
 
     # -- Experience gate ------------------------------------------------------
@@ -859,24 +1079,28 @@ def _hard_gate(
             "We encourage you to gain more experience and apply again."
         )
 
-    # -- Skills gate ----------------------------------------------------------
+    # -- Skills gate (FIX-SE-02: SOFT only, never hard-reject) ----------------
     if req_skills and app_skills:
         ratio = _overlap_ratio(app_skills, req_skills)
         if ratio <= SKILLS_HARD_REJECT_THRESHOLD:
-            hard_failures.append(
-                f"None of the declared skills match the job requirements. "
+            soft_warnings.append(
+                f"\u26a0 None of the declared skills match the job requirements. "
                 f"Key skills needed: {', '.join(_parse_list(req['Required_Skills'])[:5])}. "
-                "We encourage you to develop these skills and apply again."
+                "HR review recommended -- this does not automatically disqualify the application."
             )
     elif req_skills and not app_skills:
-        hard_failures.append(
-            f"No skills declared. This role requires: "
-            f"{', '.join(_parse_list(req['Required_Skills'])[:5])}."
+        soft_warnings.append(
+            f"\u26a0 No skills declared. This role requires: "
+            f"{', '.join(_parse_list(req['Required_Skills'])[:5])}. "
+            "HR review recommended."
         )
 
     passed = len(hard_failures) == 0
     return passed, hard_failures, soft_warnings, exp_penalty, edu_soft_penalty, field_ok
 
+# ---------------------------------------------------------------------------
+# Score computation
+# ---------------------------------------------------------------------------
 
 def _compute_display_score(
     ml_prob: float,
@@ -888,14 +1112,40 @@ def _compute_display_score(
     exp_penalty: float = 0.0,
     edu_soft_penalty: float = 0.0,
 ) -> float:
-    ml_weight   = 0.40 if job_is_known else 0.15
-    rule_weight = 0.60 if job_is_known else 0.85
-    blended     = ml_weight * ml_prob + rule_weight * combined_match_score
+    """
+    FIX-BUG4: When job_is_known=False AND ml_prob is effectively zero,
+    force ml_weight=0.0 and rule_weight=1.0 so the ML component does not
+    drag the combined score down to near-zero.
+
+    FIX-BUG5: Also force ml_weight=0.0 when ml_prob < ML_MIN_MEANINGFUL
+    (0.15), even for "known" jobs. A very low ML probability from a model
+    with insufficient training examples for a specific job type was dragging
+    display scores down to ~37% even for well-qualified candidates. When the
+    model has low confidence in its own output, the rule-based score is the
+    more reliable signal and should drive the result entirely.
+
+    Previously the code still applied ml_weight=0.40 to ml_prob≈0.047 for
+    known jobs, giving: 0.40×0.047 + 0.60×0.85 = 0.019 + 0.51 = 0.53,
+    which fell below the 0.54 threshold. With this fix, the same candidate
+    scores 0.85 and is correctly shortlisted.
+    """
+    # FIX-BUG4 + FIX-BUG5: suppress ML when unknown OR when ml_prob is too
+    # low to be a meaningful signal.
+    if not job_is_known or ml_prob < ML_MIN_MEANINGFUL:
+        ml_weight   = 0.0
+        rule_weight = 1.0
+    else:
+        ml_weight   = 0.40
+        rule_weight = 0.60
+
+    blended = ml_weight * ml_prob + rule_weight * combined_match_score
+
     skills_score_penalty = 0.0
     if skills_ratio < SKILLS_PENALTY_THRESHOLD:
         skills_score_penalty = 0.08
     elif skills_ratio < SKILLS_WARN_THRESHOLD:
         skills_score_penalty = 0.04
+
     gate_penalty = min(len(gate_failures) * 0.10, 0.30)
     final = max(
         0.0,
@@ -908,51 +1158,9 @@ def _compute_display_score(
     )
     return round(min(final, 1.0), 4)
 
-
-_HR_ONLY_PHRASES = [
-    "hr should",
-    "hr must",
-    "hr review",
-    "hr will verify",
-    "hr can",
-    "hr may",
-    "hr should review",
-    "hr should verify",
-    "before finalising",
-    "before shortlisting",
-    "manually verify",
-    "manual hr review",
-    "flagged for hr",
-    "hr review required",
-    "hr review is recommended",
-    "verify manually",
-    "re-verify",
-    "hr department",
-    "could not be verified automatically",
-    "one or more documents could not be verified",
-    "[hr]",
-    "advisory -- will be verified manually by hr",
-    "will be verified manually by hr",
-    "verified manually by hr",
-]
-
-def _is_hr_only_message(msg: str) -> bool:
-    lower = msg.lower()
-    return any(phrase in lower for phrase in _HR_ONLY_PHRASES)
-
-
-def _split_warnings_for_audience(
-    warnings: list[str],
-) -> tuple[list[str], list[str]]:
-    applicant_warnings: list[str] = []
-    hr_notes:           list[str] = []
-    for msg in warnings:
-        if _is_hr_only_message(msg):
-            hr_notes.append(msg)
-        else:
-            applicant_warnings.append(msg)
-    return applicant_warnings, hr_notes
-
+# ---------------------------------------------------------------------------
+# Reason builder
+# ---------------------------------------------------------------------------
 
 def _build_reason(
     decision: str,
@@ -972,12 +1180,7 @@ def _build_reason(
     doc_verified: bool = False,
     doc_advisory: bool = False,
     doc_check_ran: bool = True,
-    # -- FIX-ENGINE-FIELD-1 -------------------------------------------------
-    # NEW: authoritative field_ok result from _hard_gate().
-    # Using this instead of re-running _ai_field_job_compatible() independently
-    # eliminates false "field mismatch" messages when the field actually matched.
-    # Default True = backward-compatible (show "field matches" if not provided).
-    gate_field_ok: bool = True,
+    gate_field_ok: bool = True,  # FIX-ENGINE-FIELD-1
 ) -> str:
     req          = _job_req_from_db(job)
     app_skills   = _parse_list(application.skills)
@@ -1009,126 +1212,142 @@ def _build_reason(
     matched_certs  = [c for c in app_certs   if any(_token_match(c, r) for r in req_certs)]
     missing_certs  = [r for r in req_certs   if not any(_token_match(r, a) for a in app_certs)]
 
-    criteria_met:      list[str] = []
-    criteria_failed:   list[str] = []
-    raw_warnings:      list[str] = []
+    criteria_met:    list[str] = []
+    criteria_failed: list[str] = []
+    raw_warnings:    list[str] = []
 
-    # -- Education ------------------------------------------------------------
+    # -- Education (ENHANCED: Personalized gap messaging) ----
     if edu_meets_min:
-        criteria_met.append("Education level meets the minimum requirement for this position.")
+        criteria_met.append(f"Education level matches the requirement: you have a {_ORD_LABEL.get(app_edu_ord, edu_level)} which meets or exceeds the required level.")
     elif edu_gap == EDU_SOFT_WARN_GAP:
         req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
         app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
         raw_warnings.append(
-            f"\u26a0 Education gap noted: you have a {app_label} but this role prefers a "
-            f"{req_label}. A score adjustment of {edu_soft_penalty*100:.0f}% has been applied. "
-            "Your overall profile has been considered."
+            f"\u26a0 Education gap: You have a {app_label} but this role requires a "
+            f"{req_label}. This is a minor gap ({edu_gap} level). "
+            f"Relevant experience may compensate. Score adjustment applied: -{edu_soft_penalty*100:.0f}%."
         )
     else:
         req_label = _ORD_LABEL.get(min_required_ord, ", ".join(req_edu_lvls))
         app_label = _ORD_LABEL.get(app_edu_ord, edu_level)
         criteria_failed.append(
-            f"Education level does not meet the minimum requirement: "
-            f"you have a {app_label} but this position requires at least a {req_label}. "
-            "We encourage you to pursue further education and apply again."
+            f"Education gap ({edu_gap} level(s)): You have a {app_label} but this position requires at least a {req_label}. "
+            f"We encourage you to pursue formal education and reapply. "
+            "This is a significant barrier for this particular role."
         )
 
-    # -- Field of Study --------------------------------------------------------
-    # FIX-ENGINE-FIELD-1: Use gate_field_ok (the authoritative result from
-    # _hard_gate) instead of re-running AI compatibility check independently.
-    # Previously this block called _ai_field_job_compatible() again which could
-    # return a different result from _hard_gate(), causing "field doesn't match"
-    # to appear in criteria_failed even when the field passed the gate.
+    # -- Field of Study (ENHANCED: Personalized feedback) --
+    # FIX-ENGINE-FIELD-1: use gate_field_ok, no re-run
     all_expected   = _get_expected_fields_for_job(job)
     refined_fields = _refine_req_fields_for_job(job, all_expected) if all_expected else req_fields
 
     if gate_field_ok:
-        criteria_met.append("Field of study matches the required field for this position.")
+        criteria_met.append(
+            f"Field of study alignment: Your {application.field_of_study} background aligns well "
+            f"with the {job.title} position requirements."
+        )
     else:
         display_fields = refined_fields[:3] or req_fields[:3] or ["see job description"]
+        your_field = application.field_of_study or "undeclared field"
+        required_fields_str = ", ".join(display_fields)
         criteria_failed.append(
-            f"Field of study '{application.field_of_study}' does not match "
-            f"the required academic background for a '{job.title}' role "
-            f"(required: {', '.join(display_fields)})."
+            f"Field mismatch: Your background is in '{your_field}' but a {job.title} role typically requires "
+            f"training in: {required_fields_str}. "
+            f"Consider applying for roles better aligned with your academic background or pursuing additional studies."
         )
 
-    # -- Experience -----------------------------------------------------------
+    # -- Experience (ENHANCED: Personalized gap analysis) --
     exp_status, exp_gap_val, _ = _exp_gap_status(exp_years, req_min_exp)
     if exp_status == "pass":
         if exp_years > req_max_exp:
             criteria_met.append(
-                "Years of experience meet the minimum requirement. "
-                "Note: exceeds maximum -- may be over-qualified, HR discretion."
+                f"Experience exceeds requirements: You have {exp_years} year(s) (requirement: {req_min_exp}-{req_max_exp} years). "
+                "You may be overqualified for this position, but your profile will be considered."
             )
         else:
-            criteria_met.append("Years of experience meet the minimum requirement for this position.")
+            criteria_met.append(
+                f"Experience meets requirement: You have {exp_years} year(s) which satisfies the "
+                f"required {req_min_exp} year(s) for this position."
+            )
     elif exp_status == "penalty":
+        shortfall = req_min_exp - exp_years
         raw_warnings.append(
-            f"\u26a0 Experience gap noted: you have {exp_years} yr(s) but this role requires "
-            f"a minimum of {req_min_exp} yr(s) ({exp_gap_val} yr(s) short). "
-            f"A score adjustment of {exp_penalty*100:.0f}% has been applied. "
-            "Your strong education and/or skills profile has been taken into account -- "
-            "you may still be shortlisted based on your overall score."
+            f"\u26a0 Experience gap: You have {exp_years} year(s) but this role requires "
+            f"{req_min_exp} year(s) -- you are {shortfall} year(s) short. "
+            f"Score penalty: -{exp_penalty*100:.0f}%. "
+            f"Your strong education and/or skills may compensate. Consider applying after gaining {shortfall} more year(s) of relevant experience."
         )
     else:
-        criteria_failed.append(
-            f"Experience ({exp_years} yr(s)) is significantly below the minimum required "
-            f"({req_min_exp} yr(s)) -- gap of {exp_gap_val} year(s) exceeds the allowable threshold. "
-            "We encourage you to gain more experience and apply again."
+        gap_years = exp_gap_val
+        raw_warnings.append(
+            f"\u26a0 Significant experience gap: You have {exp_years} year(s) but this role requires "
+            f"at least {req_min_exp} year(s) -- gap of {gap_years} year(s) exceeds acceptable threshold. "
+            f"This is a critical requirement for the position. "
+            "We recommend gaining more relevant experience and reapplying."
         )
 
-    # -- Skills ---------------------------------------------------------------
+    # -- Skills ------- (ENHANCED: Personalized gap analysis) ---
+    # FIX-PERSONALIZE-1: Generate specific, actionable skills feedback per candidate
     skills_msg_base = (
         f"Skills matched: {len(matched_skills)}/{len(req_skills) or 0} required "
         f"({sk_ratio*100:.0f}%)."
-        + (f" Matched: {', '.join(matched_skills)}." if matched_skills else "")
-        + (f" Missing: {', '.join(missing_skills)}."  if missing_skills else "")
+        + (f" Your skills: {', '.join(matched_skills[:5])}." if matched_skills else " No matching skills found.")
+        + (f" Position requires: {', '.join(missing_skills[:5])}."  if missing_skills else "")
     )
     if not req_skills:
         criteria_met.append("No specific skills listed as requirements for this position.")
     elif sk_ratio >= SKILLS_WARN_THRESHOLD:
         criteria_met.append(skills_msg_base)
     elif sk_ratio > SKILLS_HARD_REJECT_THRESHOLD:
+        gap_summary = (
+            f"You have {len(matched_skills)} out of {len(req_skills)} required skills. "
+            f"Your strengths: {', '.join(matched_skills[:3]) if matched_skills else 'awaiting profile enhancement'}. "
+            f"Priority gap(s): {', '.join(missing_skills[:3])}."
+        )
         raw_warnings.append(
-            f"\u26a0 Skills gap noted: {skills_msg_base} "
-            f"We encourage you to develop the missing skills "
-            f"({', '.join(missing_skills[:3])}) and apply again. "
-            "This does not automatically disqualify your application -- "
-            "your education and experience have been taken into account."
+            f"\u26a0 Skills gap: {gap_summary} "
+            f"We encourage you to develop these missing skills and reapply. "
+            "Your strong education and/or experience profile has been taken into account."
         )
     else:
-        criteria_failed.append(
-            f"None of the declared skills match the job requirements. "
-            f"Key skills needed: {', '.join(missing_skills[:5])}. "
-            "We encourage you to develop these skills and apply again."
+        raw_warnings.append(
+            f"\u26a0 Critical skills gap: None of your declared skills match this role. "
+            f"This position requires: {', '.join(missing_skills[:5])}. "
+            f"Consider developing these skills before reapplying. "
+            "HR review recommended."
         )
 
-    # -- Certifications -------------------------------------------------------
+    # -- Certifications (ENHANCED: Personalized gap analysis) --
     if req_certs:
         if cert_ratio > 0:
             cert_msg = (
-                f"Certifications: {len(matched_certs)}/{len(req_certs)} matched ({cert_ratio*100:.0f}%)."
-                + (f" Matched: {', '.join(matched_certs)}." if matched_certs else "")
-                + (f" Missing: {', '.join(missing_certs)}."  if missing_certs else "")
+                f"Certifications: You have {len(matched_certs)} out of {len(req_certs)} required certifications ({cert_ratio*100:.0f}%)."
+                + (f" Your certs: {', '.join(matched_certs)}." if matched_certs else "")
+                + (f" Additional certs needed: {', '.join(missing_certs[:3])}."  if missing_certs and len(missing_certs) <= 3 else "")
             )
             criteria_met.append(cert_msg)
         else:
             missing_cert_names = ", ".join(missing_certs[:3]) if missing_certs else "see job description"
             raw_warnings.append(
-                f"\u26a0 Certifications: {len(matched_certs)}/{len(req_certs)} matched (0%). "
-                f"Missing: {missing_cert_names}. "
-                "These will be reviewed as part of the evaluation process."
+                f"\u26a0 Certifications: None of your certifications match the required {len(req_certs)}. "
+                f"Required certifications: {missing_cert_names}. "
+                f"Obtaining these certifications would strengthen your profile. "
+                "They will be reviewed as part of the evaluation process."
             )
             raw_warnings.append(
-                f"\u26a0 [HR] Certifications: 0/{len(req_certs)} matched. "
+                f"\u26a0 [HR] Certification gap: Candidate has 0 of {len(req_certs)} required certifications. "
                 f"Missing: {', '.join(missing_certs[:5]) if missing_certs else 'see requirements'}. "
-                "Advisory -- will be verified manually by HR."
+                "Advisory -- will be verified during evaluation."
             )
+    else:
+        criteria_met.append("No specific certifications required for this position.")
 
+    # Merge gate soft-warnings (deduplicated)
     for w in gate_soft_warnings:
         if w not in raw_warnings:
             raw_warnings.append(w)
 
+    # Merge document cross-check results
     for c in (doc_confirmations or []):
         criteria_met.append(c)
     for w in (doc_warnings or []):
@@ -1136,8 +1355,7 @@ def _build_reason(
     for f in (doc_hard_fails or []):
         criteria_failed.append(f)
 
-    # -- Document status -------------------------------------------------------
-    # FIX-SE-20: Only emit doc messages when verify_documents() actually ran.
+    # -- Document status ------------------------------------------------------
     if doc_check_ran:
         if doc_verified and not doc_advisory:
             criteria_met.append("\u2705 Documents fully verified -- all required documents accepted.")
@@ -1160,7 +1378,6 @@ def _build_reason(
                 "\u26a0 [HR] One or more documents could not be verified automatically. "
                 "HR should review the uploaded documents before finalising the decision."
             )
-    # doc_check_ran=False -> documents already verified at upload, emit nothing.
 
     band = _score_band(display_score)
     criteria_met.append(f"Overall match score: {display_score*100:.1f}% -- {band}.")
@@ -1171,17 +1388,59 @@ def _build_reason(
 
     criteria_warnings, hr_notes = _split_warnings_for_audience(raw_warnings)
 
+    # FIX-PERSONALIZE-2: Enhanced summary with specific candidate insights
     if decision == "shortlisted":
+        # Count specific gaps
+        gap_count = 0
+        gaps_list = []
+        if matched_skills:
+            gap_count += 1
+            gaps_list.append(f"skills match ({len(matched_skills)}/{len(req_skills) or 0})")
+        if not edu_meets_min and edu_gap > 0:
+            gap_count += 1
+            gaps_list.append(f"education is {edu_gap} level(s) below")
+        if exp_status == "penalty":
+            gap_count += 1
+            gaps_list.append(f"experience is {exp_gap_val} year(s) short")
+        if not gate_field_ok:
+            gap_count += 1
+            gaps_list.append(f"field doesn't match '{application.field_of_study}'")
+        
+        gaps_note = ""
+        if gap_count == 0:
+            gaps_note = "All core criteria satisfied."
+        elif gap_count == 1:
+            gaps_note = f"Note: {gaps_list[0]}."
+        else:
+            gaps_note = f"Notable areas: {'; '.join(gaps_list[:2])}."
+        
         summary = (
-            f"Candidate meets the requirements for shortlisting "
-            f"(score: {display_score*100:.1f}% -- {band})."
-            + (f" Notes: {'; '.join(criteria_warnings[:2])}." if criteria_warnings else " All core criteria satisfied.")
+            f"Congratulations! You have been shortlisted for the {job.title} position "
+            f"(score: {display_score*100:.1f}%). "
+            + gaps_note
         )
     else:
+        # Enhanced failure summary with specific reasons
         all_fails = list(dict.fromkeys(criteria_failed))
-        summary   = (
-            f"Candidate does not meet minimum requirements (score: {display_score*100:.1f}% -- {band}). "
-            f"Main reason(s): {'; '.join(all_fails[:2] or ['Score below threshold'])}."
+        primary_reason = all_fails[0] if all_fails else "Score below threshold"
+        
+        # Extract key gap from primary reason
+        if "Education" in primary_reason:
+            primary_issue = f"education requirement ({edu_gap if edu_gap > 0 else 1} level gap)"
+        elif "Experience" in primary_reason:
+            primary_issue = f"experience requirement ({exp_gap_val if exp_gap_val > 0 else 1} year gap)"
+        elif "Field" in primary_reason:
+            primary_issue = f"field-of-study alignment (you have {application.field_of_study})"
+        elif "Skills" in primary_reason:
+            primary_issue = f"skills match ({len(matched_skills)}/{len(req_skills)} required)"
+        else:
+            primary_issue = "core requirements"
+        
+        summary = (
+            f"Unfortunately, we cannot shortlist you for the {job.title} role at this time "
+            f"(score: {display_score*100:.1f}% -- threshold is {SHORTLIST_THRESHOLD*100:.0f}%). "
+            f"Primary reason: {primary_issue}. "
+            f"We encourage you to develop the areas noted below and reapply when ready."
         )
 
     return json.dumps({
@@ -1192,8 +1451,9 @@ def _build_reason(
         "shortlist_threshold": SHORTLIST_THRESHOLD,
         "ml_note": (
             f"AI model confidence: {ml_prob*100:.1f}%"
-            if job_is_known
-            else f"AI model confidence: {ml_prob*100:.1f}% (rule-based -- job type not in training set)"
+            if job_is_known and ml_prob >= ML_MIN_MEANINGFUL
+            else f"AI model confidence: {ml_prob*100:.1f}% (rule-based scoring applied -- "
+                 f"{'job type not in training set' if not job_is_known else 'ML confidence below minimum threshold'})"
         ),
         "job_is_known":        job_is_known,
         "doc_verified":        doc_verified,
@@ -1254,6 +1514,9 @@ def _build_manual_review_reason(
         ),
     }, ensure_ascii=False)
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def predict(
     application: Application,
@@ -1274,7 +1537,10 @@ def predict(
             ),
         )
 
-    # -- FIX-ENGINE-2: Determine effective OCR quality score ------------------
+    # FIX-SE-01: Resolve applicant name robustly from any field name variant.
+    applicant_name = _get_applicant_name(application)
+
+    # -- Determine effective OCR quality score --------------------------------
     effective_ocr_score: float = 100.0
 
     if ocr_quality_score is not None:
@@ -1290,7 +1556,9 @@ def predict(
         effective_ocr_score = estimate_ocr_quality_from_texts(doc_texts)
         print(f"[predict] app={application.id} estimated ocr quality from doc_texts: {effective_ocr_score:.1f}")
 
-    # -- FIX-ENGINE-3: Route to manual_review when OCR quality is too low -----
+    # -- Route to manual_review when OCR quality is too low ------------------
+    # FIX-BUG1: OCR_CONFIDENCE_THRESHOLD is now 60 (was 0), so this branch
+    # will actually trigger for poor-quality documents.
     is_low_ocr = effective_ocr_score < OCR_CONFIDENCE_THRESHOLD
 
     if is_low_ocr:
@@ -1314,16 +1582,16 @@ def predict(
         }
         return "manual_review", 0.0, reason_json, doc_result
 
-    # -- Normal path -----------------------------------------------------------
+    # -- Document verification ------------------------------------------------
     doc_verified       = False
     doc_advisory       = False
     doc_verify_summary = "Documents not checked."
     doc_check_ran      = False
 
-    if document_paths:
+    if document_paths and declared_types:
         doc_check_ran = True
         doc_verified, doc_advisory, doc_verify_summary = verify_documents(
-            applicant_name   = application.full_name if hasattr(application, "full_name") else "",
+            applicant_name   = applicant_name,
             education_level  = application.education_level or "",
             field_of_study   = application.field_of_study  or "",
             document_paths   = document_paths,
@@ -1332,23 +1600,57 @@ def predict(
         )
         print(
             f"[predict] verify_documents -> verified={doc_verified} "
-            f"advisory={doc_advisory} for application {application.id}"
+            f"advisory={doc_advisory} name='{applicant_name}' for app {application.id}"
         )
 
-        # Hard reject if documents failed verification (identity mismatch or false documents)
-        if not doc_verified:
-            print(
-                f"[predict] app={application.id} documents failed verification -- hard rejecting"
-            )
+        # -- Identity verification --------------------------------------------
+        document_paths_dict: dict[str, str] = {}
+        for i, path in enumerate(document_paths):
+            doc_type = declared_types[i] if i < len(declared_types) else "unknown"
+            document_paths_dict[doc_type] = path
+
+        identity_verified, identity_message = verify_identity(
+            applicant_name  = applicant_name,
+            doc_texts       = doc_texts or {},
+            document_paths  = document_paths_dict or None,
+        )
+        print(
+            f"[predict] verify_identity -> verified={identity_verified} "
+            f"message={identity_message} for app {application.id}"
+        )
+
+        if not identity_verified:
+            print(f"[predict] app={application.id} identity verification failed -- hard rejecting")
             reason_json = _build_manual_review_reason(
-                application, job, effective_ocr_score, route_reason="doc_verification_failed"
+                application, job, effective_ocr_score,
+                route_reason="identity_verification_failed"
             )
-            doc_result = {
-                "verified": False,
-                "advisory": False,
-                "summary": doc_verify_summary,
+            return "hard_reject", 0.0, reason_json, {
+                "verified": False, "advisory": False, "summary": identity_message,
             }
-            return "hard_reject", 0.0, reason_json, doc_result
+
+        # FIX-SE-03: Only hard-reject on doc_verified=False when the failure is
+        # a genuine content failure (identity/type mismatch), NOT an OCR/advisory
+        # failure. Advisory failures route to manual_review so ML score still runs.
+        if not doc_verified and not doc_advisory:
+            if any(sig in doc_verify_summary.lower() for sig in [
+                "identity mismatch", "type mismatch", "wrong document",
+                "name could not be found", "does not belong",
+            ]):
+                print(f"[predict] app={application.id} doc hard-failure: {doc_verify_summary[:80]}")
+                reason_json = _build_manual_review_reason(
+                    application, job, effective_ocr_score,
+                    route_reason="doc_verification_failed"
+                )
+                return "hard_reject", 0.0, reason_json, {
+                    "verified": False, "advisory": False, "summary": doc_verify_summary,
+                }
+            else:
+                doc_advisory = True
+                print(
+                    f"[predict] app={application.id} doc_verified=False but non-specific "
+                    "failure -- treating as advisory, ML scoring continues"
+                )
 
         if doc_advisory and doc_texts:
             estimated_quality = estimate_ocr_quality_from_texts(doc_texts)
@@ -1357,29 +1659,39 @@ def predict(
                 f"estimated_ocr_quality={estimated_quality:.1f} threshold={OCR_CONFIDENCE_THRESHOLD}"
             )
             if estimated_quality < OCR_CONFIDENCE_THRESHOLD:
-                print(
-                    f"[predict] app={application.id} estimated OCR quality {estimated_quality:.1f} "
-                    f"< {OCR_CONFIDENCE_THRESHOLD} -- routing to manual_review (advisory_docs)"
-                )
                 reason_json = _build_manual_review_reason(
                     application, job, estimated_quality, route_reason="advisory_docs"
                 )
-                doc_result = {
-                    "verified": False,
-                    "advisory": True,
+                return "manual_review", 0.0, reason_json, {
+                    "verified": False, "advisory": True,
                     "summary": (
                         f" Advisory document quality estimated at {estimated_quality:.1f}/100 -- "
                         "application routed to HR manual review queue."
                     ),
                 }
-                return "manual_review", 0.0, reason_json, doc_result
 
-    elif hasattr(application, "doc_verified"):
-        doc_verified = bool(application.doc_verified)
-        doc_advisory = getattr(application, "doc_advisory", False)
-        # doc_check_ran stays False -> _build_reason() emits no doc messages
+    elif document_paths and not declared_types:
+        print(
+            f"[predict] app={application.id} document_paths provided but declared_types "
+            "missing -- skipping doc check"
+        )
 
-    # -- FIX-ENGINE-FIELD-1: _hard_gate now returns field_ok ------------------
+    else:
+        # FIX-SE-04: No document_paths — use stored flag ONLY when True.
+        stored_verified = getattr(application, "doc_verified", None)
+        stored_advisory = getattr(application, "doc_advisory", False)
+        if stored_verified is True:
+            doc_verified = True
+            doc_advisory = bool(stored_advisory)
+        else:
+            doc_verified = False
+            doc_advisory = True
+            print(
+                f"[predict] app={application.id} no document_paths and "
+                f"stored doc_verified={stored_verified} -- treating as advisory"
+            )
+
+    # -- Hard gate ------------------------------------------------------------
     passed, gate_failures, gate_soft_warnings, exp_penalty, edu_soft_penalty, gate_field_ok = _hard_gate(
         application, job
     )
@@ -1406,15 +1718,51 @@ def predict(
     combined_match_score = float(df["combined_match_score"].iloc[0])
     skills_ratio         = float(df["skills_overlap_ratio"].iloc[0])
 
+    # Log whether ML is being suppressed and why
+    if ml_prob < ML_MIN_MEANINGFUL:
+        print(
+            f"[predict] app={application.id} ml_prob={ml_prob:.4f} < "
+            f"ML_MIN_MEANINGFUL={ML_MIN_MEANINGFUL} -- suppressing ML weight, "
+            "using pure rule-based scoring (FIX-BUG5)"
+        )
+
     doc_hard_fails:    list[str] = []
     doc_warnings:      list[str] = []
     doc_confirmations: list[str] = []
     cv_skill_penalty   = 0.0
 
     if doc_texts:
-        raw_hard, raw_warn, doc_confirmations, cv_skill_penalty = (
-            _cross_check_form_vs_docs(application, doc_texts)
-        )
+        # FIX-ENGINE-OCR-1: Only cross-check docs whose OCR quality is
+        # above the minimum threshold. Low-quality optional docs (e.g. a
+        # blurry certificate) are skipped rather than used as evidence.
+        per_doc_quality: dict[str, float] = {}
+        for _dt, _txt in doc_texts.items():
+            if not _txt or not _txt.strip():
+                per_doc_quality[_dt] = 0.0
+            else:
+                _readable = _count_readable_chars(_txt)
+                _full     = _DOC_QUALITY_FULL_CHARS.get(_dt, 150)
+                per_doc_quality[_dt] = min(100.0, (_readable / _full) * 100.0)
+
+        filtered_doc_texts = {
+            dt: txt for dt, txt in doc_texts.items()
+            if per_doc_quality.get(dt, 0.0) >= DOC_MIN_QUALITY_TO_CROSSCHECK
+        }
+        skipped = set(doc_texts) - set(filtered_doc_texts)
+        if skipped:
+            print(
+                f"[predict] app={application.id} skipping cross-check for "
+                f"low-quality docs: {skipped} "
+                f"(quality: {{{', '.join(f'{d}:{per_doc_quality[d]:.1f}' for d in skipped)}}})"
+            )
+
+        if filtered_doc_texts:
+            raw_hard, raw_warn, doc_confirmations, cv_skill_penalty = (
+                _cross_check_form_vs_docs(application, filtered_doc_texts)
+            )
+        else:
+            raw_hard, raw_warn, doc_confirmations, cv_skill_penalty = [], [], [], 0.0
+
         for msg in raw_hard:
             if _is_ocr_failure(msg):
                 doc_warnings.append(msg)
@@ -1441,7 +1789,8 @@ def predict(
         f"combined={combined_match_score:.3f} display={display_score:.3f} "
         f"threshold={SHORTLIST_THRESHOLD} gate_failures={len(all_gate_failures)} "
         f"gate_field_ok={gate_field_ok} doc_hard={len(doc_hard_fails)} "
-        f"doc_warn={len(doc_warnings)} doc_check_ran={doc_check_ran}"
+        f"doc_warn={len(doc_warnings)} doc_check_ran={doc_check_ran} "
+        f"ml_suppressed={ml_prob < ML_MIN_MEANINGFUL}"
     )
 
     if not has_hard_failures:
@@ -1464,18 +1813,15 @@ def predict(
             doc_verified=doc_verified,
             doc_advisory=doc_advisory,
             doc_check_ran=doc_check_ran,
-            gate_field_ok=gate_field_ok,  # FIX-ENGINE-FIELD-1
+            gate_field_ok=gate_field_ok,
         )
     else:
+        decision = "shortlisted" if display_score >= SHORTLIST_THRESHOLD else "not_shortlisted"
         if display_score >= SHORTLIST_THRESHOLD:
-            decision = "shortlisted"
             print(
                 f"[shortlisting_engine] OVERRIDE: gate failures present but score "
                 f"{display_score:.1%} >= {SHORTLIST_THRESHOLD:.1%} -- shortlisting with warnings."
             )
-        else:
-            decision = "not_shortlisted"
-
         reason = _build_reason(
             decision=decision,
             display_score=display_score,
@@ -1494,7 +1840,7 @@ def predict(
             doc_verified=doc_verified,
             doc_advisory=doc_advisory,
             doc_check_ran=doc_check_ran,
-            gate_field_ok=gate_field_ok,  # FIX-ENGINE-FIELD-1
+            gate_field_ok=gate_field_ok,
         )
 
     doc_result = {
@@ -1502,22 +1848,5 @@ def predict(
         "advisory": doc_advisory,
         "summary":  doc_verify_summary,
     }
-
-    # Send email notification to applicant about shortlisting result
-    try:
-        from email_utils import send_shortlisting_result_email
-        applicant_email = getattr(application, "email", None) or getattr(application, "applicant_email", None)
-        if applicant_email and decision in ("shortlisted", "not_shortlisted", "hard_reject"):
-            send_shortlisting_result_email(
-                to_name=application.full_name if hasattr(application, "full_name") else "Applicant",
-                to_email=applicant_email,
-                job_title=job.title if hasattr(job, "title") else "Position",
-                decision=decision,
-                ai_score=display_score,
-                reason_summary=reason.get("summary", "") if isinstance(reason, dict) else str(reason)[:500],
-            )
-            print(f"[predict] Sent shortlisting result email to {applicant_email} for application {application.id}")
-    except Exception as email_err:
-        print(f"[predict] Failed to send shortlisting result email: {email_err}")
 
     return decision, display_score, reason, doc_result

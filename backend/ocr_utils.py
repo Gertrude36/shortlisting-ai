@@ -706,40 +706,55 @@ def _build_preprocessing_variants(img, fast_mode: bool = False) -> list:
         grey    = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         grey    = _border_remove(grey)
         is_dark = _detect_dark_background(grey)
+        
+        # Enhanced preprocessing with more aggressive techniques
         for recipe in [
+            # Aggressive adaptive thresholding
             lambda g: _morphological_clean(_binarise_adaptive(_clahe(
                 _denoise(_gamma_correction(_deskew(_upscale_if_small(
                     cv2.bitwise_not(g) if is_dark else g
                 )), gamma=1.4))))),
+            # Otsu thresholding
             lambda g: _morphological_clean(_binarise_otsu(_clahe(
                 _denoise(_deskew(_upscale_if_small(
                     cv2.bitwise_not(g) if is_dark else g
                 )))))),
+            # Enhanced contrast with Gaussian blur
+            lambda g: _binarise_adaptive(_clahe(_sharpen(_gamma_correction(
+                cv2.GaussianBlur(_upscale_if_small(g, 1800), (3, 3), 0), 1.5)))),
+            # Bilateral filter for noise reduction while preserving edges
+            lambda g: _binarise_adaptive(_clahe(cv2.bilateralFilter(
+                _upscale_if_small(g, 1200), 9, 75, 75))),
         ]:
             try:
                 variants.insert(0, _cv2_to_pil(recipe(grey.copy())))
             except Exception:
                 pass
+        
         hd = _high_dpi_variant(img)
         if hd:
             variants.append(hd)
         col = _colour_variant(img)
         if col:
             variants.append(col)
+        
+        # Additional preprocessing variants for low-quality images
         try:
-            g_f = _upscale_if_small(grey.copy())
+            g_f = _upscale_if_small(grey.copy(), 2000)
             g_f = cv2.equalizeHist(g_f)
             g_f = _gamma_correction(g_f, gamma=1.6)
             g_f = _denoise(g_f)
+            g_f = _clahe(g_f)
             g_f = _binarise_adaptive(g_f)
             g_f = _morphological_clean(g_f)
             variants.append(_cv2_to_pil(g_f))
         except Exception:
             pass
+        
         if is_dark:
             try:
                 g_g = cv2.bitwise_not(grey.copy())
-                g_g = _upscale_if_small(g_g)
+                g_g = _upscale_if_small(g_g, 2000)
                 g_g = _deskew(g_g)
                 g_g = _gamma_correction(g_g, gamma=1.2)
                 g_g = _denoise(g_g)

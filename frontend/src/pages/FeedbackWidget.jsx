@@ -343,7 +343,7 @@ export default function FeedbackWidget() {
                       color: msgLenOk ? '#059669' : msgLenStarted ? '#ef4444' : '#9ca3af',
                       marginTop: 4, textAlign: 'right', fontWeight: 600,
                     }}>
-                      {msgLen} chars {msgLenStarted && !msgLenOk ? '(min 10)' : msgLenOk ? '✓' : ''}
+                      {msgLen} chars {msgLenStarted && !msgLenOk ? '(min 10)' : msgLenOk ? 'OK' : ''}
                     </div>
                   </div>
 
