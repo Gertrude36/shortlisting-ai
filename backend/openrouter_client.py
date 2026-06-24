@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL       = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
-OPENROUTER_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY  = ""  # Disabled - no credits available, using local OCR pipeline only
 SITE_URL            = os.getenv("SITE_URL", "http://localhost:3000")
 APP_NAME            = os.getenv("APP_NAME", "RecruitmentSystem")
 

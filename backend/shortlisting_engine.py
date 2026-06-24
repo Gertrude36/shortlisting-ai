@@ -65,6 +65,7 @@ Fixes applied (relative to the uploaded version):
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from datetime import datetime
@@ -105,12 +106,10 @@ from ai_matcher import (
 # 54% are shortlisted, matching the operator's stated requirement.
 SHORTLIST_THRESHOLD = 0.54
 
-# FIX-BUG1: Raised from 0 → 60.
-# At 0 the condition `effective_ocr_score < OCR_CONFIDENCE_THRESHOLD` was
-# never True (quality is always ≥ 0), so the manual-review route was
-# completely unreachable and every application — even with blank/unreadable
-# documents — went straight to ML scoring.
-OCR_CONFIDENCE_THRESHOLD = 60
+# FIX-BUG1: Raised from 0 → 60 by default.
+# Allow operators to override via the `SHORTLIST_OCR_THRESHOLD` env var
+# (useful for low-resource OCR environments). Value is 0-100.
+OCR_CONFIDENCE_THRESHOLD = int(os.environ.get("SHORTLIST_OCR_THRESHOLD", "60"))
 
 # FIX-BUG5: Minimum ml_prob below which the ML component is suppressed
 # entirely in favour of pure rule-based scoring. A near-zero ML probability
@@ -508,10 +507,34 @@ def _get_applicant_name(application: Application) -> str:
 # ---------------------------------------------------------------------------
 
 def _job_req_from_db(job: Job) -> dict:
+    """
+    Normalize job requirement fields from the DB into the internal dict.
+
+    Additionally, parse embedded minimum experience indicators like
+    "[min 2 yrs]" that may appear in the `required_education_levels` free-text
+    (some jobs were created with that note in the education field instead of
+    populating the numeric `required_min_experience` column).
+
+    When `job.required_min_experience` is unset (0) but a marker like
+    "[min N yrs]" exists, adopt that value as the required minimum.
+    """
+    req_min = int(job.required_min_experience or 0)
+    # Try to extract a fallback min experience value from the human-readable
+    # Required_Education_Levels string, e.g. "Diploma ... [min 2 yrs]".
+    try:
+        txt = (job.required_education_levels or "")
+        m = re.search(r"\[\s*min\s*(\d+)\s*yrs?\s*\]", txt, re.I)
+        if m:
+            parsed = int(m.group(1))
+            if req_min <= 0:
+                req_min = parsed
+    except Exception:
+        pass
+
     return {
         "Required_Education_Levels": job.required_education_levels or "Bachelor's",
         "Required_Fields":           job.required_fields           or "",
-        "Required_Min_Experience":   int(job.required_min_experience or 0),
+        "Required_Min_Experience":   int(req_min),
         "Required_Max_Experience":   int(job.required_max_experience or 99),
         "Required_Skills":           job.required_skills            or "",
         "Required_Certifications":   job.required_certifications    or "",

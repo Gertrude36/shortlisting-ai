@@ -51,10 +51,8 @@ except ImportError:
     DOCX_AVAILABLE = False
     logger.warning("python-docx not installed. DOCX extraction unavailable.")
 
-from openrouter_client import chat_completion_json, vision_completion, OpenRouterError
-
-# Determine if OpenRouter API key is present; allow local-only mode when absent
-AI_ENABLED = bool(os.environ.get("OPENROUTER_API_KEY"))
+# OpenRouter API disabled by design; use only local extraction and OCR.
+AI_ENABLED = False
 # -- Constants ----------------------------------------------------------------
 
 SUPPORTED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
@@ -174,20 +172,14 @@ def _ai_extract_from_text(
     hint:             Optional[str] = None,
     applicant_name:   Optional[str] = None,
 ) -> dict:
-    """Send raw text to OpenRouter for structured extraction."""
-    user_msg = f"Extract information from this document text:\n\n{raw_text}"
-    if hint:
-        user_msg = f"This appears to be a {hint}.\n\n" + user_msg
-    if applicant_name:
-        user_msg += f"\n\nThe applicant's name is: {applicant_name}"
-
-    result = chat_completion_json(
-        messages=[{"role": "user", "content": user_msg}],
-        system_prompt=EXTRACTION_SYSTEM_PROMPT,
-        temperature=0.1,
-        max_tokens=2048,
-    )
-    return result
+    """Parse raw text locally using heuristic extraction rules."""
+    local = _local_parse_text(raw_text)
+    if local:
+        return local
+    return {
+        "document_type": hint or "unknown",
+        "raw_text": raw_text,
+    }
 
 
 def _local_parse_text(raw_text: str) -> dict:
@@ -205,7 +197,6 @@ def _local_parse_text(raw_text: str) -> dict:
     # Normalize
     norm = re.sub(r"\r\n", "\n", txt)
 
-    # Skills: look for a 'skills' heading
     skills = []
     m = re.search(r"(?im)^\s*skills?\s*[:\-]?\s*(.+)$", norm)
     if m:
@@ -219,6 +210,26 @@ def _local_parse_text(raw_text: str) -> dict:
             block = rest
         parts = re.split(r"[,;\n\|\\/]+", block)
         skills = [p.strip() for p in parts if len(p.strip()) > 1]
+        # Filter out document metadata and metadata phrases
+        metadata_phrases = [
+            "for a better", "this is to certify", "this is hereby", "be it known",
+            "awarded", "department of", "republic of", "ministry of", "institute of",
+            "certificate of", "diploma in", "certified that", "pleased to",
+        ]
+        filtered = []
+        for skill in skills:
+            # Skip skills that look like extracted document boilerplate
+            skill_lower = skill.lower()
+            if any(phrase in skill_lower for phrase in metadata_phrases):
+                continue
+            # Skip very long entries that span multiple words (likely full sentences)
+            if len(skill) > 100:
+                continue
+            # Skip entries that look like document text
+            if skill.count(" ") > 15:  # More than 15 words suggests it's not a skill
+                continue
+            filtered.append(skill)
+        skills = filtered
 
     # Certifications
     certs = []
@@ -228,12 +239,18 @@ def _local_parse_text(raw_text: str) -> dict:
         parts = re.split(r"[,;\n\|]+", block)
         certs = [p.strip() for p in parts if p.strip()]
 
-    # Education: find 'education' heading and parse following lines
+    # Education: look for 'education' heading or common synonyms and parse following lines
     education = []
-    em = re.search(r"(?im)^\s*education\s*$", norm)
+    # Match headings like 'Education', 'Education:', 'EDUCATION', 'Formation', 'Studies', etc.
+    em = re.search(r"(?im)^\s*(education|formation|studies|academic)\s*[:\-]?\s*(.*)$", norm)
     if em:
+        # If heading has trailing text on same line, include it; otherwise capture following lines
+        same_line = em.group(2).strip()
         after = norm[em.end():]
-        lines = [l.strip() for l in after.splitlines() if l.strip()][:8]
+        if same_line:
+            lines = [same_line] + [l.strip() for l in after.splitlines() if l.strip()][:7]
+        else:
+            lines = [l.strip() for l in after.splitlines() if l.strip()][:8]
         for ln in lines:
             # try to find degree and year
             year = None
@@ -246,13 +263,77 @@ def _local_parse_text(raw_text: str) -> dict:
                 if re.search(re.escape(d), ln, re.I):
                     deg = d
                     break
-            # attempt to capture field after 'in'
+            # attempt to capture field after 'in' or 'of'
             field = None
-            mfield = re.search(r" in ([A-Za-z &+-]{2,40})", ln)
+            mfield = re.search(r"(?:in|of) ([A-Za-z &+\-]{2,60})", ln)
             if mfield:
                 field = mfield.group(1).strip()
             if deg or field or year:
                 education.append({"degree": deg or "", "field": field or "", "year": year or "", "raw": ln})
+
+    # If no explicit 'Education' block was found, try to detect diploma/certificate
+    # lines commonly found on diploma images (e.g. 'Diploma in ...', 'awarded the Diploma in ...')
+    if not education:
+        lines = [l.strip() for l in norm.splitlines() if l.strip()]
+        for ln in lines:
+            if re.search(r"\bdiploma\b", ln, re.I):
+                # try to capture 'Diploma in <field>' or 'Diploma - <field>'
+                m = re.search(r"diploma(?: in|:|\s*-)?\s*([A-Za-z &+\-]{2,60})", ln, re.I)
+                field = m.group(1).strip() if m else ""
+                y = re.search(r"(19|20)\d{2}", ln)
+                year = y.group(0) if y else ""
+                education.append({"degree": "Diploma", "field": field, "year": year, "raw": ln})
+
+        # phrases like 'awarded the Diploma in Computer Science by Example University, 2018'
+        for m in re.finditer(r"awarded the (?:Diploma|Certificate) in ([A-Za-z &+\-]{2,60})(?:,?\s*(?:by|from)\s*([^,\n]+))?(?:[,\s]*(19|20)\d{2})?", norm, re.I):
+            field = m.group(1).strip()
+            year = m.group(3) if m.group(3) else ""
+            education.append({"degree": "Diploma", "field": field, "year": year, "raw": m.group(0)})
+
+    # Deduplicate and normalize education entries
+    if education:
+        seen = set()
+        normalized = []
+        for e in education:
+            key = (e.get('degree','').lower().strip(), e.get('field','').lower().strip(), e.get('year','').strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            # normalize field spacing
+            e['field'] = re.sub(r"\s+"," ", e.get('field','')).strip()
+            normalized.append(e)
+        education = normalized
+
+        # Experience: look for 'experience' or 'work experience' heading and extract years
+        experience_years = 0
+        exp_match = re.search(r"(?im)^\s*(?:work\s+)?experience\s*[:\-]?\s*(.*)$", norm)
+        if exp_match:
+            exp_block = exp_match.group(1) + "\n" + "\n".join(norm[exp_match.end():].splitlines()[:20])
+            # Look for "X years" or "X+ years"
+            years_match = re.search(r"(\d+)\+?\s*years?(?:\s+of)?\s+(?:professional\s+)?experience", exp_block, re.I)
+            if years_match:
+                try:
+                    experience_years = int(years_match.group(1))
+                except (ValueError, AttributeError):
+                    pass
+    
+        # If no explicit experience years, try to calculate from date ranges in experience section
+        if experience_years == 0 and exp_match:
+            date_matches = re.findall(r"(?:19|20)\d{2}\s*(?:–|-|to)\s*(?:19|20)\d{2}|(?:19|20)\d{2}\s*(?:–|-|to)\s*(?:present|current|now)", exp_block, re.I)
+            if date_matches:
+                years_list = []
+                for date_range in date_matches:
+                    years = re.findall(r"((?:19|20)\d{2})", date_range)
+                    if len(years) >= 2:
+                        try:
+                            diff = int(years[1]) - int(years[0])
+                            if 0 < diff < 70:  # Sanity check
+                                years_list.append(diff)
+                        except (ValueError, IndexError):
+                            pass
+                if years_list:
+                    # Use the most recent/longest experience
+                    experience_years = max(years_list) if years_list else 0
 
     if skills:
         out["skills"] = skills
@@ -260,6 +341,8 @@ def _local_parse_text(raw_text: str) -> dict:
         out["certifications"] = certs
     if education:
         out["education"] = education
+        if experience_years > 0:
+            out["experience_years"] = experience_years
 
     return out
 
@@ -269,28 +352,25 @@ def _ai_extract_from_image(
     hint:            Optional[str] = None,
     applicant_name:  Optional[str] = None,
 ) -> dict:
-    """
-    Send image directly to OpenRouter vision model for extraction.
-    Used as fallback when OCR quality is poor (e.g. Rwandan IDs).
-    FIX-EXT-2: system prompt now passed; FIX-EXT-1: safe JSON parsing.
-    """
-    b64, media_type = _image_to_base64(file_path)
+    """Extract text from image locally via OCR and parse with heuristics."""
+    try:
+        ocr_text = _extract_text_from_image_ocr(file_path)
+    except Exception as exc:
+        return {
+            "document_type": hint or "unknown",
+            "raw_text": "",
+            "error": f"Local OCR failed: {exc}",
+        }
 
-    prompt = "Extract all information from this document and return a JSON object as instructed."
-    if hint:
-        prompt = f"This document appears to be a {hint}. " + prompt
-    if applicant_name:
-        prompt += f" The applicant's name is: {applicant_name}."
+    local = _local_parse_text(ocr_text)
+    if local:
+        local["raw_text"] = ocr_text
+        return local
 
-    raw = vision_completion(
-        image_base64=b64,
-        media_type=media_type,
-        prompt=prompt,
-        max_tokens=1024,
-    )
-
-    # FIX-EXT-1: use safe parser
-    return _parse_json_response(raw)
+    return {
+        "document_type": hint or "unknown",
+        "raw_text": ocr_text,
+    }
 
 
 def _render_pdf_page_to_base64(file_path: str) -> tuple[str, str] | tuple[None, None]:
@@ -377,12 +457,7 @@ def extract_document(
                     result = local
                     result["raw_text"] = raw_text
                     extraction_method = "pdfplumber+local"
-                elif AI_ENABLED:
-                    result = _ai_extract_from_text(raw_text, hint=document_type_hint,
-                                                   applicant_name=applicant_name)
-                    extraction_method = "pdfplumber+ai"
                 else:
-                    # No AI available and local parse empty: return raw_text only
                     result = {"document_type": document_type_hint or "unknown", "raw_text": raw_text}
                     extraction_method = "pdfplumber_raw"
 
@@ -392,10 +467,6 @@ def extract_document(
                     result = local
                     result["raw_text"] = raw_text
                     extraction_method = "pdfplumber_sparse+local"
-                elif AI_ENABLED:
-                    result = _ai_extract_from_text(raw_text, hint=document_type_hint,
-                                                   applicant_name=applicant_name)
-                    extraction_method = "pdfplumber_sparse+ai"
                 else:
                     result = {"document_type": document_type_hint or "unknown", "raw_text": raw_text}
                     extraction_method = "pdfplumber_sparse_raw"
@@ -405,52 +476,33 @@ def extract_document(
                 logger.info("PDF has no extractable text: %s -- trying vision AI or local render+OCR", file_name)
                 b64, media_type = _render_pdf_page_to_base64(file_path)
                 if b64:
-                        # If AI is enabled, prefer vision model
-                        if AI_ENABLED:
-                            prompt = (
-                                "Extract all information from this document and return a JSON object as instructed."
-                            )
-                            if document_type_hint:
-                                prompt = f"This document appears to be a {document_type_hint}. " + prompt
-                            if applicant_name:
-                                prompt += f" The applicant's name is: {applicant_name}."
-                            raw = vision_completion(
-                                image_base64=b64,
-                                media_type=media_type,
-                                prompt=prompt,
-                                max_tokens=1024,
-                            )
-                            result = _parse_json_response(raw)   # FIX-EXT-1
-                            extraction_method = "pymupdf_vision"
+                    try:
+                        import fitz
+                        from PIL import Image
+                        pix = fitz.open(file_path)[0].get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csRGB)
+                        img_bytes = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_bytes))
+                        if OCR_AVAILABLE:
+                            ocr_text = pytesseract.image_to_string(img, lang="eng+fra")
+                            local = _local_parse_text(ocr_text)
+                            if local:
+                                result = local
+                                result["raw_text"] = ocr_text
+                                extraction_method = "pymupdf_local_ocr"
+                            else:
+                                result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text}
+                                extraction_method = "pymupdf_local_ocr_raw"
                         else:
-                            # Local render -> OCR via pytesseract if available
-                            try:
-                                import fitz
-                                from PIL import Image
-                                pix = fitz.open(file_path)[0].get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csRGB)
-                                img_bytes = pix.tobytes("png")
-                                img = Image.open(io.BytesIO(img_bytes))
-                                if OCR_AVAILABLE:
-                                    ocr_text = pytesseract.image_to_string(img, lang="eng+fra")
-                                    local = _local_parse_text(ocr_text)
-                                    if local:
-                                        result = local
-                                        result["raw_text"] = ocr_text
-                                        extraction_method = "pymupdf_local_ocr"
-                                    else:
-                                        result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text}
-                                        extraction_method = "pymupdf_local_ocr_raw"
-                                else:
-                                    result = {"document_type": document_type_hint or "unknown", "raw_text": "", "error": "No local OCR available"}
-                                    extraction_method = "pymupdf_failed_no_ocr"
-                            except Exception as ve2:
-                                logger.warning("Local render+OCR failed for %s: %s", file_name, ve2)
-                                result = {
-                                    "document_type": document_type_hint or "unknown",
-                                    "raw_text": "",
-                                    "error": "PDF has no extractable text. Local render failed.",
-                                }
-                                extraction_method = "failed"
+                            result = {"document_type": document_type_hint or "unknown", "raw_text": "", "error": "No local OCR available"}
+                            extraction_method = "pymupdf_failed_no_ocr"
+                    except Exception as ve2:
+                        logger.warning("Local render+OCR failed for %s: %s", file_name, ve2)
+                        result = {
+                            "document_type": document_type_hint or "unknown",
+                            "raw_text": "",
+                            "error": "PDF has no extractable text. Local render failed.",
+                        }
+                        extraction_method = "failed"
                 else:
                     result = {
                         "document_type": document_type_hint or "unknown",
@@ -462,39 +514,33 @@ def extract_document(
         # -- Images (ID cards, scanned docs) ----------------------------------
         elif ext in SUPPORTED_IMAGE_TYPES:
             if force_vision or not OCR_AVAILABLE:
-                result = _ai_extract_from_image(file_path, hint=document_type_hint,
-                                                applicant_name=applicant_name)
-                extraction_method = "vision"
-            else:
-                try:
-                    ocr_text = _extract_text_from_image_ocr(file_path)
-                    raw_text_captured = ocr_text
-                except Exception as e:
-                    logger.warning("OCR failed for %s: %s", file_name, e)
-                    ocr_text = ""
-
-                if len(ocr_text.strip()) > 30:
-                    local = _local_parse_text(ocr_text)
-                    if local:
-                        result = local
-                        result["raw_text"] = ocr_text
-                        extraction_method = "ocr+local"
-                    elif AI_ENABLED:
-                        result = _ai_extract_from_text(ocr_text, hint=document_type_hint,
-                                                       applicant_name=applicant_name)
-                        extraction_method = "ocr+ai"
-                    else:
-                        result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text}
-                        extraction_method = "ocr_raw"
+                if not OCR_AVAILABLE:
+                    result = {
+                        "document_type": document_type_hint or "unknown",
+                        "raw_text": "",
+                        "error": "No local OCR available"
+                    }
+                    extraction_method = "failed_no_ocr"
                 else:
-                    # Poor OCR quality -> fall back to vision or local render
-                    logger.info("Low OCR confidence for %s, falling back to vision/local", file_name)
-                    if AI_ENABLED:
-                        result = _ai_extract_from_image(file_path, hint=document_type_hint,
-                                                        applicant_name=applicant_name)
-                        extraction_method = "vision_fallback"
+                    try:
+                        ocr_text = _extract_text_from_image_ocr(file_path)
+                        raw_text_captured = ocr_text
+                    except Exception as e:
+                        logger.warning("OCR failed for %s: %s", file_name, e)
+                        ocr_text = ""
+
+                    if len(ocr_text.strip()) > 30:
+                        local = _local_parse_text(ocr_text)
+                        if local:
+                            result = local
+                            result["raw_text"] = ocr_text
+                            extraction_method = "ocr+local"
+                        else:
+                            result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text}
+                            extraction_method = "ocr_raw"
                     else:
-                        # Try local vision OCR (same as render path)
+                        # Poor OCR quality -> fall back to local render
+                        logger.info("Low OCR confidence for %s, falling back to local render", file_name)
                         try:
                             import fitz
                             from PIL import Image
@@ -517,24 +563,72 @@ def extract_document(
                         except Exception:
                             result = {"document_type": document_type_hint or "unknown", "raw_text": "", "error": "Vision/local OCR failed"}
                             extraction_method = "vision_failed"
+            else:
+                try:
+                    ocr_text = _extract_text_from_image_ocr(file_path)
+                    raw_text_captured = ocr_text
+                except Exception as e:
+                    logger.warning("OCR failed for %s: %s", file_name, e)
+                    ocr_text = ""
+
+                if len(ocr_text.strip()) > 30:
+                    local = _local_parse_text(ocr_text)
+                    if local:
+                        result = local
+                        result["raw_text"] = ocr_text
+                        extraction_method = "ocr+local"
+                    else:
+                        result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text}
+                        extraction_method = "ocr_raw"
+                else:
+                    # Poor OCR quality -> fall back to local render
+                    logger.info("Low OCR confidence for %s, falling back to local render", file_name)
+                    try:
+                        import fitz
+                        from PIL import Image
+                        pix = fitz.open(file_path)[0].get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csRGB)
+                        img_bytes = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_bytes))
+                        if OCR_AVAILABLE:
+                            ocr_text2 = pytesseract.image_to_string(img, lang="eng+fra")
+                            local2 = _local_parse_text(ocr_text2)
+                            if local2:
+                                result = local2
+                                result["raw_text"] = ocr_text2
+                                extraction_method = "vision_local_ocr"
+                            else:
+                                result = {"document_type": document_type_hint or "unknown", "raw_text": ocr_text2}
+                                extraction_method = "vision_local_ocr_raw"
+                        else:
+                            result = {"document_type": document_type_hint or "unknown", "raw_text": "", "error": "No local OCR available"}
+                            extraction_method = "vision_failed_no_ocr"
+                    except Exception:
+                        result = {"document_type": document_type_hint or "unknown", "raw_text": "", "error": "Vision/local OCR failed"}
+                        extraction_method = "vision_failed"
 
         # -- DOCX -------------------------------------------------------------
         elif ext in SUPPORTED_DOCX_TYPES:
             if DOCX_AVAILABLE:
                 raw_text = _extract_text_from_docx(file_path)
                 raw_text_captured = raw_text
-                result = _ai_extract_from_text(raw_text, hint=document_type_hint,
-                                               applicant_name=applicant_name)
-                extraction_method = "docx+ai"
+                local = _local_parse_text(raw_text)
+                if local:
+                    result = local
+                    result["raw_text"] = raw_text
+                    extraction_method = "docx+local"
+                elif AI_ENABLED:
+                    result = _ai_extract_from_text(raw_text, hint=document_type_hint,
+                                                   applicant_name=applicant_name)
+                    extraction_method = "docx+ai"
+                else:
+                    result = {"document_type": document_type_hint or "unknown", "raw_text": raw_text}
+                    extraction_method = "docx_raw"
             else:
                 result = {"error": "python-docx not available", "document_type": "unknown"}
 
         else:
             result = {"error": f"Unsupported file type: {ext}", "document_type": "unknown"}
 
-    except OpenRouterError as e:
-        logger.error("OpenRouter error during extraction of %s: %s", file_name, e)
-        result = {"error": str(e), "document_type": "unknown"}
     except Exception as e:
         logger.error("Unexpected error extracting %s: %s", file_name, e)
         result = {"error": str(e), "document_type": "unknown"}
@@ -572,7 +666,7 @@ def extract_multiple_documents(
         }
     """
     extracted = []
-    merged    = {}
+    merged = {}
 
     for doc in documents:
         result = extract_document(
@@ -582,12 +676,54 @@ def extract_multiple_documents(
         )
         extracted.append(result)
 
-        # Merge non-error, non-metadata fields into profile
+        # Merge non-error, non-metadata fields into profile.
+        # For list-like fields (skills, certifications, education, experience, languages)
+        # combine entries across documents. For strings like raw_text, concatenate.
         for key, value in result.items():
             if key in ("file_name", "extraction_method", "error"):
                 continue
-            if key not in merged and value:
-                merged[key] = value
+            if not value:
+                continue
+
+            existing = merged.get(key)
+
+            # Merge lists by extending
+            if isinstance(value, list):
+                if existing is None:
+                    merged[key] = list(value)
+                elif isinstance(existing, list):
+                    # Avoid duplicates while preserving order
+                    for item in value:
+                        if item not in existing:
+                            existing.append(item)
+                else:
+                    # existing is scalar; convert to list
+                    merged[key] = [existing] + [v for v in value if v != existing]
+
+            # Merge dict-like (e.g., education/experience entries as list handled above)
+            elif isinstance(value, dict):
+                if existing is None:
+                    merged[key] = dict(value)
+                elif isinstance(existing, dict):
+                    # prefer existing keys, but fill missing ones
+                    for k2, v2 in value.items():
+                        if k2 not in existing or not existing.get(k2):
+                            existing[k2] = v2
+                else:
+                    # keep existing scalar, skip
+                    pass
+
+            # Strings: concatenate raw_text or other free text fields
+            else:
+                if existing is None:
+                    merged[key] = value
+                elif isinstance(existing, str):
+                    if key == "raw_text":
+                        # keep both raw texts separated
+                        merged[key] = existing.rstrip() + "\n\n" + str(value).lstrip()
+                    else:
+                        # keep the first non-empty value
+                        pass
 
     candidate_name = merged.get("full_name") or applicant_name
 

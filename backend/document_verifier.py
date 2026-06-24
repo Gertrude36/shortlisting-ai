@@ -65,12 +65,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # OpenRouter client (already present in the project)
 # ---------------------------------------------------------------------------
-try:
-    from openrouter_client import chat_completion_json, vision_completion, OpenRouterError
-    OPENROUTER_AVAILABLE = True
-except ImportError:
-    OPENROUTER_AVAILABLE = False
-    logger.warning("openrouter_client not available -- AI verification disabled.")
+# OpenRouter API disabled by design; use only local verification logic.
+OPENROUTER_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # OCR utils (already present in the project)
@@ -348,94 +344,18 @@ def _ai_verify_with_vision(
     applicant_name: str,
     ocr_text: str = "",
 ) -> dict:
-    """Call OpenRouter vision model to verify the document."""
-    if not OPENROUTER_AVAILABLE:
-        return _advisory_fallback(declared_type, "AI verification unavailable")
+    """Verify the document locally using OCR text and heuristic checks."""
+    if not ocr_text or _count_alpha(ocr_text) < MIN_ALPHA.get(declared_type, 10):
+        ocr_text = _local_ocr_text(file_path, declared_type)
 
-    b64, media_type = _get_image_base64(file_path)
+    if not ocr_text or _count_alpha(ocr_text) < MIN_ALPHA.get(declared_type, 10):
+        return _advisory_fallback(declared_type, "Local OCR text unavailable for verification")
 
-    ocr_context = ""
-    if ocr_text and _count_alpha(ocr_text) >= 10:
-        ocr_context = (
-            f"\n\nOCR text extracted from the document (may be incomplete):\n"
-            f"{ocr_text[:2000]}"
-        )
-
-    prompt = (
-        f"Declared document type: {declared_type}\n"
-        f"Applicant full name: {applicant_name}\n"
-        f"{ocr_context}\n\n"
-        "Verify this document according to your instructions and return JSON only."
+    return _ai_verify_text_only(
+        ocr_text=ocr_text,
+        declared_type=declared_type,
+        applicant_name=applicant_name,
     )
-
-    # FIX-DV-03: initialise 'raw' before the try block so the except clause
-    # can always reference it without risk of NameError.
-    raw: str = ""
-
-    try:
-        if b64 and media_type:
-            # FIX-DV-01: max_tokens raised to _AI_MAX_TOKENS (1024)
-            # FIX-OR-04: system_prompt forwarded so model gets full instructions
-            raw = vision_completion(
-                image_base64=b64,
-                media_type=media_type,
-                prompt=prompt,
-                max_tokens=_AI_MAX_TOKENS,
-                temperature=0.0,
-                system_prompt=_VERIFY_SYSTEM_PROMPT,
-            )
-
-            # FIX-DV-05: if vision returns empty/whitespace, fall through to
-            # text-only path rather than returning a silent advisory.
-            if not raw or not raw.strip():
-                logger.warning(
-                    "_ai_verify_with_vision: vision returned empty response for %s",
-                    os.path.basename(file_path),
-                )
-                raw = ""
-                raise ValueError("vision_completion returned empty response")
-
-        elif ocr_text and _count_alpha(ocr_text) >= 10:
-            # No image available — fall back to text-only AI check
-            result = chat_completion_json(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt=_VERIFY_SYSTEM_PROMPT,
-                temperature=0.0,
-                max_tokens=_AI_MAX_TOKENS,  # FIX-DV-01
-            )
-            return result
-        else:
-            return _advisory_fallback(declared_type, "could not render document for AI check")
-
-        # FIX-DV-02 + FIX-DV-04: robust parse with fence stripping and recovery
-        result = _parse_json_safe(raw, context=f"vision/{declared_type}")
-        if result is not None:
-            return result
-
-        # Parse failed even with recovery — return advisory fallback
-        logger.warning(
-            "AI verification JSON parse failed for %s | raw snippet: %s",
-            declared_type, raw[:300],
-        )
-        return _advisory_fallback(declared_type, "AI response could not be parsed")
-
-    except (ValueError, Exception) as exc:
-        # ValueError covers our intentional raise above; Exception covers
-        # network errors, OpenRouterError, etc.
-        logger.warning("_ai_verify_with_vision error [%s]: %s", declared_type, exc)
-
-        # If we have OCR text, try text-only as a second chance before giving up
-        if ocr_text and _count_alpha(ocr_text) >= MIN_ALPHA.get(declared_type, 30):
-            logger.info(
-                "_ai_verify_with_vision: falling back to text-only for %s", declared_type
-            )
-            return _ai_verify_text_only(
-                ocr_text=ocr_text,
-                declared_type=declared_type,
-                applicant_name=applicant_name,
-            )
-
-        return _advisory_fallback(declared_type, str(exc))
 
 
 def _ai_verify_text_only(
@@ -445,65 +365,23 @@ def _ai_verify_text_only(
     field_of_study: str = "",
     education_level: str = "",
 ) -> dict:
-    """Use text-only AI verification when vision is not possible."""
-    if not OPENROUTER_AVAILABLE:
-        name_ok = _name_found_in_text(applicant_name, ocr_text)
-        return {
-            "accepted":               name_ok,
-            "advisory":               not name_ok,
-            "advisory_note":          "" if name_ok else "Name not found — accepted for background review.",
-            "rejection_reason":       "" if name_ok else f"Your name '{applicant_name}' could not be found in this {declared_type}.",
-            "type_match":             True,
-            "name_found":             name_ok,
-            "quality_ok":             True,
-            "document_type_detected": declared_type,
-            "name_found_value":       "",
-        }
+    """Use local text-only verification rules when vision is not available."""
+    if not ocr_text or not ocr_text.strip():
+        return _advisory_fallback(declared_type, "No OCR text available for verification")
 
-    extra = ""
-    if field_of_study:
-        extra += f"\nDeclared field of study: {field_of_study}"
-    if education_level:
-        extra += f"\nDeclared education level: {education_level}"
-
-    prompt = (
-        f"Declared document type: {declared_type}\n"
-        f"Applicant full name: {applicant_name}{extra}\n\n"
-        f"Document text:\n{ocr_text[:3000]}\n\n"
-        "Verify this document according to your instructions and return JSON only."
-    )
-
-    raw: str = ""  # FIX-DV-03: initialise before try
-    try:
-        # FIX-DV-01: max_tokens raised to _AI_MAX_TOKENS (1024)
-        result = chat_completion_json(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt=_VERIFY_SYSTEM_PROMPT,
-            temperature=0.0,
-            max_tokens=_AI_MAX_TOKENS,
-        )
-        # chat_completion_json already parses JSON internally, but guard anyway
-        if isinstance(result, str):
-            raw = result
-            parsed = _parse_json_safe(raw, context=f"text-only/{declared_type}")
-            return parsed if parsed is not None else _advisory_fallback(declared_type, "text-only parse failed")
-        return result
-
-    except Exception as exc:
-        logger.warning("_ai_verify_text_only error [%s]: %s | raw: %s", declared_type, exc, raw[:200])
-        name_ok = _name_found_in_text(applicant_name, ocr_text)
-        return {
-            "accepted":               True,
-            "advisory":               True,
-            "advisory_note":          f"AI text verification failed ({exc}) — accepted for background review.",
-            "rejection_reason":       "",
-            "type_match":             True,
-            "name_found":             name_ok,
-            "quality_ok":             True,
-            "document_type_detected": declared_type,
-            "name_found_value":       "",
-            "parse_error":            True,  # FIX-DV-06
-        }
+    name_ok = _name_found_in_text(applicant_name, ocr_text)
+    return {
+        "accepted":               name_ok,
+        "advisory":               not name_ok,
+        "advisory_note":          "" if name_ok else "Name not found — accepted for background review.",
+        "rejection_reason":       "" if name_ok else f"Your name '{applicant_name}' could not be found in this {declared_type}.",
+        "type_match":             True,
+        "name_found":             name_ok,
+        "quality_ok":             True,
+        "document_type_detected": declared_type,
+        "name_found_value":       "",
+        "parse_error":            False,
+    }
 
 
 # ---------------------------------------------------------------------------

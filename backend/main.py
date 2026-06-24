@@ -398,88 +398,261 @@ def _ocr_profile_doc_and_cache(profile_doc_id: int) -> None:
         db.close()
 
 
-def _enrich_app_profile_from_documents(app_obj: Application, docs: list, doc_texts: dict[str, str], user: User) -> None:
+def _is_ocr_garbage(text: str) -> bool:
+    """Returns True if the text looks like OCR noise rather than real skills/content."""
+    if not text or not text.strip():
+        return True
+    words = [w for w in text.split() if len(w) >= 3]
+    alpha_words = [w for w in words if w.isalpha()]
+    if not words:
+        return True
+    ratio = len(alpha_words) / len(words)
+    garbage_phrases = [
+        "this is to certify", "for a better destiny",
+        "republic of rwanda", "reburulika", "rwanda polytechnic", "hereby certify",
+    ]
+    lower = text.lower()
+    return any(p in lower for p in garbage_phrases) or ratio < 0.3
+
+
+def _extract_education_from_cv(cv_text: str) -> tuple[str, str]:
     """
-    FIX-EXTRACTION-1: Enrich application profile with structured data extracted from documents.
-    This ensures that document-extracted skills, education, etc. are available for scoring.
+    Extract education level and field of study from CV text.
+    Handles both prose CVs and table-style CVs common in Rwanda.
+    Returns (education_level, field_of_study).
     """
-    try:
-        from document_extractor import extract_multiple_documents
-        
-        if not docs:
-            return
-            
-        docs_for_extract = [
-            {"file_path": d.file_path, "document_type_hint": _doc_type_value(d)}
-            for d in docs if d.file_path and os.path.exists(d.file_path)
+    import re
+    text_lower = cv_text.lower()
+
+    # --- Education level detection (order: most specific first) ---
+    edu_level = ""
+    edu_patterns = [
+        (r"ph\.?d|doctor\s+of\s+philosophy|doctorate",              "PhD"),
+        (r"master(?:'s)?\s+(?:of|in|degree)|msc|m\.sc|mba|m\.eng", "Master's"),
+        (r"bachelor(?:'s)?\s+(?:of|in|degree)|bsc|b\.sc|b\.tech|btech|b\.eng|bachelor\s+of\s+technology|bachelor\s+of\s+science|bachelor\s+of\s+arts|bachelor\s+of\s+commerce", "Bachelor's"),
+        (r"advanced\s+diploma",                                      "Advanced Diploma"),
+        (r"higher\s+national\s+diploma|hnd",                        "HND"),
+        (r"\bdiploma\b(?!\s*\(a[12]\)|\s*a[12]\b)",                 "Diploma"),
+        (r"diploma\s*\(a[12]\)|a[12]\s+diploma|tvet|technical\s+vocational", "A2/TVET"),
+        (r"ordinary\s+level|o[\s\-]?level|form\s+[34]",             "O-Level"),
+    ]
+    for pattern, label in edu_patterns:
+        if re.search(pattern, text_lower):
+            edu_level = label
+            break
+
+    # --- Field of study extraction ---
+    field = ""
+
+    # Strategy 1: prose pattern — "Diploma in X", "Bachelor of X", "degree in X"
+    prose_match = re.search(
+        r'(?:advanced\s+diploma|diploma|bachelor(?:\'s)?|degree|master(?:\'s)?|certificate)\s+(?:of\s+|in\s+|in\s+technology\s+in\s+)?([A-Za-z][A-Za-z\s&/\-]{5,60}?)(?:\s+from|\s+at|\s+\(|\n|,|\.\s|$)',
+        cv_text, re.IGNORECASE
+    )
+    if prose_match:
+        candidate = prose_match.group(1).strip().rstrip('.,')
+        # Reject generic stop-words
+        skip = {'the','and','of','from','at','with','a','an','this','that','which','has','been','is','are'}
+        words = candidate.lower().split()
+        if (5 <= len(candidate) <= 70
+                and not any(w in skip for w in words[:2])
+                and sum(1 for w in words if w not in skip) >= 2):
+            field = candidate
+
+    # Strategy 2: table-style — look for known institution names and extract the option next to them
+    if not field:
+        # Match lines like: "2021-2024  RP HUYE  Irrigation and Drainage Technology"
+        # or "2021-2024  IPRC  Information Technology"
+        table_match = re.search(
+            r'20\d{2}[\s\-–]+20\d{2}[^\n]{0,60}(?:rp\s+huye|iprc|huye\s+college|RP\s+HUYE|IPRC)[^\n]{0,60?}([A-Za-z][A-Za-z\s&/\-]{5,60}?)(?:\n|$)',
+            cv_text, re.IGNORECASE
+        )
+        if table_match:
+            candidate = table_match.group(1).strip().rstrip('.,0123456789 ')
+            if 5 <= len(candidate) <= 70:
+                field = candidate
+
+    # Strategy 3: keyword-based fallback
+    if not field:
+        field_keywords = [
+            ("Information Technology",          ["information technology", "information and communication technology", " ict "]),
+            ("Computer Science",                ["computer science", "computing"]),
+            ("Electrical Engineering",          ["electrical engineering", "electrical and electronics"]),
+            ("Electronics & Telecommunications",["electronics", "telecommunication"]),
+            ("Civil Engineering",               ["civil engineering"]),
+            ("Irrigation & Drainage Technology",["irrigation", "drainage"]),
+            ("Plumbing Technology",             ["plumbing", "water installation", "sanitation technology"]),
+            ("Software Development",            ["software development", "software engineering"]),
+            ("Accounting",                      ["accounting", "finance"]),
+            ("Business Administration",         ["business administration", "business management"]),
+            ("Nursing",                         ["nursing", "midwifery"]),
+            ("Education",                       ["education", "pedagogy"]),
+            ("Agriculture",                     ["agriculture", "agronomy", "crop science"]),
         ]
-        
-        if not docs_for_extract:
-            return
-        
-        print(f"[enrich_profile] app={app_obj.id} attempting structured extraction from {len(docs_for_extract)} documents")
-        
-        extracted = extract_multiple_documents(docs_for_extract, applicant_name=user.full_name)
-        merged = extracted.get("merged_profile", {}) or {}
-        
-        print(f"[enrich_profile] app={app_obj.id} merged_profile keys={list(merged.keys())}")
-        
-        # Education enrichment
-        edu = merged.get("education") or []
-        if edu:
-            first = edu[0] if isinstance(edu, list) else {}
-            extracted_degree = str(first.get("degree") or "").strip()
-            extracted_field = str(first.get("field") or "").strip()
-            
-            if extracted_degree and not app_obj.education_level:
-                app_obj.education_level = extracted_degree
-                print(f"[enrich_profile] app={app_obj.id} SET education_level={app_obj.education_level}")
-            elif extracted_degree and "advanced" in extracted_degree.lower():
-                if not (str(app_obj.education_level or "").lower().find("advanced") >= 0):
-                    app_obj.education_level = extracted_degree
-                    print(f"[enrich_profile] app={app_obj.id} PROMOTE education_level to {app_obj.education_level}")
-            
-            if extracted_field and not app_obj.field_of_study:
-                app_obj.field_of_study = extracted_field
-                print(f"[enrich_profile] app={app_obj.id} SET field_of_study={app_obj.field_of_study}")
-            
-            if (not app_obj.graduation_year or app_obj.graduation_year == 0) and first.get("year"):
+        for label, keywords in field_keywords:
+            if any(k in text_lower for k in keywords):
+                field = label
+                break
+
+    return edu_level, field.title() if field else field
+    """Returns True if the text looks like OCR noise rather than real skills."""
+    if not text or not text.strip():
+        return True
+    # OCR garbage patterns: low word ratio, contains common OCR artifacts
+    words = [w for w in text.split() if len(w) >= 3]
+    alpha_words = [w for w in words if w.isalpha()]
+    if not words:
+        return True
+    ratio = len(alpha_words) / len(words)
+    # Also check for known garbage patterns
+    garbage_phrases = ["this is to certify", "for a better destiny", "republic of rwanda",
+                       "reburulika", "rwanda polytechnic", "hereby certify"]
+    lower = text.lower()
+    has_garbage = any(p in lower for p in garbage_phrases)
+    return has_garbage or ratio < 0.3
+
+
+def _extract_skills_from_cv(cv_text: str) -> list[str]:
+    """Extract skills from CV text using pattern matching — no AI needed."""
+    import re
+    skills = []
+    text_lower = cv_text.lower()
+
+    # Common skill categories to search for
+    skill_keywords = [
+        # Technical skills
+        "python", "javascript", "java", "c++", "c#", "sql", "mysql", "postgresql",
+        "html", "css", "react", "node.js", "django", "flask", "fastapi",
+        "linux", "windows", "ubuntu", "networking", "tcp/ip", "lan", "wan",
+        "hardware", "software", "troubleshooting", "maintenance", "installation",
+        "microsoft office", "excel", "word", "powerpoint", "access",
+        "autocad", "photoshop", "illustrator",
+        # IT specific
+        "network administration", "system administration", "it support",
+        "help desk", "technical support", "server administration",
+        "cloud computing", "aws", "azure", "google cloud",
+        "cybersecurity", "firewall", "vpn",
+        # General professional
+        "project management", "communication", "teamwork", "leadership",
+        "problem solving", "analytical", "research",
+        # Rwanda/Africa context
+        "kinyarwanda", "french", "english", "swahili",
+        "electrical", "electronics", "telecommunications",
+        "procurement", "accounting", "finance", "marketing",
+    ]
+
+    found = []
+    for skill in skill_keywords:
+        if skill in text_lower:
+            found.append(skill.title())
+
+    # Also try to extract from "Skills:" sections
+    skills_section = re.search(
+        r'(?:skills|competencies|expertise)[:\s]+([^\n]{20,300})',
+        cv_text, re.IGNORECASE
+    )
+    if skills_section:
+        raw = skills_section.group(1)
+        # Split by commas, semicolons, bullets
+        parts = re.split(r'[,;|\n•\-*]', raw)
+        for p in parts:
+            p = p.strip()
+            if 3 <= len(p) <= 50 and p.replace(' ', '').isalpha():
+                if p.lower() not in [s.lower() for s in found]:
+                    found.append(p)
+
+    return found[:20]
+
+
+def _extract_certifications_from_text(text: str) -> list[str]:
+    """Extract certification names from document text."""
+    import re
+    certs = []
+    cert_patterns = [
+        r'(?:certificate|certification|certified)[^.\n]{5,80}',
+        r'(?:diploma|degree)[^.\n]{5,80}',
+        r'(?:cisco|microsoft|comptia|oracle|aws|google|pmp)[^.\n]{5,60}',
+    ]
+    for pattern in cert_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for m in matches:
+            m = m.strip()[:80]
+            if m and len(m) > 10:
+                certs.append(m)
+    return certs[:5]
+
+
+def _extract_experience_years(exp_text: str) -> int:
+    """Extract years of experience from experience/work certificate text."""
+    import re
+    patterns = [
+        r'(\d+)\s*\+?\s*years?\s+(?:of\s+)?(?:work\s+)?experience',
+        r'experience\s*[:\s]+(\d+)\s*years?',
+        r'worked\s+(?:for\s+)?(\d+)\s*years?',
+        r'(\d{4})\s*[-–to]+\s*(\d{4})',  # date range
+    ]
+    for pat in patterns:
+        m = re.search(pat, exp_text, re.IGNORECASE)
+        if m:
+            if len(m.groups()) == 2:
+                # Date range — calculate years
                 try:
-                    app_obj.graduation_year = int(str(first.get("year")).strip())
-                    print(f"[enrich_profile] app={app_obj.id} SET graduation_year={app_obj.graduation_year}")
+                    return int(m.group(2)) - int(m.group(1))
                 except Exception:
                     pass
-        
-        # Skills enrichment
-        if not app_obj.skills and merged.get("skills"):
-            sk = merged.get("skills")
-            if isinstance(sk, list):
-                app_obj.skills = ", ".join([s for s in sk if s])
             else:
-                app_obj.skills = str(sk)
-            print(f"[enrich_profile] app={app_obj.id} SET skills={app_obj.skills}")
-        
-        # Certifications enrichment
-        if not app_obj.certifications and merged.get("certifications"):
-            certs = merged.get("certifications")
-            if isinstance(certs, list):
-                app_obj.certifications = ", ".join([c for c in certs if c])
-            else:
-                app_obj.certifications = str(certs)
-            print(f"[enrich_profile] app={app_obj.id} SET certifications={app_obj.certifications}")
-        
-        # Experience enrichment
-        if not app_obj.experience_years and merged.get("experience"):
-            exp = merged.get("experience") or []
-            if exp:
-                # Calculate total years from experience list
-                total_years = len(exp)  # Simple count, or could be more sophisticated
-                if total_years > 0:
-                    app_obj.experience_years = total_years
-                    print(f"[enrich_profile] app={app_obj.id} SET experience_years={app_obj.experience_years} (from {len(exp)} roles)")
-        
-    except Exception as e:
-        print(f"[enrich_profile] app={app_obj.id} error: {e!r}")
+                try:
+                    return min(int(m.group(1)), 40)
+                except Exception:
+                    pass
+    return 0
+
+
+def _enrich_app_profile_from_documents(app_obj: Application, docs: list, doc_texts: dict[str, str], user: User) -> None:
+    """
+    Enrich application profile using local OCR text only (no OpenRouter/AI API).
+    Extracts skills from CV text using keyword matching.
+    """
+    if not docs or not doc_texts:
+        return
+
+    cv_text = doc_texts.get("cv", "") or ""
+    exp_text = doc_texts.get("experience", "") or ""
+
+    # --- Extract education level and field from CV ---
+    if cv_text:
+        extracted_edu, extracted_field = _extract_education_from_cv(cv_text)
+        if extracted_edu and (not app_obj.education_level or app_obj.education_level in ("BA", "B.A.", "N/A", "")):
+            app_obj.education_level = extracted_edu
+            print(f"[enrich_profile] app={app_obj.id} SET education_level={extracted_edu}")
+        if extracted_field and (not app_obj.field_of_study or len((app_obj.field_of_study or '').strip()) < 3
+                                or (app_obj.field_of_study or '').lower() in ("degree", "n/a", "na", "none")):
+            app_obj.field_of_study = extracted_field
+            print(f"[enrich_profile] app={app_obj.id} SET field_of_study={extracted_field}")
+
+    # --- Extract skills from CV using keyword matching (no AI needed) ---
+    if cv_text and (not app_obj.skills or _is_ocr_garbage(app_obj.skills)):
+        extracted_skills = _extract_skills_from_cv(cv_text)
+        if extracted_skills:
+            app_obj.skills = ", ".join(extracted_skills[:20])
+            print(f"[enrich_profile] app={app_obj.id} SET skills from CV: {app_obj.skills[:80]}")
+
+    # --- Extract certifications from CV/certificate text ---
+    cert_text = doc_texts.get("certificate", "") or ""
+    if cert_text and (not app_obj.certifications or _is_ocr_garbage(app_obj.certifications)):
+        extracted_certs = _extract_certifications_from_text(cert_text + " " + cv_text)
+        if extracted_certs:
+            app_obj.certifications = ", ".join(extracted_certs[:10])
+            print(f"[enrich_profile] app={app_obj.id} SET certifications: {app_obj.certifications[:80]}")
+
+    # --- Extract experience years from experience document ---
+    if exp_text and not app_obj.experience_years:
+        years = _extract_experience_years(exp_text)
+        if years:
+            app_obj.experience_years = years
+            print(f"[enrich_profile] app={app_obj.id} SET experience_years={years}")
+
+    print(f"[enrich_profile] app={app_obj.id} enrichment complete (local OCR only)")
 
 
 def _extract_all_doc_texts(
@@ -783,177 +956,67 @@ def _safe_decision(decision_str: str) -> str:
 
 
 def _process_one_candidate(application_id: int, job_id: int) -> dict:
-    print(f"[shortlist_worker] STARTING for app={application_id} job={job_id}", flush=True)
-    import sys
-    sys.stderr.flush()
     if SessionLocal is None:
-        print(f"[shortlist_worker] SessionLocal unavailable!", flush=True)
         return {"application_id": application_id, "error": "SessionLocal unavailable"}
     db = SessionLocal()
     try:
         app_obj = db.query(Application).filter(Application.id == application_id).first()
         if not app_obj:
-            print(f"[shortlist_worker] app={application_id} not found", flush=True)
             return {"application_id": application_id, "error": "Application not found"}
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
-            print(f"[shortlist_worker] job={job_id} not found", flush=True)
             return {"application_id": application_id, "error": "Job not found"}
 
+        # Step 1: Load cached doc_texts from OCR result (fast — no re-OCR)
         doc_texts: dict[str, str] = {}
-        ocr_already_done = False
         stored_ocr_quality: float | None = None
-
         raw_ocr = getattr(app_obj, "ocr_result", None)
         if raw_ocr:
             try:
                 ocr_data = json.loads(raw_ocr)
                 stored_texts = ocr_data.get("doc_texts", {}) or {}
-                ocr_already_done = ocr_data.get("ocr_done", False)
                 stored_ocr_quality = ocr_data.get("ocr_quality_score", None)
-                has_real_text = any(isinstance(v, str) and v.strip() for v in stored_texts.values())
-                if has_real_text:
+                if any(isinstance(v, str) and v.strip() for v in stored_texts.values()):
                     doc_texts = stored_texts
-                else:
-                    ocr_already_done = False
-                    doc_texts = {}
             except Exception as exc:
-                print(f"[shortlist_worker] app={application_id} failed to parse ocr_result: {exc!r}")
-                doc_texts = {}
-                ocr_already_done = False
+                print(f"[shortlist_worker] app={application_id} ocr_result parse error: {exc!r}")
 
-        docs = db.query(Document).filter(Document.application_id == application_id).all()
-        user = db.query(User).filter(User.id == app_obj.applicant_id).first()
-        print(f"[shortlist_worker] app={application_id} found {len(docs)} documents", flush=True)
-
+        # Step 2: If no cached texts, run fresh OCR (only if needed)
         if not doc_texts:
-            print(f"[shortlist_worker] app={application_id} running fresh OCR extraction...", flush=True)
+            docs = db.query(Document).filter(Document.application_id == application_id).all()
             doc_texts = _extract_all_doc_texts(docs, budget_seconds=OCR_CANDIDATE_BUDGET_SECONDS)
-            print(f"[shortlist_worker] app={application_id} ran fresh OCR, got {len(doc_texts)} doc texts", flush=True)
-
-        # FIX-EXTRACTION-1: Enrich application profile with structured document extraction
-        # This ensures skills, education, field_of_study extracted from documents are used in scoring
-        print(f"[shortlist_worker] app={application_id} enriching profile from documents...", flush=True)
-        _enrich_app_profile_from_documents(app_obj, docs, doc_texts, user)
-        print(f"[shortlist_worker] app={application_id} profile enrichment complete: education_level={app_obj.education_level} field_of_study={app_obj.field_of_study} skills={app_obj.skills[:50] if app_obj.skills else 'None'}...", flush=True)
-
-        # Ensure any missing applicant profile fields are populated from OCR'd documents
-        # FIX: Use OCR texts we already have instead of expensive AI extraction
-        try:
-            missing_profile = (
-                not app_obj.education_level
-                or not app_obj.field_of_study
-                or not app_obj.skills
-                or not app_obj.certifications
-            )
-            if missing_profile and doc_texts:
-                print(f"[shortlist_worker] app={application_id} populating profile from OCR texts ({len(doc_texts)} docs)...", flush=True)
-                # Extract profile info from OCR texts using simple heuristics
-                all_ocr_text = " ".join(doc_texts.values()).lower()
-                
-                # Try to find education level keywords
-                if not app_obj.education_level:
-                    if "bachelor" in all_ocr_text or "b.sc" in all_ocr_text or "b.s" in all_ocr_text:
-                        app_obj.education_level = "Bachelor"
-                    elif "master" in all_ocr_text or "m.sc" in all_ocr_text or "m.s" in all_ocr_text:
-                        app_obj.education_level = "Master"
-                    elif "phd" in all_ocr_text or "doctorate" in all_ocr_text:
-                        app_obj.education_level = "PhD"
-                    elif "diploma" in all_ocr_text or "hnd" in all_ocr_text:
-                        app_obj.education_level = "Diploma"
-                    elif "certificate" in all_ocr_text:
-                        app_obj.education_level = "Certificate"
-                
-                # Try to find field of study keywords
-                if not app_obj.field_of_study:
-                    fields = ["computer science", "information technology", "software engineering", "engineering", 
-                             "business", "finance", "accounting", "management", "marketing", "communications"]
-                    for field in fields:
-                        if field in all_ocr_text:
-                            app_obj.field_of_study = field.title()
-                            break
-                
-                # Extract skills and certifications from document types and keywords
-                if not app_obj.skills:
-                    skills_found = []
-                    skill_keywords = ["python", "java", "javascript", "c++", "sql", "html", "css", "react", "angular", 
-                                     "node", "django", "flask", "kubernetes", "docker", "git", "linux", "windows",
-                                     "aws", "azure", "gcp", "machine learning", "data analysis", "excel", "powerpoint"]
-                    for skill in skill_keywords:
-                        if skill in all_ocr_text:
-                            skills_found.append(skill.title())
-                    if skills_found:
-                        app_obj.skills = ", ".join(skills_found[:10])  # Limit to 10 skills
-                
-                # Extract certifications
-                if not app_obj.certifications:
-                    certs_found = []
-                    cert_keywords = ["aws", "azure", "gcp", "ccna", "cissp", "cpa", "pmp", "scrum", "comptia", "certified"]
-                    for cert in cert_keywords:
-                        if cert in all_ocr_text:
-                            certs_found.append(cert.upper())
-                    if certs_found:
-                        app_obj.certifications = ", ".join(certs_found[:5])  # Limit to 5 certs
-                
-                if db.is_active:
-                    db.add(app_obj)
-                    db.commit()
-                    print(f"[shortlist_worker] app={application_id} populated profile fields from OCR texts", flush=True)
-        except Exception as exc:
-            print(f"[shortlist_worker] app={application_id} profile extraction error: {exc!r}", flush=True)
-
-
-
-        # FIX-MAIN-1: Build real document_paths so doc_check_ran=True inside predict()
-        VERIFIABLE_TYPES = {"id_card", "cv", "diploma", "certificate", "experience"}
-        document_paths: list[str] = []
-        declared_types: list[str] = []
-        for doc in docs:
-            dtype = _doc_type_value(doc)
-            if dtype in VERIFIABLE_TYPES and os.path.exists(doc.file_path):
-                document_paths.append(doc.file_path)
-                declared_types.append(dtype)
-
-        print(f"[shortlist_worker] app={application_id} calling predict with {len(document_paths)} documents...", flush=True)
-        # FIX: Previously the worker skipped running full document verification
-        # (SKIP_DOC_VERIFICATION_IN_WORKER=True) to avoid external API timeouts.
-        # That caused document-based mismatches to be ignored and allowed false
-        # shortlists. Enable verification here so `predict()` receives real
-        # `document_paths` and `declared_types` (external timeouts should be
-        # handled inside `verify_documents`). If runtime issues occur we can
-        # reintroduce a configurable env var to toggle this.
-        SKIP_DOC_VERIFICATION_IN_WORKER = False
-        
-        if ocr_already_done:
-            decision, score, reason_json, doc_result = _call_predict(
-                app_obj, job,
-                doc_texts=doc_texts if doc_texts else None,
-                document_paths=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (document_paths if document_paths else None),
-                declared_types=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (declared_types if declared_types else None),
-                ocr_quality_score=stored_ocr_quality,
-            )
+            print(f"[shortlist_worker] app={application_id} fresh OCR: {list(doc_texts.keys())}")
         else:
-            decision, score, reason_json, doc_result = _call_predict(
-                app_obj, job,
-                doc_texts=doc_texts if doc_texts else None,
-                document_paths=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (document_paths if document_paths else None),
-                declared_types=[] if SKIP_DOC_VERIFICATION_IN_WORKER else (declared_types if declared_types else None),
-                ocr_quality_score=stored_ocr_quality,
-            )
-            if not doc_result.get("verified"):
-                doc_result["verified"] = bool(getattr(app_obj, "doc_verified", False))
-            print(f"[shortlist_worker] app={application_id} using upload-time doc_verified={doc_result['verified']}")
-        print(f"[shortlist_worker] app={application_id} predict completed with decision={decision}", flush=True)
-        # FIX-DECISION-1: Normalize decision before setting enum to avoid ValueError crash
-        safe_dec = _safe_decision(decision)
-        if safe_dec != decision:
-            print(f"[shortlist_worker] app={application_id} decision '{decision}' mapped to '{safe_dec}'")
+            docs = db.query(Document).filter(Document.application_id == application_id).all()
 
+        # Step 3: Enrich profile (education, skills, field) from CV text
+        user = db.query(User).filter(User.id == app_obj.applicant_id).first()
+        _enrich_app_profile_from_documents(app_obj, docs, doc_texts, user)
+        try:
+            db.add(app_obj)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # Step 4: Run ML shortlisting — pass doc_texts but NOT document_paths
+        # (document_paths would trigger slow re-verification; upload-time checks are sufficient)
+        decision, score, reason_json, doc_result = _call_predict(
+            app_obj, job,
+            doc_texts=doc_texts if doc_texts else None,
+            document_paths=None,
+            declared_types=None,
+            ocr_quality_score=stored_ocr_quality,
+        )
+        # Preserve upload-time doc_verified flag
+        if not doc_result.get("verified"):
+            doc_result["verified"] = bool(getattr(app_obj, "doc_verified", False))
+
+        # Step 5: Save result
+        safe_dec = _safe_decision(decision)
         app_obj.decision       = DecisionStatus(safe_dec)
         app_obj.ai_score       = round(score, 4) if score is not None else None
         app_obj.ai_reason      = reason_json
-        doc_verified_final = doc_result.get("verified", False) or bool(getattr(app_obj, "doc_verified", False))
-        app_obj.doc_verified   = doc_verified_final
+        app_obj.doc_verified   = doc_result.get("verified", False) or bool(getattr(app_obj, "doc_verified", False))
         app_obj.doc_advisory   = doc_result.get("advisory", False)
         app_obj.shortlisted_at = datetime.now(timezone.utc)
         db.add(app_obj)
@@ -962,15 +1025,12 @@ def _process_one_candidate(application_id: int, job_id: int) -> dict:
         score_str = f"{score:.3f}" if score is not None else "N/A"
         print(f"[shortlist_worker] app={application_id} -> {safe_dec} score={score_str}")
 
-        # NOTE: Email sending now deferred to publish endpoint -- results are NOT auto-published.
-        # HR must manually publish results from the dashboard, which will then trigger email notifications.
-
         return {
             "application_id": application_id,
             "decision":       safe_dec,
             "score":          score,
-            "doc_verified":   doc_result.get("verified", False),
-            "doc_advisory":   doc_result.get("advisory", False),
+            "doc_verified":   app_obj.doc_verified,
+            "doc_advisory":   app_obj.doc_advisory,
         }
     except HTTPException as exc:
         try: db.rollback()
@@ -1043,10 +1103,8 @@ def _run_shortlist_all(job_id: int) -> None:
     not_shortlisted_count = 0
     error_count           = 0
 
-    # FIX-STABILITY-1: Reduced to 2 parallel workers (was 3).
-    # Each worker opens its own DB connection + fires an OpenRouter API call.
-    # More workers = more simultaneous I/O = more timeout-induced crashes.
-    PARALLEL_WORKERS = 2
+    # Process 3 candidates in parallel — fast since no external API calls
+    PARALLEL_WORKERS = 3
 
     def _worker(args):
         idx, app_id, cname = args
@@ -3002,9 +3060,15 @@ def publish_shortlisting_results(
     email_errors = []
     
     now = datetime.now(timezone.utc)
+    print(f"[publish_results] Publishing {len(apps_to_publish)} results for job={job_id}")
     
     for app, user in apps_to_publish:
-        if not user or not user.email:
+        if not user:
+            print(f"[publish_results] Skipping application {app.id}: missing user record")
+            continue
+        if not user.email:
+            print(f"[publish_results] Skipping application {app.id} for {user.full_name or 'unknown'}: missing email")
+            email_errors.append(f"{user.full_name or 'unknown'}: missing email")
             continue
         
         decision = _decision_value(app)
@@ -3025,7 +3089,7 @@ def publish_shortlisting_results(
         
         # Send result email
         try:
-            send_shortlisting_result_email(
+            email_sent = send_shortlisting_result_email(
                 user.full_name or user.email.split("@")[0],
                 user.email,
                 job_title,
@@ -3033,12 +3097,17 @@ def publish_shortlisting_results(
                 score,
                 reason_summary,
             )
-            print(f"[publish_results] Result email sent to {user.email} ({decision})")
+            if email_sent:
+                print(f"[publish_results] Result email sent to {user.email} ({decision})")
+            else:
+                raise RuntimeError("Email API returned failure")
         except Exception as e:
             print(f"[publish_results] Email send failed for {user.email}: {e!r}")
             email_errors.append(f"{user.email}: {str(e)}")
+            # Do not mark as published when email delivery failed so the attempt can be retried.
+            continue
         
-        # Mark as published
+        # Mark as published only after successful email send
         app.published_at = now
         db.add(app)
         published_count += 1
@@ -3704,29 +3773,17 @@ def support_chatbot(
         raise HTTPException(status_code=400, detail="Question must be at least 3 characters.")
 
     answer = None
-    try:
-        from openrouter_client import chat_completion
-        
-        system_prompt = """You are a helpful AI assistant for an AI-powered job shortlisting platform. 
-Only answer questions that are directly related to the platform system and its features. You may answer questions about:
-- Registration and account creation
-- Login and password reset
-- Job applications and applying for positions
-- Document uploads and profile management
-- Shortlisting results and feedback
-- General platform usage
-
-If a question is not related to the system, politely refuse and say: 'I can only answer questions about the platform. Please ask about registration, login, applications, document uploads, shortlisting, or other platform functionality, or contact support for other issues.'"""
-
-        answer = chat_completion(
-            messages=[{"role": "user", "content": question}],
-            system_prompt=system_prompt,
-            max_tokens=500,
-            temperature=0.5,
-        )
-    except Exception as exc:
-        print(f"[chatbot]  OpenRouter error: {exc!r}")
-        # Fallback: provide helpful response based on keywords
+    question_lower = question.lower()
+    if any(word in question_lower for word in ['login', 'password', 'forgot']):
+        answer = "To log in:\n1. Go to the login page\n2. Enter your email and password\n3. Click 'Sign In'\n\nForgot your password? Click 'Forgot Password' on the login page to reset it. You'll receive an email with a reset link."
+    elif any(word in question_lower for word in ['register', 'sign up', 'create account']):
+        answer = "To register:\n1. Click 'Register' on the homepage\n2. Fill in your details (name, email, role, etc.)\n3. Create a secure password\n4. Check your email for a confirmation link\n5. You'll receive an auto-generated password via email\n\nYour account will be ready to use immediately!"
+    elif any(word in question_lower for word in ['apply', 'application', 'job']):
+        answer = "To apply for a job:\n1. Go to 'My Applications'\n2. Browse available positions\n3. Click 'Apply Now' on a job\n4. Upload your documents (CV, certificates, etc.)\n5. Your profile documents auto-attach to your application\n6. Submit and wait for results\n\nYou'll receive email updates on your application status."
+    elif any(word in question_lower for word in ['document', 'upload', 'profile']):
+        answer = "To manage your documents:\n1. Go to 'My Profile'\n2. Click 'Upload Document' or 'Manage Documents'\n3. Add your CV, certificates, and other files\n4. These documents automatically attach to your applications\n\nMake sure to keep them updated!"
+    else:
+        answer = "I can only answer questions about the platform. Please ask about registration, login, applications, document uploads, shortlisting, or other system features. For anything else, contact support."
         question_lower = question.lower()
         if any(word in question_lower for word in ['login', 'password', 'forgot']):
             answer = "To log in:\n1. Go to the login page\n2. Enter your email and password\n3. Click 'Sign In'\n\nForgot your password? Click 'Forgot Password' on the login page to reset it. You'll receive an email with a reset link."

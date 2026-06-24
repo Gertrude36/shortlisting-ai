@@ -1,0 +1,302 @@
+[
+  {
+    "file_name": "08d4f73d55f048e7b19e7554728708f3.jpg",
+    "extraction_method": "ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 316,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(42) REPUBULIKA YU RWANDA HRN\n\nREPUBLIC OF RWANDA =\n\nNATIONAL IDENTITY CARD\nAmazina / Names\n_IRIMASO Gertrude\n\nItarikt yavutseho / Date of Birth\n28/02/2003\n\nlgitsina/ Sex _ Aho Yatangiwe / Place of-Is"
+  },
+  {
+    "file_name": "0ebc47ccd7a6494299f92805daec8c3c.pdf",
+    "extraction_method": "pymupdf_local_ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 452,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "â Examination Portal\n\nD Headteacher In Ch of Question No. Remaining exam time Remaining additional time [ supmite\nSantos Headieacher In Charge (10/50)  02H:29Min:09Sec | 00H:00Min:00Sec submit’\n\nQ10./"
+  },
+  {
+    "file_name": "119668ddad6c48b3b4262f1349597f75.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 515,
+    "has_education": true,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "ETEN\nP.O Box 164, Kigali, ;\nWebsite: wwwrp.aci\n“ foer\n\nRWANDA POLYTECHNIC\n\nMe eat\nce — oa mat\nTECHN r GY\nSe Oa\n“\n\n; satisfied the requi\n\nED DIPLOMA IN INFORMATIO\n\nMUNICATION TECH\n\n_ First Class\n\nMDBPO"
+  },
+  {
+    "file_name": "2a48bbb838a648ea99f0c5c508afaab1.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 709,
+    "has_education": true,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "P.O Box 164, Kigali\nWebsite: www.rp.ac.rw ij\nEmailinfo@rpac.rw É\n\nRWANDA POLYTECHNIC\n\nSkills for a better destiny\n\nThis is to certify that\n\nIRIMASO Gertrude\n\nHaving satisfied the requirements for the "
+  },
+  {
+    "file_name": "2b0e375dff374f9781cab52a2b15e78a.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 709,
+    "has_education": true,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "P.O Box 164, Kigali\nWebsite: www.rp.ac.rw ij\nEmailinfo@rpac.rw É\n\nRWANDA POLYTECHNIC\n\nSkills for a better destiny\n\nThis is to certify that\n\nIRIMASO Gertrude\n\nHaving satisfied the requirements for the "
+  },
+  {
+    "file_name": "38961a90bda44dcbb4708bed232ad657.pdf",
+    "extraction_method": "pdfplumber+local",
+    "document_type": "unknown",
+    "raw_text_len": 2242,
+    "has_education": true,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "CURRICULUM VITAE\nIDENTIFICATION\n• Names : MWISENEZA Isaac\n• Address of residence : Rwanda\nNorthern Province\nBurera District\nEmail: mwisenezaisaac@gmail.com\nTel.: 0780004978/0799357002\n• Date of birth "
+  },
+  {
+    "file_name": "3d2778c4e2b1413f8988dd2aea366d2b.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 586,
+    "has_education": false,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "RWANDA POLY TECHNIC\n\nSkills for a better destiny\n\nbm:\n\nThis is to certify that\n\nNDAGIWENIMANA Jean Claude\n\nHaving satisfied the requirements for the award of\n\nBACHELOR OF TECHNOLOGY IN ELECTRICAL\nAND "
+  },
+  {
+    "file_name": "45c6850b44f642e3a9701552cac02099.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 568,
+    "has_education": true,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "/ P O Box 164, Kigali\nWebsite: www.rp.acew\n/ Emailinfo@rp.acrw\n\nRWANDA POLYTECHNIC\n\nSkills for a better destiny\n\nThis is to certify that\n\nMUKANYAMWASA Marie Madeleine\n\nHaving satisfied the requirement"
+  },
+  {
+    "file_name": "56ce00cd9e6044759897034eb1e738da.pdf",
+    "extraction_method": "pdfplumber_raw",
+    "document_type": "unknown",
+    "raw_text_len": 1824,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "CURRICULUM VITAE(CV)\nPERSONAL IDENTIFICATION\nMUKANYAMWASA M.Madeleine\nNationality: RWANDA\nSourth Province\nNyaruguru District\nMunini Sector\nTelephone:0783012568\nG-mail:maderenemukanyamwasa@gmail.com\nGe"
+  },
+  {
+    "file_name": "59a3a3c43ae6467fb3bc3ed106272562.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 243,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "Certificate of Graduation\n\nTHIS IS TO CERTIFY THAT\n\nIRIMASO Gertrude\n\ncompleted the required studies\nGeneral English\ncourse\nEF Level 8 - Intermediate - CEFR Level B1\nawded\n\n11/07/2025\n\nEducation First"
+  },
+  {
+    "file_name": "610938f566074e12a42b44a15d802a46.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 515,
+    "has_education": true,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "ETEN\nP.O Box 164, Kigali, ;\nWebsite: wwwrp.aci\n“ foer\n\nRWANDA POLYTECHNIC\n\nMe eat\nce — oa mat\nTECHN r GY\nSe Oa\n“\n\n; satisfied the requi\n\nED DIPLOMA IN INFORMATIO\n\nMUNICATION TECH\n\n_ First Class\n\nMDBPO"
+  },
+  {
+    "file_name": "64c72f769bad4f8e81338e990582e6b2.pdf",
+    "extraction_method": "pdfplumber+local",
+    "document_type": "unknown",
+    "raw_text_len": 431,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "REPUBLIC OF RWANDA\nGISAGARA DISTRICT\nWORK CERTIFICATE\nThis is to certify that Ms. Gertrude IRIMASO is Permanent Civil Servant in the as IT technician (A1) from\n8th September 2025 to date.\nThis certifi"
+  },
+  {
+    "file_name": "67ce130b2ecd43a8acfb50f50290e829.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 243,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "Certificate of Graduation\n\nTHIS IS TO CERTIFY THAT\n\nIRIMASO Gertrude\n\ncompleted the required studies\nGeneral English\ncourse\nEF Level 8 - Intermediate - CEFR Level B1\nawded\n\n11/07/2025\n\nEducation First"
+  },
+  {
+    "file_name": "6928c4aae1524ed78842d5a98f57204d.jpg",
+    "extraction_method": "ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 316,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(42) REPUBULIKA YU RWANDA HRN\n\nREPUBLIC OF RWANDA =\n\nNATIONAL IDENTITY CARD\nAmazina / Names\n_IRIMASO Gertrude\n\nItarikt yavutseho / Date of Birth\n28/02/2003\n\nlgitsina/ Sex _ Aho Yatangiwe / Place of-Is"
+  },
+  {
+    "file_name": "7d76c6fd729b408b977f21624a5fe8c1.pdf",
+    "extraction_method": "pdfplumber_raw",
+    "document_type": "unknown",
+    "raw_text_len": 1824,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "CURRICULUM VITAE(CV)\nPERSONAL IDENTIFICATION\nMUKANYAMWASA M.Madeleine\nNationality: RWANDA\nSourth Province\nNyaruguru District\nMunini Sector\nTelephone:0783012568\nG-mail:maderenemukanyamwasa@gmail.com\nGe"
+  },
+  {
+    "file_name": "7dcd4e920f8542fb96a9acdb9dcbda58.pdf",
+    "extraction_method": "pymupdf_local_ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 96,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(:) REPUBULIKA Y'U RWANDA\n~ REPUBLIC OF R\n\nIndangamuntu / National ID No. 1 2003 7 0173783 0 25\n"
+  },
+  {
+    "file_name": "a56305a9e4bc407ab1717da624d6bb14.pdf",
+    "extraction_method": "pymupdf_local_ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 174,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "ltariki yavutseho / Date of Birth\n\nlgitsina / Sex >:o<â\\3uooo:8co\n.\\noî; MUHANGA/KIBANGU —\n\nUmukono wa a! Signature an.\n\nindangamuntu / National ID No. 1 2003 7 0173783 0 25\n"
+  },
+  {
+    "file_name": "a75c68ac4c794857898e9cbcffc7d5c0.pdf",
+    "extraction_method": "pymupdf_local_ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 96,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(:) REPUBULIKA Y'U RWANDA\n~ REPUBLIC OF R\n\nIndangamuntu / National ID No. 1 2003 7 0173783 0 25\n"
+  },
+  {
+    "file_name": "b0dfbcf5394d4448a3901fab76787a58.pdf",
+    "extraction_method": "pymupdf_local_ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 0,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": ""
+  },
+  {
+    "file_name": "b14065ff89b842a3beefc0314eb3e4ff.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 586,
+    "has_education": false,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "RWANDA POLY TECHNIC\n\nSkills for a better destiny\n\nbm:\n\nThis is to certify that\n\nNDAGIWENIMANA Jean Claude\n\nHaving satisfied the requirements for the award of\n\nBACHELOR OF TECHNOLOGY IN ELECTRICAL\nAND "
+  },
+  {
+    "file_name": "b6b075a5ef494df58488935b395dbf7d.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 243,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "Certificate of Graduation\n\nTHIS IS TO CERTIFY THAT\n\nIRIMASO Gertrude\n\ncompleted the required studies\nGeneral English\ncourse\nEF Level 8 - Intermediate - CEFR Level B1\nawded\n\n11/07/2025\n\nEducation First"
+  },
+  {
+    "file_name": "ccd2421e40f84173b4f92283c8628cd9.jpg",
+    "extraction_method": "ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 316,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(42) REPUBULIKA YU RWANDA HRN\n\nREPUBLIC OF RWANDA =\n\nNATIONAL IDENTITY CARD\nAmazina / Names\n_IRIMASO Gertrude\n\nItarikt yavutseho / Date of Birth\n28/02/2003\n\nlgitsina/ Sex _ Aho Yatangiwe / Place of-Is"
+  },
+  {
+    "file_name": "d035b7275251457e83b5d63552bb33fa.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 586,
+    "has_education": false,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "RWANDA POLY TECHNIC\n\nSkills for a better destiny\n\nbm:\n\nThis is to certify that\n\nNDAGIWENIMANA Jean Claude\n\nHaving satisfied the requirements for the award of\n\nBACHELOR OF TECHNOLOGY IN ELECTRICAL\nAND "
+  },
+  {
+    "file_name": "d512293a2fc2481d8329e233359dd0b1.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 243,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "Certificate of Graduation\n\nTHIS IS TO CERTIFY THAT\n\nIRIMASO Gertrude\n\ncompleted the required studies\nGeneral English\ncourse\nEF Level 8 - Intermediate - CEFR Level B1\nawded\n\n11/07/2025\n\nEducation First"
+  },
+  {
+    "file_name": "d6efe50ff7974f62999249a6a573b1c6.pdf",
+    "extraction_method": "pdfplumber+local",
+    "document_type": "unknown",
+    "raw_text_len": 1943,
+    "has_education": true,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "CURRICULUM VITAE\nPERSONAL INFORMATION\n• Full Name: IRIMASO Gertrude\n• Date of Birth: 28-02-2003\n• Gender: Female\n• Marital Status: Single\n• Nationality: Rwandan\nADDRESS\n• Southern Province\n• Muhanga D"
+  },
+  {
+    "file_name": "dd4fefcf501a479babd1d119680c103f.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 568,
+    "has_education": true,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "/ P O Box 164, Kigali\nWebsite: www.rp.acew\n/ Emailinfo@rp.acrw\n\nRWANDA POLYTECHNIC\n\nSkills for a better destiny\n\nThis is to certify that\n\nMUKANYAMWASA Marie Madeleine\n\nHaving satisfied the requirement"
+  },
+  {
+    "file_name": "e48481b512eb4f81bea7d8f19a075a62.jpg",
+    "extraction_method": "ocr_raw",
+    "document_type": "unknown",
+    "raw_text_len": 316,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "(42) REPUBULIKA YU RWANDA HRN\n\nREPUBLIC OF RWANDA =\n\nNATIONAL IDENTITY CARD\nAmazina / Names\n_IRIMASO Gertrude\n\nItarikt yavutseho / Date of Birth\n28/02/2003\n\nlgitsina/ Sex _ Aho Yatangiwe / Place of-Is"
+  },
+  {
+    "file_name": "e8fb778ec51d4009b4444c74cedd6863.pdf",
+    "extraction_method": "pdfplumber+local",
+    "document_type": "unknown",
+    "raw_text_len": 1943,
+    "has_education": true,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "CURRICULUM VITAE\nPERSONAL INFORMATION\n• Full Name: IRIMASO Gertrude\n• Date of Birth: 28-02-2003\n• Gender: Female\n• Marital Status: Single\n• Nationality: Rwandan\nADDRESS\n• Southern Province\n• Muhanga D"
+  },
+  {
+    "file_name": "f3ec04b094b0494aa8c992a8faef6d07.pdf",
+    "extraction_method": "pdfplumber+local",
+    "document_type": "unknown",
+    "raw_text_len": 431,
+    "has_education": false,
+    "has_skills": false,
+    "error": null,
+    "raw_text_preview": "REPUBLIC OF RWANDA\nGISAGARA DISTRICT\nWORK CERTIFICATE\nThis is to certify that Ms. Gertrude IRIMASO is Permanent Civil Servant in the as IT technician (A1) from\n8th September 2025 to date.\nThis certifi"
+  },
+  {
+    "file_name": "f418566245764261963990a15b35d81e.pdf",
+    "extraction_method": "pymupdf_local_ocr",
+    "document_type": "unknown",
+    "raw_text_len": 586,
+    "has_education": false,
+    "has_skills": true,
+    "error": null,
+    "raw_text_preview": "RWANDA POLY TECHNIC\n\nSkills for a better destiny\n\nbm:\n\nThis is to certify that\n\nNDAGIWENIMANA Jean Claude\n\nHaving satisfied the requirements for the award of\n\nBACHELOR OF TECHNOLOGY IN ELECTRICAL\nAND "
+  }
+]
